@@ -1,5 +1,5 @@
 ﻿
-import { useState, useEffect, useMemo, useRef, useCallback, startTransition } from 'react';
+import { useState, useEffect, useMemo, useRef, useCallback, startTransition, forwardRef, useImperativeHandle } from 'react';
 import {
   DndContext,
   useSensors,
@@ -84,9 +84,16 @@ import { generatePDFReport } from '../../services/reportService';
 import { generateExcelReport } from '../../services/excelService';
 import ZoneList from './ZoneList';
 
-export default function LoadCalculator({ project, userProfile, onNavigate }: { project: any, userProfile: any, onNavigate?: (id: string) => void }) {
+export type LoadCalculatorHandle = {
+  saveAllDirty: () => Promise<void>;
+};
+
+const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProfile: any; onNavigate?: (id: string) => void; onUnsavedChangesChange?: (has: boolean) => void }>(
+  function LoadCalculator({ project, userProfile, onNavigate, onUnsavedChangesChange }, ref) {
   const analysisBackfillDoneRef = useRef<Set<string>>(new Set());
   const oaFacphMigrationDoneRef = useRef<Set<string>>(new Set());
+  const backfillRunningRef = useRef(false);
+  const migrationRunningRef = useRef(false);
   const legacyDefaultOaFacph = Number(project?.legacyDefaultOaFacph ?? project?.data?.legacyDefaultOaFacph ?? 1.5);
 
   const normalizeRoom = (r: any): Room => {
@@ -160,6 +167,7 @@ export default function LoadCalculator({ project, userProfile, onNavigate }: { p
   const [applyToAllZones, setApplyToAllZones] = useState(false);
   const [roomSaveStates, setRoomSaveStates] = useState<Record<string, 'idle' | 'saving' | 'saved'>>({});
   const [roomDraftOverrides, setRoomDraftOverrides] = useState<Record<string, Record<string, Partial<Room>>>>({});
+  const [envelopeDraftsByRoom, setEnvelopeDraftsByRoom] = useState<Record<string, EnvelopeElement[]>>({});
   const [zoneConditionDraftOverrides, setZoneConditionDraftOverrides] = useState<Record<string, Partial<Zone>>>({});
   const [systemConditionDraftOverrides, setSystemConditionDraftOverrides] = useState<Record<string, Partial<HVACSystem>>>({});
   const [projectPsychroOpen, setProjectPsychroOpen] = useState(false);
@@ -189,8 +197,9 @@ export default function LoadCalculator({ project, userProfile, onNavigate }: { p
   const insideWinterTemp = project.insideWinterTemp ?? (project.data?.insideWinterTemp ?? 72);
   const insideWinterHumidity = project.insideWinterHumidity ?? (project.data?.insideWinterHumidity ?? 40);
 
-  // Default design conditions for calculations
-  const defaultDesignConditions = {
+  // Default design conditions for calculations — memoised so downstream
+  // useMemo/useEffect deps don't fire on every render.
+  const defaultDesignConditions = useMemo(() => ({
     outdoorTemp: summerDesignTemp,
     indoorTemp: insideSummerTemp,
     outdoorHumidity: summerDesignHumidity,
@@ -202,7 +211,11 @@ export default function LoadCalculator({ project, userProfile, onNavigate }: { p
     winterOutdoorHumidity: winterDesignHumidity,
     winterIndoorTemp: insideWinterTemp,
     winterIndoorHumidity: insideWinterHumidity,
-  };
+  }), [
+    summerDesignTemp, insideSummerTemp, summerDesignHumidity, insideSummerHumidity,
+    projectAltitude, projectLatitude, projectLongitude,
+    winterDesignTemp, winterDesignHumidity, insideWinterTemp, insideWinterHumidity,
+  ]);
 
   const getRoomRef = (zoneId: string, roomId: string, systemId?: string) => {
     if (isVRF && systemId) {
@@ -295,10 +308,96 @@ export default function LoadCalculator({ project, userProfile, onNavigate }: { p
     return byId;
   }, [liveZones, liveSystems]);
 
+  const liveEnvelopeElements = useMemo(() => {
+    if (Object.keys(envelopeDraftsByRoom).length === 0) return envelopeElements;
+    return { ...envelopeElements, ...envelopeDraftsByRoom };
+  }, [envelopeElements, envelopeDraftsByRoom]);
+
+  const handleEnvelopeDraftChange = useCallback((roomId: string, draft: EnvelopeElement[] | null) => {
+    setEnvelopeDraftsByRoom(prev => {
+      if (!draft) {
+        const next = { ...prev };
+        delete next[roomId];
+        return next;
+      }
+      return { ...prev, [roomId]: draft };
+    });
+  }, []);
+
   const handleZoneConditionDraftsChange = useCallback((zoneDrafts: Record<string, Partial<Zone>>, systemDrafts: Record<string, Partial<HVACSystem>>) => {
     setZoneConditionDraftOverrides(zoneDrafts);
     setSystemConditionDraftOverrides(systemDrafts);
   }, []);
+
+  // ── Unsaved-changes guard ─────────────────────────────────────────────────
+
+  const hasUnsavedChanges =
+    Object.keys(roomDraftOverrides).length > 0 ||
+    Object.keys(envelopeDraftsByRoom).length > 0;
+
+  useEffect(() => {
+    onUnsavedChangesChange?.(hasUnsavedChanges);
+  }, [hasUnsavedChanges, onUnsavedChangesChange]);
+
+  // Always-current ref so useImperativeHandle's closure never goes stale
+  const saveAllDirtyRef = useRef<() => Promise<void>>(async () => {});
+  saveAllDirtyRef.current = async () => {
+    // Save room parameter drafts
+    for (const [zoneId, zoneDrafts] of Object.entries(roomDraftOverrides)) {
+      const zone = zones.find((z) => z.id === zoneId);
+      const systemId: string | undefined = zone?.systemId
+        ? (zone.systemId as string)
+        : systems.find((s) => s.id === zoneId)
+          ? zoneId
+          : undefined;
+      for (const [roomId, draft] of Object.entries(zoneDrafts)) {
+        await updateRoom(zoneId, roomId, draft, systemId);
+      }
+    }
+
+    // Save envelope element drafts
+    for (const [roomId, draftElements] of Object.entries(envelopeDraftsByRoom)) {
+      let zoneId: string | undefined;
+      for (const [zid, zoneRooms] of Object.entries(rooms)) {
+        if ((zoneRooms as Room[]).some((r) => r.id === roomId)) { zoneId = zid; break; }
+      }
+      if (!zoneId) continue;
+
+      const zone = zones.find((z) => z.id === zoneId);
+      const systemId: string | undefined = zone?.systemId
+        ? (zone.systemId as string)
+        : systems.find((s) => s.id === zoneId)
+          ? zoneId
+          : undefined;
+
+      const committed = envelopeElements[roomId] || [];
+      const committedIds = new Set(committed.map((e) => e.id));
+      const draftIds = new Set(draftElements.map((e) => e.id));
+      const deleted = committed.filter((e) => !draftIds.has(e.id)).map((e) => e.id);
+      const added = draftElements
+        .filter((e) => e.id.startsWith('draft_'))
+        .map(({ id: _t, ...rest }) => rest as Omit<EnvelopeElement, 'id'>);
+      const updated: Array<{ id: string; data: Partial<EnvelopeElement> }> = [];
+      for (const el of draftElements) {
+        if (!el.id.startsWith('draft_') && committedIds.has(el.id)) {
+          const base = committed.find((c) => c.id === el.id)!;
+          const { id: _a, ...elData } = el;
+          const { id: _b, ...baseData } = base;
+          if (JSON.stringify(elData) !== JSON.stringify(baseData)) updated.push({ id: el.id, data: elData });
+        }
+      }
+      if (deleted.length + added.length + updated.length > 0) {
+        await saveEnvelopeChanges(zoneId, roomId, systemId, { deleted, added, updated });
+      }
+    }
+
+    setRoomDraftOverrides({});
+    setEnvelopeDraftsByRoom({});
+  };
+
+  useImperativeHandle(ref, () => ({
+    saveAllDirty: () => saveAllDirtyRef.current(),
+  }), []);
 
   const persistRoomAnalysisSnapshot = async (
     zoneId: string,
@@ -570,7 +669,7 @@ export default function LoadCalculator({ project, userProfile, onNavigate }: { p
       };
 
       for (const room of (zoneRooms as any[])) {
-        const elements = (envelopeElements[room.id] || []) as EnvelopeElement[];
+        const elements = (liveEnvelopeElements[room.id] || []) as EnvelopeElement[];
         const summerSnapshot = calculateCoolingSnapshot(room, elements, zoneSummerDc);
         const heatingSnapshot = calculateCoolingSnapshot(room, elements, zoneHeatingDc);
 
@@ -633,7 +732,7 @@ export default function LoadCalculator({ project, userProfile, onNavigate }: { p
     };
   }, [
     liveRooms,
-    envelopeElements,
+    liveEnvelopeElements,
     defaultDesignConditions,
     project?.systemType,
     liveZoneOrSystemById,
@@ -724,18 +823,25 @@ export default function LoadCalculator({ project, userProfile, onNavigate }: { p
 
   useEffect(() => {
     if (dataLoading) return;
+    if (backfillRunningRef.current) return;
+
+    const currentRooms = rooms;
+    const currentZones = zones;
+    const currentElements = envelopeElements;
 
     const backfillAnalysis = async () => {
+      backfillRunningRef.current = true;
       try {
-        for (const [zoneId, zoneRooms] of Object.entries(rooms)) {
-          const zone = zones.find((z) => z.id === zoneId);
+        for (const [zoneId, zoneRooms] of Object.entries(currentRooms)) {
+          const zone = currentZones.find((z) => z.id === zoneId);
           const systemId = zone?.systemId;
           for (const room of zoneRooms as Room[]) {
             const key = `${zoneId}:${room.id}`;
             if (!analysisBackfillDoneRef.current.has(key) && !room.analysis) {
               try {
-                await persistRoomAnalysisSnapshot(zoneId, room.id, systemId, room, envelopeElements[room.id] || []);
+                await persistRoomAnalysisSnapshot(zoneId, room.id, systemId, room, currentElements[room.id] || []);
                 analysisBackfillDoneRef.current.add(key);
+                await new Promise(r => setTimeout(r, 150));
               } catch (error: any) {
                 const msg = String(error?.message || '');
                 if (msg.includes('No document to update')) {
@@ -749,20 +855,29 @@ export default function LoadCalculator({ project, userProfile, onNavigate }: { p
         }
       } catch (error) {
         console.error('[LoadCalculator] Failed to backfill room analysis:', error);
+      } finally {
+        backfillRunningRef.current = false;
       }
     };
 
     backfillAnalysis();
-  }, [dataLoading, rooms, zones, envelopeElements]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dataLoading]);
 
   useEffect(() => {
     if (dataLoading) return;
+    if (migrationRunningRef.current) return;
+
+    const currentRooms = rooms;
+    const currentZones = zones;
+    const currentSystems = systems;
 
     const migrateMissingOaFacph = async () => {
+      migrationRunningRef.current = true;
       try {
-        for (const [zoneId, zoneRooms] of Object.entries(rooms)) {
-          const zoneRecord = (zones || []).find((z: any) => z.id === zoneId)
-            || (systems || []).find((s: any) => s.id === zoneId);
+        for (const [zoneId, zoneRooms] of Object.entries(currentRooms)) {
+          const zoneRecord = (currentZones || []).find((z: any) => z.id === zoneId)
+            || (currentSystems || []).find((s: any) => s.id === zoneId);
           const systemId = zoneRecord?.systemId;
 
           for (const room of zoneRooms as Room[]) {
@@ -779,6 +894,7 @@ export default function LoadCalculator({ project, userProfile, onNavigate }: { p
 
             try {
               await updateDoc(getRoomRef(zoneId, room.id, systemId), migrationPayload);
+              await new Promise(r => setTimeout(r, 150));
             } catch (error: any) {
               const msg = String(error?.message || '');
               if (msg.includes('No document to update')) {
@@ -793,11 +909,7 @@ export default function LoadCalculator({ project, userProfile, onNavigate }: { p
               ...prev,
               [zoneId]: (prev[zoneId] || []).map((r) =>
                 r.id === room.id
-                  ? {
-                      ...r,
-                      ...migrationPayload,
-                      _oaFacphWasMissingOnLoad: false,
-                    }
+                  ? { ...r, ...migrationPayload, _oaFacphWasMissingOnLoad: false }
                   : r,
               ),
             }));
@@ -805,11 +917,14 @@ export default function LoadCalculator({ project, userProfile, onNavigate }: { p
         }
       } catch (error) {
         console.error('[LoadCalculator] Failed OA FACPH migration:', error);
+      } finally {
+        migrationRunningRef.current = false;
       }
     };
 
     migrateMissingOaFacph();
-  }, [dataLoading, rooms, zones, systems, legacyDefaultOaFacph]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dataLoading]);
 
   const addSystem = async () => {
     try {
@@ -1077,6 +1192,48 @@ export default function LoadCalculator({ project, userProfile, onNavigate }: { p
     }
   };
 
+  const saveEnvelopeChanges = useCallback(async (
+    zoneId: string,
+    roomId: string,
+    systemId: string | undefined,
+    changes: {
+      deleted: string[];
+      added: Array<Omit<EnvelopeElement, 'id'>>;
+      updated: Array<{ id: string; data: Partial<EnvelopeElement> }>;
+    },
+  ) => {
+    const getElRef = (elId: string) => {
+      if (isVRF && systemId) return doc(db, 'projects', project.id, 'systems', systemId, 'rooms', roomId, 'envelopeElements', elId);
+      return systemId
+        ? doc(db, 'projects', project.id, 'systems', systemId, 'zones', zoneId, 'rooms', roomId, 'envelopeElements', elId)
+        : doc(db, 'projects', project.id, 'zones', zoneId, 'rooms', roomId, 'envelopeElements', elId);
+    };
+    const getColRef = () => {
+      if (isVRF && systemId) return collection(db, 'projects', project.id, 'systems', systemId, 'rooms', roomId, 'envelopeElements');
+      return systemId
+        ? collection(db, 'projects', project.id, 'systems', systemId, 'zones', zoneId, 'rooms', roomId, 'envelopeElements')
+        : collection(db, 'projects', project.id, 'zones', zoneId, 'rooms', roomId, 'envelopeElements');
+    };
+
+    let nextElements = [...(envelopeElements[roomId] || [])] as EnvelopeElement[];
+
+    for (const elId of changes.deleted) {
+      await deleteDoc(getElRef(elId));
+      nextElements = nextElements.filter(el => el.id !== elId);
+    }
+    for (const { id: elId, data } of changes.updated) {
+      await updateDoc(getElRef(elId), data as Record<string, unknown>);
+      nextElements = nextElements.map(el => el.id === elId ? { ...el, ...data } : el);
+    }
+    for (const elData of changes.added) {
+      const ref = await addDoc(getColRef(), elData as Record<string, unknown>);
+      nextElements = [...nextElements, { id: ref.id, ...elData } as EnvelopeElement];
+    }
+
+    setEnvelopeElements(prev => ({ ...prev, [roomId]: nextElements }));
+    await persistRoomAnalysisSnapshot(zoneId, roomId, systemId, undefined, nextElements);
+  }, [isVRF, project.id, envelopeElements, persistRoomAnalysisSnapshot]);
+
   const clampFalseCeilingToSlab = (currentRoom: Room | undefined, patch: Partial<Room>): Partial<Room> => {
     const nextPatch: Partial<Room> = { ...patch };
     const slabHeight = Math.max(0, Number(nextPatch.height ?? currentRoom?.height) || 0);
@@ -1247,6 +1404,18 @@ export default function LoadCalculator({ project, userProfile, onNavigate }: { p
     }
   }, [persistRoomAnalysisSnapshot]);
 
+  // Always-current refs so flushPendingWrites can be stable (empty deps).
+  // Without this, each of the three write callbacks changes every render
+  // (due to their own unstable deps), making flushPendingWrites unstable,
+  // which causes the beforeunload/visibilitychange/pagehide effect to
+  // remove and re-add its listeners on every single render.
+  const runPendingEnvelopeWriteRef = useRef(runPendingEnvelopeWrite);
+  runPendingEnvelopeWriteRef.current = runPendingEnvelopeWrite;
+  const runPendingRoomWriteRef = useRef(runPendingRoomWrite);
+  runPendingRoomWriteRef.current = runPendingRoomWrite;
+  const runPendingAnalysisWriteRef = useRef(runPendingAnalysisWrite);
+  runPendingAnalysisWriteRef.current = runPendingAnalysisWrite;
+
   const flushPendingWrites = useCallback(async () => {
     const envKeys = Object.keys(pendingEnvelopeWritesRef.current);
     const roomKeys = Object.keys(pendingRoomWritesRef.current);
@@ -1269,11 +1438,11 @@ export default function LoadCalculator({ project, userProfile, onNavigate }: { p
     });
 
     await Promise.allSettled([
-      ...envKeys.map((key) => runPendingEnvelopeWrite(key)),
-      ...roomKeys.map((key) => runPendingRoomWrite(key)),
-      ...analysisKeys.map((key) => runPendingAnalysisWrite(key)),
+      ...envKeys.map((key) => runPendingEnvelopeWriteRef.current(key)),
+      ...roomKeys.map((key) => runPendingRoomWriteRef.current(key)),
+      ...analysisKeys.map((key) => runPendingAnalysisWriteRef.current(key)),
     ]);
-  }, [runPendingEnvelopeWrite, runPendingRoomWrite, runPendingAnalysisWrite]);
+  }, []); // stable — reads the three write callbacks via always-current refs
 
   const hasPendingWrites = useCallback(() => {
     return (
@@ -1995,7 +2164,7 @@ export default function LoadCalculator({ project, userProfile, onNavigate }: { p
                 zones={zones}
                 rooms={rooms}
                 liveRooms={liveRooms}
-                envelopeElements={envelopeElements}
+                envelopeElements={liveEnvelopeElements}
                 expandedZone={expandedZone}
                 setExpandedZone={setExpandedZone}
                 expandedSystem={expandedSystem}
@@ -2013,7 +2182,9 @@ export default function LoadCalculator({ project, userProfile, onNavigate }: { p
                 addEnvelopeElement={addEnvelopeElement}
                 updateEnvelopeElement={updateEnvelopeElementDebounced}
                 deleteEnvelopeElement={deleteEnvelopeElement}
+                saveEnvelopeChanges={saveEnvelopeChanges}
                 onRoomDraftChange={handleRoomDraftChange}
+                onEnvelopeDraftChange={handleEnvelopeDraftChange}
                 onZoneConditionDraftsChange={handleZoneConditionDraftsChange}
                 project={project}
                 userProfile={userProfile}
@@ -2300,4 +2471,6 @@ export default function LoadCalculator({ project, userProfile, onNavigate }: { p
       </Dialog>
     </DndContext>
   );
-}
+});
+
+export default LoadCalculator;

@@ -71,6 +71,7 @@ export default function App() {
   const [loading, setLoading] = useState(true);
   const [currentPage, setCurrentPage] = useState<Page>('auth');
   const [pendingProjectId, setPendingProjectId] = useState<string | undefined>(undefined);
+  const [pendingPage, setPendingPage] = useState<string | null>(null);
 
   // Persist activeProject across navigation so Equipment Selection always has context
   const [activeProject, setActiveProject] = useState<any>(() => {
@@ -147,7 +148,11 @@ export default function App() {
   }, [currentUser]);
 
   const handlePageChange = (page: string) => {
-    setCurrentPage(page as Page);
+    if (currentPage === 'calculator' && page !== 'calculator') {
+      setPendingPage(page);
+    } else {
+      setCurrentPage(page as Page);
+    }
   };
 
   if (loading) {
@@ -196,7 +201,16 @@ export default function App() {
             />
           )}
           {currentPage === 'calculator' && (
-            <LoadCalculatorPage currentUser={currentUser} userRole={userRole} initialProjectId={pendingProjectId} />
+            <LoadCalculatorPage
+              currentUser={currentUser}
+              userRole={userRole}
+              initialProjectId={pendingProjectId}
+              pendingPageChange={pendingPage}
+              onPageChangeResolved={(page) => {
+                setPendingPage(null);
+                if (page) setCurrentPage(page as Page);
+              }}
+            />
           )}
           {currentPage === 'cable' && <CableMCBSelectorV2 />}
           {currentPage === 'duct' && <DuctSizer />}

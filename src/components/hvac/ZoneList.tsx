@@ -349,7 +349,9 @@ const ZoneList = ({
   addEnvelopeElement,
   updateEnvelopeElement,
   deleteEnvelopeElement,
+  saveEnvelopeChanges,
   onRoomDraftChange,
+  onEnvelopeDraftChange,
   onZoneConditionDraftsChange,
   project,
   defaultDesignConditions,
@@ -763,11 +765,13 @@ const ZoneList = ({
                 addEnvelopeElement={addEnvelopeElement}
                 updateEnvelopeElement={updateEnvelopeElement}
                 deleteEnvelopeElement={deleteEnvelopeElement}
+                saveEnvelopeChanges={saveEnvelopeChanges}
                 envelopeElements={envelopeElements}
                 project={project}
                 designConditions={zoneDc}
                 roomSaveStates={roomSaveStates}
                 onRoomDraftChange={onRoomDraftChange}
+                onEnvelopeDraftChange={onEnvelopeDraftChange}
               />
             </div>
             <ZoneSummaryBar

@@ -51,11 +51,13 @@ type RoomTableProps = {
   addEnvelopeElement: (zoneId: string, roomId: string, type: ElementType, systemId?: string) => void;
   updateEnvelopeElement: (zoneId: string, roomId: string, elementId: string, data: Record<string, any>, systemId?: string) => void;
   deleteEnvelopeElement: (zoneId: string, roomId: string, elementId: string, systemId?: string) => void;
+  saveEnvelopeChanges: (zoneId: string, roomId: string, systemId: string | undefined, changes: { deleted: string[]; added: Array<Omit<EnvelopeElement, 'id'>>; updated: Array<{ id: string; data: Partial<EnvelopeElement> }> }) => Promise<void>;
   envelopeElements: Record<string, any[]>;
   project?: any;
   designConditions?: DesignConditions;
   roomSaveStates?: Record<string, 'idle' | 'saving' | 'saved'>;
   onRoomDraftChange?: (zoneId: string, roomId: string, draft: Record<string, any> | null, systemId?: string) => void;
+  onEnvelopeDraftChange?: (roomId: string, draft: EnvelopeElement[] | null) => void;
 };
 
 type RoomParameterState = {
@@ -506,8 +508,8 @@ function BufferedNumberInput({
 
 function RoomDetail({
   room, zoneId, systemId, elements, designConditions, project,
-  updateRoom, addEnvelopeElement, updateEnvelopeElement, deleteEnvelopeElement,
-  saveState, onDirtyChange, onRoomDraftChange,
+  updateRoom, addEnvelopeElement, updateEnvelopeElement, deleteEnvelopeElement, saveEnvelopeChanges,
+  saveState, onDirtyChange, onRoomDraftChange, onEnvelopeDraftChange,
 }: {
   room: any; zoneId: string; systemId?: string; elements: any[];
   designConditions: DesignConditions;
@@ -517,8 +519,10 @@ function RoomDetail({
   addEnvelopeElement: (zoneId: string, roomId: string, type: ElementType, systemId?: string) => void;
   updateEnvelopeElement: (zoneId: string, roomId: string, elementId: string, data: Record<string, any>, systemId?: string) => void;
   deleteEnvelopeElement: (zoneId: string, roomId: string, elementId: string, systemId?: string) => void;
+  saveEnvelopeChanges: (zoneId: string, roomId: string, systemId: string | undefined, changes: { deleted: string[]; added: Array<Omit<EnvelopeElement, 'id'>>; updated: Array<{ id: string; data: Partial<EnvelopeElement> }> }) => Promise<void>;
   onDirtyChange?: (roomId: string, isDirty: boolean) => void;
   onRoomDraftChange?: (zoneId: string, roomId: string, draft: Record<string, any> | null, systemId?: string) => void;
+  onEnvelopeDraftChange?: (roomId: string, draft: EnvelopeElement[] | null) => void;
 }) {
   const id = room.id;
   const [activeStep, setActiveStep] = useState<'inputs' | 'envelope' | 'cooling' | 'heating' | 'moisture'>('inputs');
@@ -535,9 +539,16 @@ function RoomDetail({
     () => !areRoomParameterStatesEqual(roomDraft, committedRoomState),
     [roomDraft, committedRoomState],
   );
-  const c = useRoomCalc(liveRoom, elements, designConditions, project);
+
+  // ── Envelope draft state ──────────────────────────────────────────────────
+  const [envelopeDraft, setEnvelopeDraft] = useState<EnvelopeElement[] | null>(null);
+  const [isSavingEnvelope, setIsSavingEnvelope] = useState(false);
+  const isEnvelopeDirty = envelopeDraft !== null;
+  const liveElements: EnvelopeElement[] = (envelopeDraft ?? elements) as EnvelopeElement[];
+
+  const c = useRoomCalc(liveRoom, liveElements, designConditions, project);
   const monsoonDc = useMemo(() => getMonsoonDesignConditions(project, designConditions), [project, designConditions]);
-  const monsoonCalc = useRoomCalc(liveRoom, elements, monsoonDc, project);
+  const monsoonCalc = useRoomCalc(liveRoom, liveElements, monsoonDc, project);
   const hasMonsoon = !!(project?.includeMonsoon ?? project?.data?.includeMonsoon);
   const loadGoverningSeason = hasMonsoon && monsoonCalc.grandTotalTR > c.grandTotalTR ? 'Monsoon' : 'Summer';
   const cfmGoverningSeason = hasMonsoon && monsoonCalc.cfmTR > c.cfmTR ? 'Monsoon' : 'Summer';
@@ -608,8 +619,21 @@ function RoomDetail({
     };
   }, [zoneId, id, systemId, onRoomDraftChange]);
 
+  // Publish envelope draft to parent so project totals update live
   useEffect(() => {
-    if (!isRoomDirty) return;
+    onEnvelopeDraftChange?.(id, envelopeDraft);
+  }, [id, envelopeDraft, onEnvelopeDraftChange]);
+
+  // Clear envelope draft from parent on unmount
+  useEffect(() => {
+    return () => {
+      onEnvelopeDraftChange?.(id, null);
+    };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    if (!isRoomDirty && !isEnvelopeDirty) return;
 
     const handleBeforeUnload = (event: BeforeUnloadEvent) => {
       event.preventDefault();
@@ -618,7 +642,7 @@ function RoomDetail({
 
     window.addEventListener('beforeunload', handleBeforeUnload);
     return () => window.removeEventListener('beforeunload', handleBeforeUnload);
-  }, [isRoomDirty]);
+  }, [isRoomDirty, isEnvelopeDirty]);
 
   const patchRoomDraft = (patch: Partial<RoomParameterState>) => {
     setHasActiveEdits(true);
@@ -656,6 +680,83 @@ function RoomDetail({
       setHasActiveEdits(false);
     } finally {
       setIsUpdating(false);
+    }
+  };
+
+  // ── Envelope draft helpers ────────────────────────────────────────────────
+
+  const makeDefaultElement = (type: ElementType): Omit<EnvelopeElement, 'id'> => {
+    const dc = designConditions;
+    const dT = (dc.outdoorTemp ?? 95) - (dc.indoorTemp ?? 75);
+    const altFt = dc.altitude ?? 0;
+    const dm = dc.designMonth ?? 7;
+    const dr = dc.dailyRange ?? 20;
+    const defaultOrient: Orientation = (type === 'Roof' || type === 'Floor') ? 'H' : 'S';
+    const cltdOpts = { indoorTemp: dc.indoorTemp ?? 75, outdoorMax: dc.outdoorTemp ?? 95, dailyRange: dr, designMonth: dm };
+    const base: any = { type, orientation: defaultOrient, area: 0, uValue: type === 'Glass' ? 0.5 : 0.3, solarFactor: getCLTD(defaultOrient as any, type, dT, altFt, cltdOpts), description: `New ${type}`, isOverride: false, color: 'Dark' as WallColor };
+    if (type === 'Partition') base.orientation = 'N';
+    if (type === 'Glass') { base.shgc = 0.7; base.solarFactor = getSHGF(defaultOrient as any, altFt); base.wallTypeId = 'g2'; const g = GLASS_TYPES.find(w => w.id === 'g2'); if (g) base.uValue = g.uValue; }
+    if (type === 'Wall' || type === 'Partition') { base.wallTypeId = 'w1'; const w = WALL_TYPES.find(w => w.id === 'w1'); if (w) base.uValue = w.uValue; }
+    return base as Omit<EnvelopeElement, 'id'>;
+  };
+
+  const handleDraftAdd = (type: ElementType) => {
+    const tempId = `draft_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+    const defaults = makeDefaultElement(type);
+    setEnvelopeDraft(prev => [...(prev ?? (elements as EnvelopeElement[])), { id: tempId, ...defaults } as EnvelopeElement]);
+  };
+
+  const handleDraftUpdate = (elId: string, data: Partial<EnvelopeElement>) => {
+    setEnvelopeDraft(prev => {
+      const base = prev ?? (elements as EnvelopeElement[]);
+      return base.map(el => {
+        if (el.id !== elId) return el;
+        let merged = { ...el, ...data };
+        if ((data.orientation || data.color) && !data.isOverride && !merged.isOverride) {
+          const dc = designConditions;
+          const dT = (dc.outdoorTemp ?? 95) - (dc.indoorTemp ?? 75);
+          const altFt = dc.altitude ?? 0;
+          if (merged.type === 'Glass') {
+            merged = { ...merged, solarFactor: getSHGF(merged.orientation as any, altFt) };
+          } else {
+            merged = { ...merged, solarFactor: getCLTD(merged.orientation as any, merged.type, dT, altFt, { indoorTemp: dc.indoorTemp ?? 75, outdoorMax: dc.outdoorTemp ?? 95, dailyRange: dc.dailyRange ?? 20, color: (merged.color ?? 'Dark') as WallColor, designMonth: dc.designMonth ?? 7 }) };
+          }
+        }
+        return merged;
+      });
+    });
+  };
+
+  const handleDraftDelete = (elId: string) => {
+    setEnvelopeDraft(prev => (prev ?? (elements as EnvelopeElement[])).filter(el => el.id !== elId));
+  };
+
+  const handleCancelEnvelope = () => setEnvelopeDraft(null);
+
+  const handleSaveEnvelope = async () => {
+    if (!envelopeDraft) return;
+    flushDraftInputs();
+    setIsSavingEnvelope(true);
+    try {
+      const committedIds = new Set((elements as EnvelopeElement[]).map(el => el.id));
+      const draftIds = new Set(envelopeDraft.map(el => el.id));
+      const deleted = (elements as EnvelopeElement[]).filter(el => !draftIds.has(el.id)).map(el => el.id);
+      const added = envelopeDraft.filter(el => el.id.startsWith('draft_')).map(({ id: _t, ...rest }) => rest as Omit<EnvelopeElement, 'id'>);
+      const updated: Array<{ id: string; data: Partial<EnvelopeElement> }> = [];
+      for (const el of envelopeDraft) {
+        if (!el.id.startsWith('draft_') && committedIds.has(el.id)) {
+          const committed = (elements as EnvelopeElement[]).find(e => e.id === el.id)!;
+          const { id: _a, ...elData } = el;
+          const { id: _b, ...committedData } = committed;
+          if (JSON.stringify(elData) !== JSON.stringify(committedData)) updated.push({ id: el.id, data: elData });
+        }
+      }
+      await saveEnvelopeChanges(zoneId, id, systemId, { deleted, added, updated });
+      setEnvelopeDraft(null);
+    } catch (_e) {
+      // error shown by parent
+    } finally {
+      setIsSavingEnvelope(false);
     }
   };
 
@@ -1192,9 +1293,9 @@ function RoomDetail({
           color:       (el?.color ?? 'Dark') as WallColor,
           designMonth,
         });
-        const wallEls      = elements.filter((el: any) => el.type === 'Wall' || el.type === 'Partition');
-        const glassEls     = elements.filter((el: any) => el.type === 'Glass');
-        const roofFloorEls = elements.filter((el: any) => el.type === 'Roof' || el.type === 'Floor');
+        const wallEls      = liveElements.filter((el: any) => el.type === 'Wall' || el.type === 'Partition');
+        const glassEls     = liveElements.filter((el: any) => el.type === 'Glass');
+        const roofFloorEls = liveElements.filter((el: any) => el.type === 'Roof' || el.type === 'Floor');
 
         const liveCLTD = (el: any) => el.isOverride ? (el.solarFactor ?? 0) : getCLTD(el.orientation, el.type, dT, altFt, cltdOpts(el));
         const liveSHGF = (el: any) => el.isOverride ? (el.solarFactor ?? 0) : getSHGF(el.orientation, altFt);
@@ -1210,7 +1311,7 @@ function RoomDetail({
           return (
             <TableRow key={elId || elIdx} className={elIdx % 2 === 0 ? 'bg-white' : 'bg-gray-50'}>
               <TableCell className="py-1.5">
-                <Select value={el?.type || 'Wall'} onValueChange={v => updateEnvelopeElement(zoneId, id, elId, { type: v as ElementType, orientation: v === 'Partition' ? 'N' : (el?.orientation || 'S') }, systemId)}>
+                <Select value={el?.type || 'Wall'} onValueChange={v => handleDraftUpdate(elId, { type: v as ElementType, orientation: v === 'Partition' ? 'N' : (el?.orientation || 'S') })}>
                   <SelectTrigger className="h-7 text-xs min-w-max"><SelectValue /></SelectTrigger>
                   <SelectContent>
                     {(['Wall', 'Partition'] as ElementType[]).map(t => <SelectItem key={t} value={t} className="text-xs">{t}</SelectItem>)}
@@ -1222,7 +1323,7 @@ function RoomDetail({
                   value={el?.wallTypeId && WALL_TYPES.find(w => w.id === el.wallTypeId) ? el.wallTypeId : 'w1'}
                   onValueChange={v => {
                     const w = WALL_TYPES.find(wt => wt.id === v);
-                    if (w) updateEnvelopeElement(zoneId, id, elId, { wallTypeId: v, uValue: w.uValue }, systemId);
+                    if (w) handleDraftUpdate(elId, { wallTypeId: v, uValue: w.uValue });
                   }}
                 >
                   <SelectTrigger className="h-7 text-xs min-w-max"><SelectValue /></SelectTrigger>
@@ -1233,7 +1334,7 @@ function RoomDetail({
                 {el?.type === 'Partition' ? (
                   <div className="h-7 text-xs min-w-max rounded border border-slate-200 bg-slate-50 flex items-center justify-center text-slate-400">—</div>
                 ) : (
-                  <Select value={el?.orientation || 'S'} onValueChange={v => updateEnvelopeElement(zoneId, id, elId, { orientation: v as any }, systemId)}>
+                  <Select value={el?.orientation || 'S'} onValueChange={v => handleDraftUpdate(elId, { orientation: v as any })}>
                     <SelectTrigger className="h-7 text-xs min-w-max"><SelectValue /></SelectTrigger>
                     <SelectContent>{VERTICAL_ORIENTATIONS.map(o => <SelectItem key={o} value={o} className="text-xs">{o}</SelectItem>)}</SelectContent>
                   </Select>
@@ -1243,7 +1344,7 @@ function RoomDetail({
                 {el?.type === 'Partition' ? (
                   <div className="h-7 text-xs min-w-max rounded border border-slate-200 bg-slate-50 flex items-center justify-center text-slate-400">—</div>
                 ) : (
-                  <Select value={el?.color || 'Dark'} onValueChange={v => updateEnvelopeElement(zoneId, id, elId, { color: v as WallColor }, systemId)}>
+                  <Select value={el?.color || 'Dark'} onValueChange={v => handleDraftUpdate(elId, { color: v as WallColor })}>
                     <SelectTrigger className="h-7 text-xs min-w-max"><SelectValue /></SelectTrigger>
                     <SelectContent>
                       {(['Dark', 'Medium', 'Light'] as WallColor[]).map(c => <SelectItem key={c} value={c} className="text-xs">{c}</SelectItem>)}
@@ -1252,17 +1353,17 @@ function RoomDetail({
                 )}
               </TableCell>
               <TableCell className="py-1.5 text-right">
-                <BufferedNumberInput committersRef={draftCommittersRef} draftKey={`${id}-${String(elId)}-wall-area`} value={el?.area ?? ''} onCommit={next => updateEnvelopeElement(zoneId, id, elId, { area: next }, systemId)} className="h-7 text-xs w-16 text-right" />
+                <BufferedNumberInput committersRef={draftCommittersRef} draftKey={`${id}-${String(elId)}-wall-area`} value={el?.area ?? ''} onCommit={next => handleDraftUpdate(elId, { area: next })} className="h-7 text-xs w-16 text-right" />
               </TableCell>
               <TableCell className="py-1.5 text-right">
-                <BufferedNumberInput committersRef={draftCommittersRef} draftKey={`${id}-${String(elId)}-wall-u`} value={el?.uValue ?? wt?.uValue ?? ''} onCommit={next => updateEnvelopeElement(zoneId, id, elId, { uValue: next }, systemId)} className="h-7 text-xs w-16 text-right" />
+                <BufferedNumberInput committersRef={draftCommittersRef} draftKey={`${id}-${String(elId)}-wall-u`} value={el?.uValue ?? wt?.uValue ?? ''} onCommit={next => handleDraftUpdate(elId, { uValue: next })} className="h-7 text-xs w-16 text-right" />
               </TableCell>
               <TableCell className="py-1.5 text-right">
-                <BufferedNumberInput committersRef={draftCommittersRef} draftKey={`${id}-${String(elId)}-wall-sf`} value={parseFloat(liveCLTD(el).toFixed(2))} onCommit={next => updateEnvelopeElement(zoneId, id, elId, { solarFactor: next, isOverride: true }, systemId)} className={`h-7 text-xs w-16 text-right ${el?.isOverride ? 'border-orange-400' : ''}`} title={el?.isOverride ? 'CLTD (°F) — Manual Override' : 'CLTD (°F) — Auto'} />
+                <BufferedNumberInput committersRef={draftCommittersRef} draftKey={`${id}-${String(elId)}-wall-sf`} value={parseFloat(liveCLTD(el).toFixed(2))} onCommit={next => handleDraftUpdate(elId, { solarFactor: next, isOverride: true })} className={`h-7 text-xs w-16 text-right ${el?.isOverride ? 'border-orange-400' : ''}`} title={el?.isOverride ? 'CLTD (°F) — Manual Override' : 'CLTD (°F) — Auto'} />
               </TableCell>
               <TableCell className="py-1.5 text-right text-xs font-mono font-semibold text-amber-800">{n(wallGain(el))}</TableCell>
               <TableCell className="py-1.5">
-                <button type="button" title="Delete element" onClick={() => runAfterDraftSave(() => deleteEnvelopeElement(zoneId, id, elId, systemId))} className="p-1 text-gray-300 hover:text-red-500">
+                <button type="button" title="Delete element" onClick={() => handleDraftDelete(elId)} className="p-1 text-gray-300 hover:text-red-500">
                   <Trash2 className="w-3.5 h-3.5" />
                 </button>
               </TableCell>
@@ -1280,7 +1381,7 @@ function RoomDetail({
                   value={el?.wallTypeId && GLASS_TYPES.find(g => g.id === el.wallTypeId) ? el.wallTypeId : 'g2'}
                   onValueChange={v => {
                     const g = GLASS_TYPES.find(gt => gt.id === v);
-                    if (g) updateEnvelopeElement(zoneId, id, elId, { wallTypeId: v, uValue: g.uValue, shgc: g.defaultShgc ?? el?.shgc ?? 0.7 }, systemId);
+                    if (g) handleDraftUpdate(elId, { wallTypeId: v, uValue: g.uValue, shgc: g.defaultShgc ?? el?.shgc ?? 0.7 });
                   }}
                 >
                   <SelectTrigger className="h-7 text-xs min-w-max"><SelectValue /></SelectTrigger>
@@ -1288,26 +1389,26 @@ function RoomDetail({
                 </Select>
               </TableCell>
               <TableCell className="py-1.5">
-                <Select value={el?.orientation || 'S'} onValueChange={v => updateEnvelopeElement(zoneId, id, elId, { orientation: v as any }, systemId)}>
+                <Select value={el?.orientation || 'S'} onValueChange={v => handleDraftUpdate(elId, { orientation: v as any })}>
                   <SelectTrigger className="h-7 text-xs min-w-max"><SelectValue /></SelectTrigger>
                   <SelectContent>{VERTICAL_ORIENTATIONS.map(o => <SelectItem key={o} value={o} className="text-xs">{o}</SelectItem>)}</SelectContent>
                 </Select>
               </TableCell>
               <TableCell className="py-1.5 text-right">
-                <BufferedNumberInput committersRef={draftCommittersRef} draftKey={`${id}-${String(elId)}-glass-area`} value={el?.area ?? ''} onCommit={next => updateEnvelopeElement(zoneId, id, elId, { area: next }, systemId)} className="h-7 text-xs w-16 text-right" />
+                <BufferedNumberInput committersRef={draftCommittersRef} draftKey={`${id}-${String(elId)}-glass-area`} value={el?.area ?? ''} onCommit={next => handleDraftUpdate(elId, { area: next })} className="h-7 text-xs w-16 text-right" />
               </TableCell>
               <TableCell className="py-1.5 text-right">
-                <BufferedNumberInput committersRef={draftCommittersRef} draftKey={`${id}-${String(elId)}-glass-u`} value={el?.uValue ?? gt?.uValue ?? ''} onCommit={next => updateEnvelopeElement(zoneId, id, elId, { uValue: next }, systemId)} className="h-7 text-xs w-14 text-right" title="U-Value (BTU/h·ft²·°F)" />
+                <BufferedNumberInput committersRef={draftCommittersRef} draftKey={`${id}-${String(elId)}-glass-u`} value={el?.uValue ?? gt?.uValue ?? ''} onCommit={next => handleDraftUpdate(elId, { uValue: next })} className="h-7 text-xs w-14 text-right" title="U-Value (BTU/h·ft²·°F)" />
               </TableCell>
               <TableCell className="py-1.5 text-right">
-                <BufferedNumberInput committersRef={draftCommittersRef} draftKey={`${id}-${String(elId)}-glass-shgc`} value={el?.shgc ?? gt?.defaultShgc ?? 0.7} onCommit={next => updateEnvelopeElement(zoneId, id, elId, { shgc: next, isOverride: true }, systemId)} min={0} max={1} className="h-7 text-xs w-14 text-right" title="Solar Heat Gain Coefficient" />
+                <BufferedNumberInput committersRef={draftCommittersRef} draftKey={`${id}-${String(elId)}-glass-shgc`} value={el?.shgc ?? gt?.defaultShgc ?? 0.7} onCommit={next => handleDraftUpdate(elId, { shgc: next, isOverride: true })} min={0} max={1} className="h-7 text-xs w-14 text-right" title="Solar Heat Gain Coefficient" />
               </TableCell>
               <TableCell className="py-1.5 text-right">
-                <BufferedNumberInput committersRef={draftCommittersRef} draftKey={`${id}-${String(elId)}-glass-sf`} value={parseFloat(liveSHGF(el).toFixed(2))} onCommit={next => updateEnvelopeElement(zoneId, id, elId, { solarFactor: next, isOverride: true }, systemId)} className={`h-7 text-xs w-16 text-right ${el?.isOverride ? 'border-orange-400' : ''}`} title={el?.isOverride ? 'SHGF (BTU/h·ft²) — Manual Override' : 'SHGF (BTU/h·ft²) — Auto'} />
+                <BufferedNumberInput committersRef={draftCommittersRef} draftKey={`${id}-${String(elId)}-glass-sf`} value={parseFloat(liveSHGF(el).toFixed(2))} onCommit={next => handleDraftUpdate(elId, { solarFactor: next, isOverride: true })} className={`h-7 text-xs w-16 text-right ${el?.isOverride ? 'border-orange-400' : ''}`} title={el?.isOverride ? 'SHGF (BTU/h·ft²) — Manual Override' : 'SHGF (BTU/h·ft²) — Auto'} />
               </TableCell>
               <TableCell className="py-1.5 text-right text-xs font-mono font-semibold text-sky-800">{n(glassGain(el))}</TableCell>
               <TableCell className="py-1.5">
-                <button type="button" title="Delete element" onClick={() => runAfterDraftSave(() => deleteEnvelopeElement(zoneId, id, elId, systemId))} className="p-1 text-gray-300 hover:text-red-500">
+                <button type="button" title="Delete element" onClick={() => handleDraftDelete(elId)} className="p-1 text-gray-300 hover:text-red-500">
                   <Trash2 className="w-3.5 h-3.5" />
                 </button>
               </TableCell>
@@ -1317,6 +1418,19 @@ function RoomDetail({
 
         return (
           <div className="space-y-4">
+            {/* ── Unsaved envelope changes banner ── */}
+            {isEnvelopeDirty && (
+              <div className="flex items-center justify-between gap-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2">
+                <p className="text-[11px] font-medium text-amber-800">Unsaved envelope changes are affecting live calculations. Save or cancel before leaving.</p>
+                <div className="flex items-center gap-2 shrink-0">
+                  <button type="button" onClick={handleCancelEnvelope} className="h-7 rounded-md border border-slate-300 bg-white px-2.5 text-[11px] font-semibold text-slate-700 hover:bg-slate-50">Cancel</button>
+                  <button type="button" onClick={() => void handleSaveEnvelope()} disabled={isSavingEnvelope} className="inline-flex h-7 items-center gap-1 rounded-md border border-blue-300 bg-blue-600 px-2.5 text-[11px] font-semibold text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-60">
+                    {isSavingEnvelope && <Loader2 className="h-3 w-3 animate-spin" />}
+                    Save Envelope
+                  </button>
+                </div>
+              </div>
+            )}
             {/* ── Side-by-side: Walls & Partitions | Glass ── */}
             <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
 
@@ -1325,11 +1439,11 @@ function RoomDetail({
                 <div className="flex items-center justify-between mb-3">
                   <h4 className="text-xs font-bold text-amber-800 uppercase tracking-widest">Walls &amp; Partitions</h4>
                   <div className="flex gap-1">
-                    <button type="button" onClick={() => runAfterDraftSave(() => addEnvelopeElement(zoneId, id, 'Wall', systemId))}
+                    <button type="button" onClick={() => handleDraftAdd('Wall')}
                       className="flex items-center gap-0.5 text-[11px] px-2 py-1 rounded border border-amber-300 hover:bg-amber-100 text-amber-700 font-medium">
                       <Plus className="w-3 h-3" />Wall
                     </button>
-                    <button type="button" onClick={() => runAfterDraftSave(() => addEnvelopeElement(zoneId, id, 'Partition', systemId))}
+                    <button type="button" onClick={() => handleDraftAdd('Partition')}
                       className="flex items-center gap-0.5 text-[11px] px-2 py-1 rounded border border-amber-300 hover:bg-amber-100 text-amber-700 font-medium">
                       <Plus className="w-3 h-3" />Partition
                     </button>
@@ -1367,7 +1481,7 @@ function RoomDetail({
               <div className="rounded-xl border border-sky-200 bg-sky-50/30 p-4">
                 <div className="flex items-center justify-between mb-3">
                   <h4 className="text-xs font-bold text-sky-800 uppercase tracking-widest">Glass / Fenestration</h4>
-                  <button type="button" onClick={() => runAfterDraftSave(() => addEnvelopeElement(zoneId, id, 'Glass', systemId))}
+                  <button type="button" onClick={() => handleDraftAdd('Glass')}
                     className="flex items-center gap-0.5 text-[11px] px-2 py-1 rounded border border-sky-300 hover:bg-sky-100 text-sky-700 font-medium">
                     <Plus className="w-3 h-3" />Glass
                   </button>
@@ -1405,11 +1519,11 @@ function RoomDetail({
               <div className="flex items-center justify-between mb-3">
                 <h4 className="text-xs font-bold text-slate-600 uppercase tracking-widest">Roof &amp; Floor</h4>
                 <div className="flex gap-1">
-                  <button type="button" onClick={() => runAfterDraftSave(() => addEnvelopeElement(zoneId, id, 'Roof', systemId))}
+                  <button type="button" onClick={() => handleDraftAdd('Roof')}
                     className="flex items-center gap-0.5 text-[11px] px-2 py-1 rounded border border-slate-300 hover:bg-slate-100 text-slate-600 font-medium">
                     <Plus className="w-3 h-3" />Roof
                   </button>
-                  <button type="button" onClick={() => runAfterDraftSave(() => addEnvelopeElement(zoneId, id, 'Floor', systemId))}
+                  <button type="button" onClick={() => handleDraftAdd('Floor')}
                     className="flex items-center gap-0.5 text-[11px] px-2 py-1 rounded border border-slate-300 hover:bg-slate-100 text-slate-600 font-medium">
                     <Plus className="w-3 h-3" />Floor
                   </button>
@@ -1440,7 +1554,7 @@ function RoomDetail({
                         return (
                           <TableRow key={elId || elIdx} className={elIdx % 2 === 0 ? 'bg-white' : 'bg-gray-50'}>
                             <TableCell className="py-1.5">
-                              <Select value={el?.type || 'Roof'} onValueChange={v => updateEnvelopeElement(zoneId, id, elId, { type: v as ElementType }, systemId)}>
+                              <Select value={el?.type || 'Roof'} onValueChange={v => handleDraftUpdate(elId, { type: v as ElementType })}>
                                 <SelectTrigger className="h-7 text-xs w-20"><SelectValue /></SelectTrigger>
                                 <SelectContent>
                                   {(['Roof', 'Floor'] as ElementType[]).map(t => <SelectItem key={t} value={t} className="text-xs">{t}</SelectItem>)}
@@ -1448,7 +1562,7 @@ function RoomDetail({
                               </Select>
                             </TableCell>
                             <TableCell className="py-1.5">
-                              <Select value={el?.orientation || 'H'} onValueChange={v => updateEnvelopeElement(zoneId, id, elId, { orientation: v as any }, systemId)}>
+                              <Select value={el?.orientation || 'H'} onValueChange={v => handleDraftUpdate(elId, { orientation: v as any })}>
                                 <SelectTrigger className="h-7 text-xs w-16"><SelectValue /></SelectTrigger>
                                 <SelectContent>{HORIZONTAL_ORIENTATIONS.map(o => <SelectItem key={o} value={o} className="text-xs">{o}</SelectItem>)}</SelectContent>
                               </Select>
@@ -1457,7 +1571,7 @@ function RoomDetail({
                               {el?.type === 'Floor' ? (
                                 <div className="h-7 text-xs w-20 rounded border border-slate-200 bg-slate-50 flex items-center justify-center text-slate-400">—</div>
                               ) : (
-                                <Select value={el?.color || 'Dark'} onValueChange={v => updateEnvelopeElement(zoneId, id, elId, { color: v as WallColor }, systemId)}>
+                                <Select value={el?.color || 'Dark'} onValueChange={v => handleDraftUpdate(elId, { color: v as WallColor })}>
                                   <SelectTrigger className="h-7 text-xs w-20"><SelectValue /></SelectTrigger>
                                   <SelectContent>
                                     {(['Dark', 'Medium', 'Light'] as WallColor[]).map(c => <SelectItem key={c} value={c} className="text-xs">{c}</SelectItem>)}
@@ -1466,17 +1580,17 @@ function RoomDetail({
                               )}
                             </TableCell>
                             <TableCell className="py-1.5 text-right">
-                              <BufferedNumberInput committersRef={draftCommittersRef} draftKey={`${id}-${String(elId)}-roof-area`} value={el?.area ?? ''} onCommit={next => updateEnvelopeElement(zoneId, id, elId, { area: next }, systemId)} className="h-7 text-xs w-16 text-right" />
+                              <BufferedNumberInput committersRef={draftCommittersRef} draftKey={`${id}-${String(elId)}-roof-area`} value={el?.area ?? ''} onCommit={next => handleDraftUpdate(elId, { area: next })} className="h-7 text-xs w-16 text-right" />
                             </TableCell>
                             <TableCell className="py-1.5 text-right">
-                              <BufferedNumberInput committersRef={draftCommittersRef} draftKey={`${id}-${String(elId)}-roof-u`} value={el?.uValue ?? ''} onCommit={next => updateEnvelopeElement(zoneId, id, elId, { uValue: next }, systemId)} className="h-7 text-xs w-16 text-right" />
+                              <BufferedNumberInput committersRef={draftCommittersRef} draftKey={`${id}-${String(elId)}-roof-u`} value={el?.uValue ?? ''} onCommit={next => handleDraftUpdate(elId, { uValue: next })} className="h-7 text-xs w-16 text-right" />
                             </TableCell>
                             <TableCell className="py-1.5 text-right">
-                              <BufferedNumberInput committersRef={draftCommittersRef} draftKey={`${id}-${String(elId)}-roof-sf`} value={parseFloat(liveCLTD(el).toFixed(2))} onCommit={next => updateEnvelopeElement(zoneId, id, elId, { solarFactor: next, isOverride: true }, systemId)} className={`h-7 text-xs w-16 text-right ${el?.isOverride ? 'border-orange-400' : ''}`} title={el?.isOverride ? 'CLTD (°F) — Manual Override' : 'CLTD (°F) — Auto'} />
+                              <BufferedNumberInput committersRef={draftCommittersRef} draftKey={`${id}-${String(elId)}-roof-sf`} value={parseFloat(liveCLTD(el).toFixed(2))} onCommit={next => handleDraftUpdate(elId, { solarFactor: next, isOverride: true })} className={`h-7 text-xs w-16 text-right ${el?.isOverride ? 'border-orange-400' : ''}`} title={el?.isOverride ? 'CLTD (°F) — Manual Override' : 'CLTD (°F) — Auto'} />
                             </TableCell>
                             <TableCell className="py-1.5 text-right text-xs font-mono font-semibold text-slate-700">{n(wallGain(el))}</TableCell>
                             <TableCell className="py-1.5">
-                              <button type="button" title="Delete element" onClick={() => runAfterDraftSave(() => deleteEnvelopeElement(zoneId, id, elId, systemId))} className="p-1 text-gray-300 hover:text-red-500">
+                              <button type="button" title="Delete element" onClick={() => handleDraftDelete(elId)} className="p-1 text-gray-300 hover:text-red-500">
                                 <Trash2 className="w-3.5 h-3.5" />
                               </button>
                             </TableCell>
@@ -1821,7 +1935,7 @@ const MemoDraggableRoomHeader = memo(DraggableRoomHeader, (prev, next) => {
 export default function RoomTable({
   rooms, liveRooms, zoneId, systemId, expandedRoom, setExpandedRoom,
   updateRoom, deleteRoom, addEnvelopeElement, updateEnvelopeElement,
-  deleteEnvelopeElement, envelopeElements, project, designConditions, roomSaveStates, onRoomDraftChange,
+  deleteEnvelopeElement, saveEnvelopeChanges, envelopeElements, project, designConditions, roomSaveStates, onRoomDraftChange, onEnvelopeDraftChange,
 }: RoomTableProps) {
   const [dirtyRoomId, setDirtyRoomId] = useState<string | null>(null);
 
@@ -1935,7 +2049,9 @@ export default function RoomTable({
                 addEnvelopeElement={addEnvelopeElement}
                 updateEnvelopeElement={updateEnvelopeElement}
                 deleteEnvelopeElement={deleteEnvelopeElement}
+                saveEnvelopeChanges={saveEnvelopeChanges}
                 onRoomDraftChange={onRoomDraftChange}
+                onEnvelopeDraftChange={onEnvelopeDraftChange}
                 onDirtyChange={(roomId, isDirty) => {
                   setDirtyRoomId((prev) => {
                     if (isDirty) return roomId;

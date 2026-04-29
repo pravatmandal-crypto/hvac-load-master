@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import { User } from 'firebase/auth';
 import { db } from '../lib/firebase';
 import {
@@ -18,7 +18,7 @@ import {
   Plus, Search, Pencil, Trash2, ChevronRight,
   MapPin, Thermometer, Droplets, ArrowLeft, Loader2,
 } from 'lucide-react';
-import LoadCalculator from '../components/hvac/LoadCalculator';
+import LoadCalculator, { type LoadCalculatorHandle } from '../components/hvac/LoadCalculator';
 import { fetchLocationData } from '../services/geminiService';
 
 // ─── Psychrometric helpers ────────────────────────────────────────────────────
@@ -134,9 +134,11 @@ interface Props {
   currentUser: User;
   initialProjectId?: string;
   userRole?: string | null;
+  pendingPageChange?: string | null;
+  onPageChangeResolved?: (page: string | null) => void;
 }
 
-export default function LoadCalculatorPage({ currentUser, initialProjectId, userRole = null }: Props) {
+export default function LoadCalculatorPage({ currentUser, initialProjectId, userRole = null, pendingPageChange, onPageChangeResolved }: Props) {
   const [projects, setProjects] = useState<Project[]>([]);
   const [activeProject, setActiveProject] = useState<Project | null>(null);
   const [ownerEmails, setOwnerEmails] = useState<Record<string, string>>({});
@@ -148,6 +150,44 @@ export default function LoadCalculatorPage({ currentUser, initialProjectId, user
   const [geocoding, setGeocoding] = useState(false);
   const [searchText, setSearchText] = useState('');
   const [systemFilter, setSystemFilter] = useState<'all' | string>('all');
+
+  // Stable reference — prevents the data-loading effect in LoadCalculator
+  // from re-triggering when LoadCalculatorPage re-renders.
+  const userProfile = useMemo(
+    () => ({ uid: currentUser.uid, email: currentUser.email }),
+    [currentUser.uid, currentUser.email],
+  );
+
+  // ── Unsaved-changes navigation guard ─────────────────────────────────────
+  const calculatorRef = useRef<LoadCalculatorHandle>(null);
+  // Ref instead of state — dirty-flag changes must not re-render LoadCalculatorPage
+  // (which would cascade into a LoadCalculator re-render on every keystroke).
+  const calculatorHasUnsavedRef = useRef(false);
+  const handleCalculatorUnsaved = useCallback((has: boolean) => {
+    calculatorHasUnsavedRef.current = has;
+  }, []);
+  const [pendingNavAction, setPendingNavAction] = useState<(() => void) | null>(null);
+  const [isSavingAll, setIsSavingAll] = useState(false);
+
+  const guardedNavigate = (action: () => void) => {
+    if (calculatorHasUnsavedRef.current) {
+      setPendingNavAction(() => action);
+    } else {
+      action();
+    }
+  };
+
+  // Intercept sidebar page-change requests from App.tsx
+  useEffect(() => {
+    if (!pendingPageChange) return;
+    const action = () => onPageChangeResolved?.(pendingPageChange);
+    if (calculatorHasUnsavedRef.current) {
+      setPendingNavAction(() => action);
+    } else {
+      action();
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pendingPageChange]);
 
   // ── Load projects from Firestore ──────────────────────────────────────────
   useEffect(() => {
@@ -506,7 +546,7 @@ export default function LoadCalculatorPage({ currentUser, initialProjectId, user
           <Button
             variant="outline"
             size="sm"
-            onClick={() => setActiveProject(null)}
+            onClick={() => guardedNavigate(() => setActiveProject(null))}
             className="gap-1"
           >
             <ArrowLeft className="h-4 w-4" />
@@ -526,8 +566,10 @@ export default function LoadCalculatorPage({ currentUser, initialProjectId, user
         </div>
 
         <LoadCalculator
+          ref={calculatorRef}
           project={activeProject}
-          userProfile={{ uid: currentUser.uid, email: currentUser.email }}
+          userProfile={userProfile}
+          onUnsavedChangesChange={handleCalculatorUnsaved}
         />
 
         {/* Edit dialog accessible from calculator view */}
@@ -542,6 +584,35 @@ export default function LoadCalculatorPage({ currentUser, initialProjectId, user
           geocoding={geocoding}
           editing={!!editingProject}
         />
+
+        {/* Unsaved changes guard dialog */}
+        {pendingNavAction && (
+          <UnsavedChangesDialog
+            isSaving={isSavingAll}
+            onSaveAndLeave={async () => {
+              setIsSavingAll(true);
+              try {
+                await calculatorRef.current?.saveAllDirty();
+                const action = pendingNavAction;
+                setPendingNavAction(null);
+                action();
+              } catch {
+                toast.error('Failed to save changes. Please try again.');
+              } finally {
+                setIsSavingAll(false);
+              }
+            }}
+            onDiscardAndLeave={() => {
+              const action = pendingNavAction;
+              setPendingNavAction(null);
+              action();
+            }}
+            onStay={() => {
+              onPageChangeResolved?.(null);
+              setPendingNavAction(null);
+            }}
+          />
+        )}
       </div>
     );
   }
@@ -635,7 +706,7 @@ export default function LoadCalculatorPage({ currentUser, initialProjectId, user
               key={project.id}
               project={project}
               ownerLabel={userRole === 'Super' && project.userId ? (ownerEmails[project.userId] || project.userId) : undefined}
-              onOpen={() => setActiveProject(project)}
+              onOpen={() => guardedNavigate(() => setActiveProject(project))}
               onEdit={() => openEditDialog(project)}
               onDelete={() => deleteProject(project.id)}
             />
@@ -1087,6 +1158,53 @@ function ProjectDialog({
           <Button variant="outline" onClick={onClose} disabled={saving}>Cancel</Button>
           <Button onClick={onSave} disabled={saving} className="bg-blue-600 hover:bg-blue-700">
             {saving ? <><Loader2 className="mr-2 h-4 w-4 animate-spin" />Saving...</> : editing ? 'Update Project' : 'Create Project'}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+// ─── Unsaved Changes Guard Dialog ─────────────────────────────────────────────
+
+function UnsavedChangesDialog({
+  isSaving,
+  onSaveAndLeave,
+  onDiscardAndLeave,
+  onStay,
+}: {
+  isSaving: boolean;
+  onSaveAndLeave: () => void;
+  onDiscardAndLeave: () => void;
+  onStay: () => void;
+}) {
+  return (
+    <Dialog open onOpenChange={(open) => { if (!open) onStay(); }}>
+      <DialogContent className="max-w-md">
+        <DialogHeader>
+          <DialogTitle>Unsaved Changes</DialogTitle>
+        </DialogHeader>
+        <p className="text-sm text-gray-600">
+          You have unsaved room or envelope changes. Save them to the database before leaving, or discard them.
+        </p>
+        <DialogFooter className="flex-col gap-2 sm:flex-row">
+          <Button variant="ghost" onClick={onStay} disabled={isSaving} className="sm:mr-auto">
+            Stay
+          </Button>
+          <Button
+            variant="outline"
+            onClick={onDiscardAndLeave}
+            disabled={isSaving}
+            className="border-red-200 text-red-700 hover:bg-red-50"
+          >
+            Discard &amp; Leave
+          </Button>
+          <Button
+            onClick={onSaveAndLeave}
+            disabled={isSaving}
+            className="bg-blue-600 hover:bg-blue-700"
+          >
+            {isSaving ? <><Loader2 className="mr-2 h-4 w-4 animate-spin" />Saving...</> : 'Save & Leave'}
           </Button>
         </DialogFooter>
       </DialogContent>

@@ -19,6 +19,10 @@ fix*.cjs
 # Claude backup
 .claude_backup/
 
+# Service account keys - never commit
+service-account.json
+*-service-account.json
+
 # Binary/example files
 *.xlsx
 *.xls
