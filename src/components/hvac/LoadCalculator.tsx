@@ -1299,7 +1299,7 @@ export default function LoadCalculator({ project, userProfile, onNavigate }: { p
     // Batch expensive analysis writes while the user is actively editing.
     analysisDbTimersRef.current[key] = setTimeout(() => {
       void runPendingAnalysisWrite(key);
-    }, 900);
+    }, 5000);
   }
 
   const updateEnvelopeElementDebounced = useCallback(
@@ -1329,10 +1329,10 @@ export default function LoadCalculator({ project, userProfile, onNavigate }: { p
         nextElements,
       };
 
-      // Debounce the DB write (600ms)
+      // Debounce the DB write (2000ms)
       envElementDbTimersRef.current[key] = setTimeout(() => {
         void runPendingEnvelopeWrite(key);
-      }, 600);
+      }, 2000);
     },
     [envelopeElements, runPendingEnvelopeWrite]
   );
@@ -1369,10 +1369,10 @@ export default function LoadCalculator({ project, userProfile, onNavigate }: { p
         mergedRoom,
       };
 
-      // Debounce the DB write (600ms)
+      // Debounce the DB write (2000ms)
       roomDbTimersRef.current[key] = setTimeout(() => {
         void runPendingRoomWrite(key);
-      }, 600);
+      }, 2000);
     },
     [rooms, runPendingRoomWrite]
   );
