@@ -1,0 +1,5 @@
+{
+  "name": "HVAC Load Master",
+  "description": "Comprehensive HVAC heat load calculation, duct sizing, and equipment selection tool for engineers and contractors.",
+  "requestFramePermissions": []
+}

@@ -1,0 +1,211 @@
+// ===============================================================
+// Assumed Data Model
+// ===============================================================
+//
+// Collection: projects
+// Document ID: {projectId}
+// Fields:
+//   - name: string (required)
+//   - userId: string (required)
+//   - systemType: string (Hydronic, VRF, Hybrid, Others)
+//   - latitude: number
+//   - longitude: number
+//   - altitude: number
+//   - summerDesignTemp: number
+//   - summerDesignHumidity: number
+//
+// Collection: projects/{projectId}/systems
+// Document ID: {systemId}
+// Fields:
+//   - name: string (required)
+//   - description: string
+//
+// Collection: projects/{projectId}/zones
+// Collection: projects/{projectId}/systems/{systemId}/zones
+// Document ID: {zoneId}
+// Fields:
+//   - name: string (required)
+//   - outdoorTemp: number
+//   - indoorTemp: number
+//   - outdoorHumidity: number
+//   - indoorHumidity: number
+//
+// Collection: projects/{projectId}/zones/{zoneId}/rooms
+// Collection: projects/{projectId}/systems/{systemId}/zones/{zoneId}/rooms
+// Document ID: {roomId}
+// Fields:
+//   - name: string (required)
+//   - length: number
+//   - width: number
+//   - height: number
+//   - facph: number
+//   - peopleCount: number
+//   - lightsWatts: number
+//   - equipmentWatts: number
+//   - orientation: string
+//   - windowArea: number
+//
+// ===============================================================
+
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ===============================================================
+    // Helper Functions
+    // ===============================================================
+    
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function getUserData() {
+      let path = /databases/$(database)/documents/users/$(request.auth.uid);
+      return exists(path) ? get(path).data : null;
+    }
+
+    function hasRole(role) {
+      let data = getUserData();
+      return isAuthenticated() && data != null && data.role == role;
+    }
+
+    function isSuper() {
+      return isAuthenticated() && (
+        ('email' in request.auth.token && request.auth.token.email.lower() == "pravat04@gmail.com" && request.auth.token.email_verified == true) || 
+        hasRole('Super')
+      );
+    }
+
+    function isAdminA() {
+      return isSuper() || hasRole('Admin A'); // Procurement
+    }
+
+    function isAdminB() {
+      return isSuper() || hasRole('Admin B'); // HR & Technicians
+    }
+
+    function isDesignTeam() {
+      return isSuper() || hasRole('Design Team');
+    }
+
+    function isAccounts() {
+      return isSuper() || hasRole('Accounts');
+    }
+
+    function isEmployee() {
+      let data = getUserData();
+      return isAuthenticated() && (
+        isSuper() ||
+        (data != null && data.role in ['Super', 'Admin A', 'Admin B', 'Accounts', 'Technician', 'Design Team'])
+      );
+    }
+
+    function isValidUser(data) {
+      return data.keys().hasAll(['email', 'role']) &&
+             data.email is string && data.role in ['Super', 'Admin A', 'Admin B', 'Accounts', 'Technician', 'Design Team', 'Pending'];
+    }
+
+    // ===============================================================
+    // Rules
+    // ===============================================================
+
+    match /users/{userId} {
+      allow read: if isAuthenticated();
+      
+      // Allow creation if:
+      // 1. Requester is Super/Admin B (for whitelisting)
+      // 2. Requester is the user themselves AND they are claiming an invite (their email matches an existing invite doc)
+      allow create: if isAuthenticated() && (
+        isSuper() || 
+        isAdminB() || 
+        (request.auth.uid == userId && 'email' in request.auth.token && exists(/databases/$(database)/documents/users/$(request.auth.token.email.lower())))
+      );
+      
+      // Allow update for admins, or users updating their own non-role fields
+      allow update: if isAuthenticated() && (
+        isSuper() || 
+        isAdminB() || 
+        (request.auth.uid == userId && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['lastLogin', 'displayName', 'photoURL']))
+      );
+      
+      // Allow deletion for Super Admins, Admin B, or users deleting their own email-based invite doc after claiming
+      allow delete: if isAuthenticated() && (
+        isSuper() || 
+        isAdminB() ||
+        (request.auth.token.email.lower() == userId)
+      );
+    }
+
+    match /projects/{projectId} {
+      allow read: if isEmployee();
+      allow create: if isDesignTeam();
+      allow update: if isDesignTeam() || (isEmployee() && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status']));
+      allow delete: if isSuper();
+
+      // Systems (VRF)
+      match /systems/{systemId} {
+        allow read: if isEmployee();
+        allow write: if isDesignTeam();
+
+        // Hybrid systems use zones under systems
+        match /zones/{zoneId} {
+          allow read: if isEmployee();
+          allow write: if isDesignTeam();
+
+          match /rooms/{roomId} {
+            allow read: if isEmployee();
+            allow write: if isDesignTeam();
+
+            match /envelopeElements/{elementId} {
+              allow read: if isEmployee();
+              allow write: if isDesignTeam();
+            }
+          }
+        }
+
+        match /rooms/{roomId} {
+          allow read: if isEmployee();
+          allow write: if isDesignTeam();
+
+          match /envelopeElements/{elementId} {
+            allow read: if isEmployee();
+            allow write: if isDesignTeam();
+          }
+        }
+      }
+
+      // Equipment & Procurement (Admin A)
+      match /equipment/{equipmentId} {
+        allow read: if isEmployee();
+        allow create: if isAdminA() || isDesignTeam();
+        allow update: if isAdminA() || isDesignTeam() || hasRole('Technician');
+        allow delete: if isAdminA() || isSuper();
+      }
+
+      // Zones (Hydronic/Others)
+      match /zones/{zoneId} {
+        allow read: if isEmployee();
+        allow write: if isDesignTeam();
+
+        match /rooms/{roomId} {
+          allow read: if isEmployee();
+          allow write: if isDesignTeam();
+
+          match /envelopeElements/{elementId} {
+            allow read: if isEmployee();
+            allow write: if isDesignTeam();
+          }
+        }
+      }
+    }
+
+    match /wallTypes/{wallTypeId} {
+      allow read: if isAuthenticated();
+      allow write: if isSuper();
+    }
+
+    match /_test_/connection {
+      allow read: if true;
+    }
+  }
+}

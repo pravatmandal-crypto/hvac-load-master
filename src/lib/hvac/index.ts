@@ -1,0 +1,74 @@
+/**
+ * HVAC Calculation Engine
+ * Main entry point - exports all HVAC calculation utilities
+ * Organized by domain for better maintainability and testability
+ */
+
+// Constants and Interfaces
+export {
+  type DesignConditions,
+  type WallType,
+  type WallColor,
+  type RoomDetails,
+  type EnvelopeElement,
+  type EnvelopeBreakdown,
+  type PsychrometricProperties,
+  type CoilParameters,
+  type VentilationLoadResult,
+  type HeatingLoadResult,
+  type DuctSizingResult,
+  type PipeSizingResult,
+  type MoistureResult,
+  type ReheatResult,
+  type ParasiticGainsResult,
+  type SolarGainResult,
+  DEFAULT_WALL_TYPES,
+  ACTIVITY_TYPES,
+  ACTIVITY_ACH_RECOMMENDATIONS,
+  getRecommendedAch,
+  ASHRAE_CONSTANTS,
+  CLTD_OFFSETS,
+  CLTD_COLOR_CORRECTION,
+  CLTD_LM,
+  SHGF_FACTORS,
+  SOLAR_INTENSITY_COEFFICIENTS,
+  VALIDATION_RULES,
+} from './constants';
+
+// Geometry calculations
+export { calculateRoomVolume, calculateRoomArea, calculateRoomSurfaceAreas } from './geometry';
+
+// Internal gains (people, lighting, equipment)
+export { calculateInternalGains, type InternalGains } from './internalGains';
+
+// Envelope (wall, glass, roof) gains
+export {
+  getCLTD,
+  getSHGF,
+  calculateSingleElementGain,
+  calculateEnvelopeGain,
+} from './envelope';
+
+// Solar radiation
+export { calculateSolarGain } from './solar';
+
+// Ventilation and heating
+export { calculateVentilationLoad, calculateHeatingLoad } from './ventilation';
+
+// Psychrometric properties and coil parameters
+export { calculatePsychrometrics, calculateCoilParameters } from './psychrometrics';
+
+// Duct and pipe sizing
+export {
+  sizeDuct,
+  sizeRectangularDuct,
+  sizePipe,
+  getPipeVelocity,
+  calculatePipeFrictionLoss,
+} from './sizing';
+
+// Moisture management and reheat
+export { calculateMoistureManagement, calculateReheat } from './reheat';
+
+// Parasitic gains
+export { calculateParasiticGains } from './parasitic';

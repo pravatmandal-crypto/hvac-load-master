@@ -1,0 +1,24 @@
+﻿node_modules/
+dist/
+.env
+*.local
+.DS_Store
+.agent.md
+.env.example
+.firebaserc
+.git.code-workspace
+
+# Firebase
+.firebase/
+firebase-debug.log
+*.log
+
+# Temp/dev scripts
+fix*.cjs
+
+# Claude backup
+.claude_backup/
+
+# Binary/example files
+*.xlsx
+*.xls

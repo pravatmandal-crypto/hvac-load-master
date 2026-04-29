@@ -1,0 +1,189 @@
+{
+  "entities": {
+    "Project": {
+      "title": "Project",
+      "description": "HVAC Project metadata",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string" },
+        "place": { "type": "string" },
+        "owner": { "type": "string" },
+        "typeOfUse": { "type": "string" },
+        "systemType": { "type": "string", "enum": ["Hydronic", "VRF", "Hybrid", "Others"] },
+        "latitude": { "type": "number" },
+        "longitude": { "type": "number" },
+        "altitude": { "type": "number" },
+        "summerDesignTemp": { "type": "number" },
+        "summerDesignHumidity": { "type": "number" },
+        "summerIndoorTemp": { "type": "number" },
+        "summerIndoorHumidity": { "type": "number" },
+        "winterDesignTemp": { "type": "number" },
+        "winterDesignHumidity": { "type": "number" },
+        "winterIndoorTemp": { "type": "number" },
+        "winterIndoorHumidity": { "type": "number" },
+        "designMonth": { "type": "number", "minimum": 1, "maximum": 12 },
+        "designHour": { "type": "number", "minimum": 0, "maximum": 23 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "userId": { "type": "string" },
+        "status": { "type": "string", "enum": ["Design", "Tendering", "Execution", "Completed"] }
+      },
+      "required": ["name", "userId"]
+    },
+    "Equipment": {
+      "title": "Equipment",
+      "description": "Selected HVAC units (Indoor/Outdoor)",
+      "type": "object",
+      "properties": {
+        "projectId": { "type": "string" },
+        "systemId": { "type": "string" },
+        "roomId": { "type": "string" },
+        "type": { "type": "string", "enum": ["IDU", "ODU", "Pump", "Chiller", "FCU"] },
+        "model": { "type": "string" },
+        "brand": { "type": "string" },
+        "capacityBTU": { "type": "number" },
+        "status": { "type": "string", "enum": ["Selected", "Ordered", "Installed", "Commissioned"] },
+        "installationDate": { "type": "string", "format": "date" }
+      },
+      "required": ["projectId", "type", "model"]
+    },
+    "HVACSystem": {
+      "title": "HVAC System",
+      "description": "A specific HVAC system (e.g., a VRF ODU network)",
+      "type": "object",
+      "properties": {
+        "projectId": { "type": "string" },
+        "name": { "type": "string" },
+        "description": { "type": "string" }
+      },
+      "required": ["projectId", "name"]
+    },
+    "Zone": {
+      "title": "Zone",
+      "description": "A group of rooms with shared design conditions",
+      "type": "object",
+      "properties": {
+        "projectId": { "type": "string" },
+        "name": { "type": "string" },
+        "outdoorTemp": { "type": "number" },
+        "indoorTemp": { "type": "number" },
+        "outdoorHumidity": { "type": "number" },
+        "indoorHumidity": { "type": "number" }
+      },
+      "required": ["projectId", "name"]
+    },
+    "Room": {
+      "title": "Room",
+      "description": "Individual space details with detailed internal gains",
+      "type": "object",
+      "properties": {
+        "zoneId": { "type": "string" },
+        "name": { "type": "string" },
+        "floor": { "type": "string" },
+        "length": { "type": "number" },
+        "width": { "type": "number" },
+        "height": { "type": "number" },
+        "facph": { "type": "number" },
+        "peopleCount": { "type": "number" },
+        "lightsWattsPerSqft": { "type": "number" },
+        "equipmentKW": { "type": "number" },
+        "othersKW": { "type": "number" }
+      },
+      "required": ["zoneId", "name"]
+    },
+    "EnvelopeElement": {
+      "title": "Envelope Element",
+      "description": "Wall, Glass, Roof, or Floor elements for solar/conduction gain",
+      "type": "object",
+      "properties": {
+        "roomId": { "type": "string" },
+        "type": { "type": "string", "enum": ["Wall", "Glass", "Partition", "Floor", "Roof"] },
+        "orientation": { "type": "string", "enum": ["N", "NE", "E", "SE", "S", "SW", "W", "NW", "H"] },
+        "area": { "type": "number" },
+        "uValue": { "type": "number" },
+        "solarFactor": { "type": "number" },
+        "shgc": { "type": "number" },
+        "description": { "type": "string" }
+      },
+      "required": ["roomId", "type", "area"]
+    },
+    "WallType": {
+      "title": "Wall Type",
+      "description": "Predefined wall constructions with U-values",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string" },
+        "uValue": { "type": "number" },
+        "description": { "type": "string" }
+      },
+      "required": ["name", "uValue"]
+    },
+    "User": {
+      "title": "User",
+      "description": "Application user with role-based access",
+      "type": "object",
+      "properties": {
+        "email": { "type": "string" },
+        "displayName": { "type": "string" },
+        "photoURL": { "type": "string" },
+        "role": { "type": "string", "enum": ["Super", "Admin A", "Admin B", "Accounts", "Technician", "Design Team"] },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "lastLogin": { "type": "string", "format": "date-time" }
+      },
+      "required": ["email", "role"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": "User",
+      "description": "User profiles and roles"
+    },
+    "/projects/{projectId}": {
+      "schema": "Project",
+      "description": "User projects"
+    },
+    "/projects/{projectId}/systems/{systemId}": {
+      "schema": "HVACSystem",
+      "description": "Systems within a project (mainly for VRF)"
+    },
+    "/projects/{projectId}/zones/{zoneId}": {
+      "schema": "Zone",
+      "description": "Zones within a project (for Hydronic/Others)"
+    },
+    "/projects/{projectId}/systems/{systemId}/zones/{zoneId}": {
+      "schema": "Zone",
+      "description": "Zones within a specific system (for VRF)"
+    },
+    "/projects/{projectId}/systems/{systemId}/rooms/{roomId}": {
+      "schema": "Room",
+      "description": "Rooms directly within a system (for VRF)"
+    },
+    "/projects/{projectId}/systems/{systemId}/rooms/{roomId}/envelopeElements/{elementId}": {
+      "schema": "EnvelopeElement",
+      "description": "Solar/Conduction elements for a room directly in a system"
+    },
+    "/projects/{projectId}/zones/{zoneId}/rooms/{roomId}": {
+      "schema": "Room",
+      "description": "Rooms within a zone"
+    },
+    "/projects/{projectId}/zones/{zoneId}/rooms/{roomId}/envelopeElements/{elementId}": {
+      "schema": "EnvelopeElement",
+      "description": "Solar/Conduction elements for a room"
+    },
+    "/projects/{projectId}/systems/{systemId}/zones/{zoneId}/rooms/{roomId}": {
+      "schema": "Room",
+      "description": "Rooms within a zone in a system"
+    },
+    "/projects/{projectId}/systems/{systemId}/zones/{zoneId}/rooms/{roomId}/envelopeElements/{elementId}": {
+      "schema": "EnvelopeElement",
+      "description": "Solar/Conduction elements for a room in a system"
+    },
+    "/projects/{projectId}/equipment/{equipmentId}": {
+      "schema": "Equipment",
+      "description": "Equipment selected for the project"
+    },
+    "/wallTypes/{wallTypeId}": {
+      "schema": "WallType",
+      "description": "Global wall type library"
+    }
+  }
+}
