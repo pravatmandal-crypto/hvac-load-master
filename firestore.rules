@@ -182,6 +182,14 @@ service cloud.firestore {
         allow delete: if isAdminA() || isSuper();
       }
 
+      // Equipment Systems (VRF / Package / Split system design)
+      match /equipmentSystems/{systemId} {
+        allow read: if isEmployee();
+        allow create: if isAdminA() || isDesignTeam();
+        allow update: if isAdminA() || isDesignTeam();
+        allow delete: if isAdminA() || isSuper();
+      }
+
       // Zones (Hydronic/Others)
       match /zones/{zoneId} {
         allow read: if isEmployee();

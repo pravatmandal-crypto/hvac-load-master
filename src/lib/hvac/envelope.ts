@@ -131,7 +131,10 @@ export const calculateSingleElementGain = (
     } else {
       const autoSHGF = getSHGF(element.orientation, design.altitude || 0);
       const effectiveSHGF = element.isOverride ? element.solarFactor : autoSHGF;
-      radiation = element.area * effectiveSHGF * (element.shgc || 0.7);
+      // SHGF table is calibrated for reference DSA glass (SC = 1.0, SHGC ≈ 0.87).
+      // Convert SHGC → SC before applying: SC = SHGC / 0.87
+      const sc = (element.shgc || 0.7) / 0.87;
+      radiation = element.area * effectiveSHGF * sc;
     }
 
     return { conduction, radiation, total: conduction + radiation };

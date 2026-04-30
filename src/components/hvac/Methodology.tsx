@@ -1,6 +1,9 @@
-import React, { useState } from 'react';
+import React, { useRef, useState } from 'react';
+import jsPDF from 'jspdf';
+import { toCanvas } from 'html-to-image';
+import { toast } from 'sonner';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../ui/card';
-import { BookOpen, Calculator, Thermometer, Wind, Shield, Info, FlaskConical, Zap, AlertTriangle, ChevronDown, ChevronRight } from 'lucide-react';
+import { BookOpen, Calculator, Thermometer, Wind, Shield, Info, FlaskConical, Zap, AlertTriangle, ChevronDown, ChevronRight, FileDown, Loader2 } from 'lucide-react';
 
 /* ─────────────────────────────────────────────────────────────────────────── */
 /* Methodology.tsx — Complete engineering methodology documentation             */
@@ -46,11 +49,168 @@ function CalcRow({ label, formula, result, unit = '', highlight = false }: { lab
   );
 }
 
-export default function Methodology() {
+export default function Methodology({ userRole }: { userRole?: string | null }) {
+  const contentRef = useRef<HTMLDivElement>(null);
+  const [generating, setGenerating] = useState(false);
+
+  const handleDownloadPDF = async () => {
+    if (!contentRef.current || generating) return;
+    setGenerating(true);
+    try {
+      const pageW = 210;
+      const pageH = 297;
+      const marginL = 6, marginR = 6, marginT = 8, marginB = 10;
+      const contentW = pageW - marginL - marginR;   // 198 mm
+      const contentH = pageH - marginT - marginB;   // 279 mm
+
+      const doc = new jsPDF({ unit: 'mm', format: 'a4', compress: true });
+
+      // ── Cover page (page 1) ─────────────────────────────────────────────────
+      doc.setFillColor(15, 80, 160);
+      doc.rect(0, 0, pageW, 85, 'F');
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(26);
+      doc.setTextColor(255, 255, 255);
+      doc.text('HVAC LOAD MASTER', 14, 28);
+      doc.setFontSize(17);
+      doc.text('Engineering Methodology', 14, 42);
+      doc.setFont('helvetica', 'normal');
+      doc.setFontSize(9.5);
+      doc.setTextColor(195, 218, 255);
+      doc.text('Complete step-by-step documentation of the cooling load calculation engine', 14, 55);
+      doc.text('CLTD / SHGF / CLF  ·  ASHRAE Psychrometrics  ·  ADP / Bypass-Factor Analysis', 14, 62);
+      doc.text('Reheat  ·  Dehumidification  ·  Equipment Sizing  ·  Full Worked Examples', 14, 69);
+
+      const refs = ['ASHRAE Fundamentals 2017', 'ASHRAE 1997 Ch. 26', 'Carrier Design Manual Pt. 1', 'ASHRAE Std 62.1-2022'];
+      let bx = 14;
+      doc.setFontSize(7.5);
+      doc.setTextColor(255, 255, 255);
+      refs.forEach((r) => {
+        const tw = doc.getTextWidth(r) + 6;
+        doc.setDrawColor(180, 210, 255);
+        doc.setFillColor(30, 100, 190);
+        doc.roundedRect(bx, 76, tw, 6.5, 1.5, 1.5, 'FD');
+        doc.text(r, bx + 3, 80.5);
+        bx += tw + 3;
+      });
+
+      doc.setFont('helvetica', 'normal');
+      doc.setFontSize(9);
+      doc.setTextColor(40, 55, 80);
+      doc.text('This document describes the full engineering methodology implemented in the HVAC Load Master', 14, 100);
+      doc.text('calculation engine — covering psychrometrics, envelope loads, internal gains, ADP analysis,', 14, 107);
+      doc.text('equipment sizing, moisture management, reheat, and three complete real-life worked examples.', 14, 114);
+
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(9);
+      doc.setTextColor(15, 80, 160);
+      doc.text('Contents', 14, 130);
+      doc.setDrawColor(15, 80, 160);
+      doc.setLineWidth(0.4);
+      doc.line(14, 132, 196, 132);
+      const contents = [
+        'Step 1 — Psychrometrics',
+        'Step 2 — Envelope Loads (CLTD / SHGF / CLF)',
+        'Step 3 — Internal Gains (People, Lighting, Equipment)',
+        'Step 4 — Ventilation Load & Bypass Factor Split',
+        'Step 5 — Load Assembly (ERSH / ERLH → CSH / CLH → GTH)',
+        'Step 6 — ADP Search & Dehumidified CFM',
+        'Step 7 — Equipment Sizing (Load TR vs CFM TR)',
+        'Step 8 — Reheat Analysis & Moisture Management',
+        'Worked Example — Conference Room, Salt Lake, Kolkata',
+        'Worked Example — Monsoon Design Scenario',
+        'Worked Example — Gangtok High-Altitude Comparison',
+        'Older Methods — Not Used Here & Why',
+        'Assumptions, Constants & Known Limitations',
+        'ASHRAE References',
+      ];
+      doc.setFont('helvetica', 'normal');
+      doc.setFontSize(8.5);
+      doc.setTextColor(40, 55, 80);
+      contents.forEach((line, i) => {
+        doc.text(`${i + 1}.  ${line}`, 16, 140 + i * 8);
+      });
+
+      doc.setDrawColor(200, 210, 225);
+      doc.setLineWidth(0.2);
+      doc.line(14, pageH - 18, pageW - 14, pageH - 18);
+      doc.setFontSize(7.5);
+      doc.setTextColor(100, 115, 140);
+      doc.text('© CREATIVE CONCEPT  ·  HVAC Load Master', 14, pageH - 12);
+      doc.text(
+        new Date().toLocaleDateString('en-GB', { day: '2-digit', month: 'long', year: 'numeric' }),
+        pageW - 14, pageH - 12, { align: 'right' },
+      );
+
+      // ── Render content to canvas, then split into A4 pages ─────────────────
+      // Using html2canvas directly avoids jsPDF's broken dynamic-import path.
+      const canvas = await toCanvas(contentRef.current, {
+        pixelRatio: 2,
+        backgroundColor: '#ffffff',
+      });
+
+      // How many canvas pixels fit in one PDF content row (279mm)
+      const pxPerMm = canvas.width / contentW;
+      const pageHeightPx = Math.round(contentH * pxPerMm);
+      const totalContentPages = Math.ceil(canvas.height / pageHeightPx);
+
+      const scratch = document.createElement('canvas');
+      scratch.width = canvas.width;
+
+      for (let i = 0; i < totalContentPages; i++) {
+        doc.addPage();
+
+        const srcY = i * pageHeightPx;
+        const srcH = Math.min(pageHeightPx, canvas.height - srcY);
+        scratch.height = srcH;
+        const ctx = scratch.getContext('2d')!;
+        ctx.clearRect(0, 0, scratch.width, scratch.height);
+        ctx.drawImage(canvas, 0, srcY, canvas.width, srcH, 0, 0, canvas.width, srcH);
+
+        const imgData = scratch.toDataURL('image/jpeg', 0.88);
+        const imgHmm = (srcH / pxPerMm);
+        doc.addImage(imgData, 'JPEG', marginL, marginT, contentW, imgHmm);
+
+        // Footer
+        doc.setFont('helvetica', 'normal');
+        doc.setFontSize(6);
+        doc.setTextColor(130, 140, 160);
+        doc.text(
+          '© CREATIVE CONCEPT  ·  HVAC Load Master  ·  Engineering Methodology  ·  ASHRAE Fundamentals 2017',
+          8, pageH - 4,
+        );
+        doc.text(`Page ${i + 1} of ${totalContentPages}`, pageW - 8, pageH - 4, { align: 'right' });
+      }
+
+      doc.save('HVAC_Load_Master_Methodology.pdf');
+
+    } catch (err) {
+      console.error('Methodology PDF generation failed:', err);
+      const msg = err instanceof Error ? err.message : String(err);
+      toast.error(`PDF failed: ${msg.slice(0, 120)}`);
+    } finally {
+      setGenerating(false);
+    }
+  };
+
   return (
     <div className="max-w-5xl mx-auto space-y-8 pb-12">
       <div className="flex flex-col gap-2">
-        <h2 className="text-3xl font-bold text-gray-900">Engineering Methodology</h2>
+        <div className="flex items-start justify-between gap-4">
+          <h2 className="text-3xl font-bold text-gray-900">Engineering Methodology</h2>
+          {userRole === 'Super' && (
+            <button
+              onClick={handleDownloadPDF}
+              disabled={generating}
+              className="flex-shrink-0 flex items-center gap-2 px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-700 disabled:bg-indigo-400 text-white text-sm font-semibold shadow transition-colors"
+              title="Download full methodology as PDF (Super only)"
+            >
+              {generating
+                ? <><Loader2 className="w-4 h-4 animate-spin" /> Generating…</>
+                : <><FileDown className="w-4 h-4" /> Download PDF</>}
+            </button>
+          )}
+        </div>
         <p className="text-gray-500 text-sm leading-relaxed">
           Complete step-by-step documentation of the cooling load calculation engine —
           CLTD/SHGF/CLF method (ASHRAE 1997 Ch. 26), ASHRAE psychrometrics, activity-based people loads,
@@ -63,6 +223,7 @@ export default function Methodology() {
           ))}
         </div>
       </div>
+      <div ref={contentRef}>
 
       {/* ── STEP 1 ── Psychrometrics ─────────────────────────────────────── */}
       <Card className="border-none shadow-sm overflow-hidden">
@@ -314,10 +475,12 @@ export default function Methodology() {
               code={'RS_base = Q_envelope_s + Q_people_s + Q_lights\n        + Q_equipment + Q_others  [BTU/h]'} />
             <FBlock label="Parasitic gains (duct & fan)" color="text-violet-600"
               code={'Q_duct = duct_pct% × RS_base  (default 2%)\nQ_fan  = fan_pct%  × RS_base  (default 3%)\n(Accounts for heat picked up in supply ductwork\nand supply fan motor heat dissipation)'} />
-            <FBlock label="Effective Room Sensible Heat (ERSH)" color="text-violet-600"
-              code={'ERSH = RS_base + Q_vs×BF + Q_duct + Q_fan\n\nThis is the sensible load seen at the room\nlevel, including the bypassed OA fraction.'} />
-            <FBlock label="Effective Room Latent Heat (ERLH)" color="text-violet-600"
-              code={'ERLH = Q_people_latent + Q_vl×BF\n\n(No duct/fan latent — ducts add sensible only)'} />
+            <FBlock label="ERSH — raw (before safety)" color="text-violet-600"
+              code={'ERSH_raw = RS_base + Q_vs×BF + Q_duct + Q_fan\n\nRoom-level sensible including bypassed OA\nand parasitic gains, before safety allowance.'} />
+            <FBlock label="ERLH — raw (before safety)" color="text-violet-600"
+              code={'ERLH_raw = Q_people_latent + Q_vl×BF\n\n(No duct/fan latent — ducts add sensible only)'} />
+            <FBlock label="Safety factors applied to ERSH & ERLH" color="text-violet-600"
+              code={'ERSH = ERSH_raw × (1 + s_s%)   default s_s = 10%\nERLH = ERLH_raw × (1 + s_l%)   default s_l = 5%\n\ns_s and s_l are user-configurable per room.\nApplied HERE — before coil load assembly —\nso the safety margin is carried into every\ndownstream calculation (CFM, TR, reheat).\n\nNote: Overall safety (default 3%) is applied\nlater to govTR — do not confuse the two.'} />
             <FBlock label="OA coil contributions" color="text-violet-600"
               code={'OA_S = Q_vs × (1−BF)   → only this fraction\nOA_L = Q_vl × (1−BF)   → hits the coil surface'} />
             <FBlock label="Total Coil Sensible (CSH)" color="text-violet-600"
@@ -339,20 +502,29 @@ Others             ─┘
                        + Q_vs × BF          ← bypassed OA sensible
                        + Q_duct (2%)
                        + Q_fan  (3%)
+                     ─────────────────────────
+                       ERSH_raw
+                       × (1 + s_s%)         ← SENSIBLE SAFETY (default 10%)
                      ═══════════════════════
-                       ERSH
-                       + OA_S = Q_vs×(1−BF) ← conditioned OA sensible
+                       ERSH  (with safety)
+                       + OA_S = Q_vs×(1−BF) ← un-bypassed OA sensible
                      ═══════════════════════
                        CSH (Total Coil Sensible)
 
 People latent      ─┐
-                    ├─ ERLH
+                    ├─ ERLH_raw
 Q_vl × BF          ─┘
+                       × (1 + s_l%)         ← LATENT SAFETY  (default 5%)
+                     ─────────────────────────
+                       ERLH  (with safety)
                        + OA_L = Q_vl×(1−BF)
                      ═══════════════════════
                        CLH (Total Coil Latent)
 
-                       GTH = CSH + CLH → LoadTR`}
+                       GTH = CSH + CLH → LoadTR
+                       govTR × (1 + s_o%)   ← OVERALL SAFETY (default 3%)
+                     ═══════════════════════
+                       requiredTR`}
               </div>
             </div>
           </div>
@@ -391,12 +563,40 @@ Q_vl × BF          ─┘
             <FBlock label="Why CFM cancels in the ADP loop" color="text-cyan-600"
               code={'GSHF = (1.08·CFM·ΔT) / (1.08·CFM·ΔT + 0.68·CFM·ΔW)\n     = (1.08·ΔT) / (1.08·ΔT + 0.68·ΔW)\nCFM divides out → pure psychrometric intersection.\nThis is mathematically identical to the GSHF-line\nmethod on the psychrometric chart.'} />
           </div>
-          <div className="p-3 bg-cyan-50 border border-cyan-100 rounded-lg text-[11px] text-cyan-900">
-            <strong>Engineering Guideline:</strong> Typical ADP range for air conditioning = 42–58°F.
+          <div className="p-3 bg-cyan-50 border border-cyan-100 rounded-lg text-[11px] text-cyan-900 space-y-3">
+            <p><strong>Engineering Guideline:</strong> Typical ADP range for air conditioning = 42–58°F.
             ADP below 42°F means the coil would need to operate near freezing — impractical without anti-frost control.
             ADP above 58°F with high latent load indicates the room humidity cannot be adequately controlled —
             a dedicated dehumidifier or DOAS (Dedicated Outdoor Air System) should be considered.
-            Supply air temperature &lt;55°F can cause condensation on supply grilles or draught complaints.
+            Supply air temperature &lt;55°F can cause condensation on supply grilles or draught complaints.</p>
+            <p><strong>Minimum ADP by system type</strong> — physical floor enforced by the refrigerant / medium:</p>
+            <table className="w-full text-[10.5px] border border-cyan-200 rounded overflow-hidden mt-1">
+              <thead>
+                <tr className="bg-cyan-100 text-cyan-900">
+                  <th className="text-left px-2 py-1 font-bold">System Type</th>
+                  <th className="text-center px-2 py-1 font-bold">Min ADP</th>
+                  <th className="text-left px-2 py-1 font-bold">Reason</th>
+                </tr>
+              </thead>
+              <tbody>
+                {[
+                  ['Chiller (CHW)', '44 °F', 'Chilled water supply typically 44 °F (7 °C); coil cannot cool below supply water temperature'],
+                  ['VRF / Hybrid', '42 °F', 'Variable refrigerant circuit can reach lower evaporating temperatures (~−2 °C) with modern inverter compressors'],
+                  ['Standard DX — CAC / VAV / WSHP', '44 °F', 'R-410A refrigerant evaporating temperature floor ~40–45 °F under normal operation'],
+                ].map(([sys, adp, reason]) => (
+                  <tr key={sys} className="border-t border-cyan-100">
+                    <td className="px-2 py-1 font-semibold">{sys}</td>
+                    <td className="px-2 py-1 text-center font-mono font-bold text-cyan-800">{adp}</td>
+                    <td className="px-2 py-1 text-gray-700">{reason}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            <p className="text-[10px] text-cyan-700 mt-1">
+              The <em>indicated ADP</em> is computed from the GSHF / saturation-curve intersection and may fall anywhere in the 35–65 °F search range.
+              The <em>selected ADP</em> = max(indicated ADP, min ADP for system type). If the selected ADP rises significantly above the indicated ADP,
+              the latent load may not be fully removed — consider upgrading to a lower-ADP system or adding a dedicated dehumidifier.
+            </p>
           </div>
         </CardContent>
       </Card>
@@ -408,7 +608,7 @@ Q_vl × BF          ─┘
             <Shield className="w-6 h-6" />
             <div>
               <CardTitle>Step 7 — Equipment Sizing (TR & CFM)</CardTitle>
-              <CardDescription className="text-amber-100">Load TR vs CFM TR — governing criterion — +10% safety factor</CardDescription>
+              <CardDescription className="text-amber-100">Load TR vs CFM TR — governing criterion — configurable safety factors</CardDescription>
             </div>
           </div>
         </CardHeader>
@@ -420,8 +620,8 @@ Q_vl × BF          ─┘
               code={'cfmTR = DSCFM / 400  [TR]\n— OR algebraically equivalent —\ncfmTR = CSH / (12 000 × (1 − BF))\n\nDerivation: DSCFM = CSH/(1.08×(1−BF)×ΔT)\n            TR = DSCFM × 1.08 × ΔT / 12000\n              → TR = CSH / (12000×(1−BF))'} />
             <FBlock label="Governing TR" color="text-amber-600"
               code={'govTR = max(loadTR, cfmTR)\n\nIf loadTR > cfmTR → heat load controls\nIf cfmTR > loadTR → airflow/dehumidification\n                     controls (humid climates)'} />
-            <FBlock label="Required TR with safety factor" color="text-amber-600"
-              code={'requiredTR = govTR × 1.10  (+10% safety)\n\nPractice: always select next standard unit size.\nCommon sizes: 1.5, 2, 2.5, 3, 4, 5, 7.5, 10 TR'} />
+            <FBlock label="Required TR with overall safety factor" color="text-amber-600"
+              code={'requiredTR = govTR × (1 + s_o%)   default s_o = 3%\n\nNote — safety is applied in two stages:\n  Stage 1 (Step 5): s_s% on ERSH, s_l% on ERLH\n                    captures uncertainty in room loads\n  Stage 2 (Step 7): s_o% on govTR\n                    captures equipment tolerance\nDo NOT add both as a single lump — that double-counts.\n\nPractice: always select next standard unit size.\nCommon sizes: 1.5, 2, 2.5, 3, 4, 5, 7.5, 10 TR'} />
             <FBlock label="CFM estimate for equipment catalog" color="text-amber-600"
               code={'CFM_unit ≈ capacityTR × 400  [rule of thumb]\nUsed for duct sizing and AHU selection.\nVRF/DOAS: this rule may not apply — check\nmanufacturer selection data.'} />
           </div>
@@ -454,7 +654,7 @@ Q_vl × BF          ─┘
             <FBlock label="Reheat power (if required)" color="text-rose-600"
               code={'Q_reheat = DSCFM × 1.08 × (T_supply_target − T_ADP)\nRaises supply air from T_ADP to desired supply DB\n\nNote: Reheat wastes energy — ASHRAE 90.1\nrequires justification for continuous reheat.'} />
             <FBlock label="Total moisture removal rate" color="text-rose-600"
-              code={'ṁ_water = CLH / h_fg        [lbs/hr]\n         = CLH / 1050\n\nh_fg = 1050 BTU/lb  (latent heat of vaporisation\n       at ~50°F coil conditions)\n\nIncludes ALL latent sources:\n  people + ventilation + infiltration'} />
+              code={'ṁ_water = CLH / h_fg        [lbs/hr]\n         = CLH / 1061\n\nh_fg = 1061 BTU/lb  (ASHRAE standard value,\n       consistent with 0.68 latent constant)\n\nDerivation check:\n  0.68 = 60 min/hr × 0.075 lb/ft³ × 1061 BTU/lb\n         ──────────────────────────────────────\n              7000 gr/lb\n       = 0.682 ≈ 0.68  ✓\n\nIncludes ALL latent sources:\n  people + ventilation + infiltration'} />
             <FBlock label="Dehumidification action" color="text-rose-600"
               code={'CLH > 0 → Dehumidify  (summer, humid OA)\nCLH < 0 → Humidify    (winter, dry OA)\nCLH = 0 → None        (balanced conditions)'} />
             <FBlock label="Condensate rate (practical)" color="text-rose-600"
@@ -1533,12 +1733,12 @@ convective, making CLF < 1.0 even less significant.`,
                   { p: 'Bypass Factor (BF)',         v: '0.15',                       r: 'Typical chilled-water coil; adjustable for DX' },
                   { p: 'Duct gain',                  v: '2% of ERSH',                 r: 'Industry rule; increase for long duct runs' },
                   { p: 'Fan heat gain',               v: '3% of ERSH',                 r: 'Typical supply fan efficiency assumption' },
-                  { p: 'Safety factor (equipment)',   v: '+10% on TR',                 r: 'Standard engineering safety margin' },
+                  { p: 'Safety factors',              v: 's_s=10% ERSH, s_l=5% ERLH, s_o=3% govTR', r: 'Applied in two stages — room loads then equipment sizing (see Step 5 & 7)' },
                   { p: 'CLTD tables',                v: 'ASHRAE 1997 Ch. 26',          r: '⚠ Pre-RTS method; RTS (2001+) is more accurate for detailed design' },
                   { p: 'SHGF tables',                v: 'ASHRAE 40°N, July',           r: 'Fixed orientation table; latitude not adjusted dynamically' },
                   { p: 'CLF for glass',              v: '0.85',                        r: 'Conservative; varies by room construction mass' },
                   { p: 'People loads',               v: 'ASHRAE 2017 Ch.18 Table 2',   r: 'At 75°F room temp; values decrease at lower room temps' },
-                  { p: 'Latent heat of vaporisation',v: '1050 BTU/lb',                 r: 'At ~50°F coil conditions; exact value = 1059 BTU/lb at 32°F' },
+                  { p: 'Latent heat of vaporisation',v: '1061 BTU/lb',                 r: 'ASHRAE standard — consistent with 0.68 latent constant derivation (60×0.075×1061/7000 = 0.682)' },
                   { p: 'CFM/ton rule',               v: '400 CFM/ton',                 r: 'Standard rule; VRF / DOAS systems may differ significantly' },
                   { p: 'Sensible heat factor',       v: '1.08 BTU·min/(h·CFM·°F)',     r: 'Standard at sea level; altitude-corrected via P_atm ratio' },
                   { p: 'Latent heat factor',         v: '0.68 BTU·min/(h·CFM·gr/lb)',  r: 'Standard at sea level' },
@@ -1601,6 +1801,7 @@ convective, making CLF < 1.0 even less significant.`,
       <div className="text-center pt-8">
         <p className="text-[10px] text-gray-400 uppercase tracking-widest">HVAC Load Master • Engineering Documentation • v2.1 • ASHRAE 2017</p>
       </div>
+      </div>{/* end contentRef */}
     </div>
   );
 }

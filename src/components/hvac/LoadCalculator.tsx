@@ -38,6 +38,12 @@ import {
 } from '../../lib/hvac';
 import { EnvelopeElement } from '../../lib/hvac/constants';
 
+const getMinAdp = (systemType?: string): number => {
+  const st = String(systemType || '').toLowerCase();
+  if (st === 'chiller') return 44;
+  if (st === 'vrf' || st === 'hybrid') return 42;
+  return 44;
+};
 
 interface Room {
   id: string;
@@ -455,11 +461,10 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
     const oaTotal = oaSensible + oaLatent;
     const coilSensible = ersh + oaSensible;
     const coilLatent = erlh + oaLatent;
-    const grandTotal = (erh + oaTotal) * (1 + overallSafetyPct / 100);
+    const grandTotal = erh + oaTotal;
     const grandTotalTR = grandTotal / 12000;
     const rshf = coilSensible > 0 ? coilSensible / Math.max(1, (coilSensible + coilLatent)) : 1;
 
-    const isChiller = String(project?.systemType || '').toLowerCase().includes('chiller');
     const coil = calculateCoilParameters(
       coilSensible,
       coilLatent,
@@ -469,15 +474,15 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
       bf,
       35,
       65,
-      isChiller ? 50 : 54,
+      getMinAdp(project?.systemType),
     );
     const presetTotalACH = getRecommendedAch(roomSource.achProfile ?? roomSource.activityType);
     const totalSupplyACH = Math.max(presetTotalACH, rd.facph);
     const totalSupplyCFM = (calculateRoomVolume(rd) * totalSupplyACH) / 60;
     const designSupplyCFM = Math.max(coil.dehumidifiedCFM, totalSupplyCFM);
-    const cfmTR = (designSupplyCFM * 1.08 * 20) / 12000;
+    const cfmTR = designSupplyCFM / 400;
     const governingTR = Math.max(grandTotalTR, cfmTR);
-    const requiredTR = governingTR * 1.10;
+    const requiredTR = governingTR * (1 + overallSafetyPct / 100);
 
     const outdoorPsych = calculatePsychrometrics(dc.outdoorTemp, dc.outdoorHumidity, dc.altitude || 0);
     const indoorPsych = calculatePsychrometrics(dc.indoorTemp, dc.indoorHumidity, dc.altitude || 0);
@@ -583,8 +588,6 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
     let monsoonCooling = 0;
     let monsoonDesignCfm = 0;
 
-    const isChillerLocal = String(project?.systemType || '').toLowerCase().includes('chiller');
-
     const calculateCoolingSnapshot = (room: any, elements: EnvelopeElement[], zoneDc: typeof defaultDesignConditions) => {
       const rd: RoomDetails = {
         id: room.id,
@@ -594,7 +597,7 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
         width: Number(room.width) || 0,
         height: Number(room.height) || 0,
         hasFalseCeiling: room.hasFalseCeiling ?? false,
-        falseCeilingHeight: Number(room.falseCeilingHeight) || 8,
+        falseCeilingHeight: Number(room.falseCeilingHeight) || 0,
         facph: Number(room.facph) || 0,
         peopleCount: Number(room.peopleCount) || 0,
         activityType: room.activityType ?? 'office',
@@ -622,7 +625,7 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
       const oaLatent = vent.latent * (1 - BF_LOCAL);
       const coilSensible = ersh + oaSensible;
       const coilLatent = erlh + oaLatent;
-      const grandTotal = (coilSensible + coilLatent) * (1 + overallSafetyPct / 100);
+      const grandTotal = coilSensible + coilLatent;
 
       const coilLocal = calculateCoilParameters(
         coilSensible,
@@ -633,7 +636,7 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
         BF_LOCAL,
         35,
         65,
-        isChillerLocal ? 50 : 54,
+        getMinAdp(project?.systemType),
       );
       const presetTotalACH = getRecommendedAch(room.achProfile ?? room.activityType);
       const totalSupplyACH = Math.max(presetTotalACH, rd.facph);
@@ -689,8 +692,8 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
     const roomCount = Object.values(liveRooms).reduce((sum, r) => sum + (r as any[]).length, 0);
     const monsoonTR = monsoonCooling / 12000;
     const summerTR = summerCooling / 12000;
-    const summerCfmTR = summerDesignCfm > 0 ? (summerDesignCfm * 1.08 * 20) / 12000 : 0;
-    const monsoonCfmTR = monsoonDesignCfm > 0 ? (monsoonDesignCfm * 1.08 * 20) / 12000 : 0;
+    const summerCfmTR = summerDesignCfm > 0 ? summerDesignCfm / 400 : 0;
+    const monsoonCfmTR = monsoonDesignCfm > 0 ? monsoonDesignCfm / 400 : 0;
     const summerGoverningTR = Math.max(summerTR, summerCfmTR);
     const monsoonGoverningTR = Math.max(monsoonTR, monsoonCfmTR);
     const governingLoadSeason = includeMonsoon && monsoonTR > summerTR ? 'Monsoon' : 'Summer';

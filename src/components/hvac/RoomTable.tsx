@@ -39,6 +39,20 @@ const BF = 0.15; // Bypass Factor
 const WALL_TYPES  = DEFAULT_WALL_TYPES.filter(w => w.id.startsWith('w'));
 const GLASS_TYPES = DEFAULT_WALL_TYPES.filter(w => w.id.startsWith('g'));
 
+/**
+ * Minimum achievable ADP by system type — physical constraint of refrigerant/medium.
+ * Chiller: CHW supply typically 44°F (7°C).
+ * VRF/Hybrid: variable refrigerant, can reach ~42°F evaporating.
+ * CAC/VAV/WSHP/others: standard DX R-410A evaporating ~40–45°F → floor at 44°F.
+ * Design/indicated ADP is calculated from GSHF; this is only the lower bound.
+ */
+const getMinAdp = (systemType?: string): number => {
+  const st = String(systemType || '').toLowerCase();
+  if (st === 'chiller') return 44;
+  if (st === 'vrf' || st === 'hybrid') return 42;
+  return 44; // CAC, VAV, WSHP, unknown — standard DX floor
+};
+
 type RoomTableProps = {
   rooms: any[];
   liveRooms?: any[];
@@ -80,6 +94,9 @@ type RoomParameterState = {
   overallSafetyPercent: number;
   ductGainPct: number;
   fanGainPct: number;
+  heatingSafetyPercent: number;
+  heatingPickupPercent: number;
+  includeHumidifier: boolean;
 };
 
 function getRoomParameterState(room: any): RoomParameterState {
@@ -103,6 +120,9 @@ function getRoomParameterState(room: any): RoomParameterState {
     overallSafetyPercent: Number(room?.overallSafetyPercent) || 3,
     ductGainPct: Number(room?.ductGainPct) || 2,
     fanGainPct: Number(room?.fanGainPct) || 3,
+    heatingSafetyPercent: Number(room?.heatingSafetyPercent ?? 10),
+    heatingPickupPercent: Number(room?.heatingPickupPercent ?? 15),
+    includeHumidifier: Boolean(room?.includeHumidifier ?? false),
   };
 }
 
@@ -126,7 +146,10 @@ function areRoomParameterStatesEqual(left: RoomParameterState, right: RoomParame
     left.latentSafetyPercent === right.latentSafetyPercent &&
     left.overallSafetyPercent === right.overallSafetyPercent &&
     left.ductGainPct === right.ductGainPct &&
-    left.fanGainPct === right.fanGainPct
+    left.fanGainPct === right.fanGainPct &&
+    left.heatingSafetyPercent === right.heatingSafetyPercent &&
+    left.heatingPickupPercent === right.heatingPickupPercent &&
+    left.includeHumidifier === right.includeHumidifier
   );
 }
 
@@ -169,14 +192,13 @@ function useRoomCalc(room: any, elements: any[], designConditions: DesignConditi
     const fanPct = Number(room.fanGainPct) || 3;
     const parasitic = calculateParasiticGains(erSensible, erSensible, ductPct, fanPct);
 
-    let ersh = erSensible + parasitic.ductGain + parasitic.fanGain;
-    let erlh = erLatent;
-    
-    // Apply safety factors to sensible and latent loads
+    const ershRaw = erSensible + parasitic.ductGain + parasitic.fanGain;
+    const erlhRaw = erLatent;
+
     const sensibleSafetyFactor = Number(room.sensibleSafetyPercent ?? 10) / 100;
     const latentSafetyFactor = Number(room.latentSafetyPercent ?? 5) / 100;
-    ersh = ersh * (1 + sensibleSafetyFactor);
-    erlh = erlh * (1 + latentSafetyFactor);
+    const ersh = ershRaw * (1 + sensibleSafetyFactor);
+    const erlh = erlhRaw * (1 + latentSafetyFactor);
     
     const erh = ersh + erlh;
 
@@ -202,11 +224,14 @@ function useRoomCalc(room: any, elements: any[], designConditions: DesignConditi
 
     // Total dehumidification = entire coil latent load (people + ventilation + infiltration)
     // expressed as moisture removal rate (lbs/hr), not just ventilation portion
-    const LATENT_HEAT_VAPORIZATION = 1050; // BTU/lb at coil conditions
+    // 1061 BTU/lb = ASHRAE standard hfg at coil conditions, consistent with 0.68 latent constant
+    const LATENT_HEAT_VAPORIZATION = 1061;
     const totalMoistureLbsHr = coilLatent / LATENT_HEAT_VAPORIZATION;
+    const moistureAction: 'Dehumidify' | 'Humidify' | 'Balanced' =
+      coilLatent > 50 ? 'Dehumidify' : coilLatent < -50 ? 'Humidify' : 'Balanced';
     const moisture = {
-      rate:    totalMoistureLbsHr,
-      action:  'Dehumidify' as const,
+      rate:    Math.max(0, totalMoistureLbsHr),
+      action:  moistureAction,
       unit:    'lbs/hr',
       loadBTU: coilLatent,
     };
@@ -215,7 +240,6 @@ function useRoomCalc(room: any, elements: any[], designConditions: DesignConditi
     // so that OA contribution is included — gives the true supply-air SHR
     const reheat = calculateReheat(coilSensible, coilLatent);
 
-    const isChiller = String(project?.systemType || '').toLowerCase().includes('chiller');
     const coil = calculateCoilParameters(
       coilSensible,
       coilLatent,
@@ -225,8 +249,100 @@ function useRoomCalc(room: any, elements: any[], designConditions: DesignConditi
       BF,
       35,
       65,
-      isChiller ? 50 : 54,
+      getMinAdp(project?.systemType),
     );
+
+    // Supply air conditions at AHU discharge — mix of coil-saturated outlet and bypass air
+    // T_supply = ADP + BF × (T_room − ADP)
+    // W_supply = W_ADP + BF × (W_room − W_ADP)
+    const adpPsych = calculatePsychrometrics(coil.selectedADP, 100, altFt);
+    const tSupply = coil.selectedADP + BF * (designConditions.indoorTemp - coil.selectedADP);
+    const wSupply = adpPsych.humidityRatio + BF * (indoorPsych.humidityRatio - adpPsych.humidityRatio);
+    const hSupply = 0.240 * tSupply + wSupply * (1061 + 0.444 * tSupply);
+    const deltaWCoilGr = Math.max(0, (indoorPsych.humidityRatio - wSupply) * 7000);
+    const supplyAir = {
+      temp: tSupply,
+      humidityRatioGr: wSupply * 7000,
+      enthalpy: hSupply,
+      deltaWGr: deltaWCoilGr,
+    };
+
+    // ── Winter humidification analysis ────────────────────────────────────────
+    // Cold outdoor air has very low W; when heated to indoor temp its RH collapses.
+    // Only fresh (outdoor) air needs moisture added — recirculated air is already at indoor W.
+    // Ref: ASHRAE Fundamentals 2017 Ch.1, ASHRAE Std 55-2020, ASHRAE Std 62.1-2022 §5.9
+    const wOD = designConditions.winterOutdoorTemp ?? 35;
+    const wORH = designConditions.winterOutdoorHumidity ?? 60;
+    const wIT = designConditions.winterIndoorTemp ?? designConditions.indoorTemp;
+    const wIRH = designConditions.winterIndoorHumidity ?? designConditions.indoorHumidity;
+
+    const winterOutdoorPsych = calculatePsychrometrics(wOD, wORH, altFt);
+    const winterIndoorPsych  = calculatePsychrometrics(wIT, wIRH, altFt);
+    // Saturation at indoor temp — used to show RH after heating without humidification
+    const winterSatAtIndoor  = calculatePsychrometrics(wIT, 100, altFt);
+
+    const wOut = winterOutdoorPsych.humidityRatio; // lb/lb
+    const wIn  = winterIndoorPsych.humidityRatio;  // lb/lb
+    const deltaWLb = wIn - wOut;                   // positive = humidification needed
+    const humNeeded = deltaWLb > 0.0001;           // >0.7 gr/lb deficit threshold
+
+    // Moisture addition rate: ṁ = 4.5 × CFM_fresh × ΔW  (lbs/hr)
+    // 4.5 = 60 min/hr × 0.075 lb/ft³ (standard air density)
+    // Only ventilation (fresh) CFM needs humidification
+    const freshCFMwinter = vent.cfm;
+    const humRateBase = humNeeded ? 4.5 * freshCFMwinter * deltaWLb : 0;
+    const humRate     = humRateBase * 1.10; // 10% design margin per Carrier Manual Pt.1
+
+    // Energy penalty: latent heat added at evaporative conditions (h_fg = 1061 BTU/lb)
+    const humEnergyBTU = humRate * LATENT_HEAT_VAPORIZATION;
+    const humEnergyKW  = humEnergyBTU / 3412;
+
+    // Diagnostic: RH the outdoor air would reach after heating to indoor temp with NO moisture added
+    const rhAfterHeating = winterSatAtIndoor.humidityRatio > 0
+      ? Math.min(100, Math.round((wOut / winterSatAtIndoor.humidityRatio) * 100))
+      : 0;
+
+    // ASHRAE 62.1-2022 §5.9: max supply-air humidity ratio = 0.0125 lb/lb (87 gr/lb)
+    // prevents microbial growth in ductwork
+    const W62_1_CAP = 0.0125;
+    const exceedsCap62 = wIn > W62_1_CAP;
+
+    const winterHumidification = {
+      needed:           humNeeded,
+      deltaWLb,
+      deltaWGr:         deltaWLb * 7000,
+      wOutLb:           wOut,
+      wOutGr:           wOut * 7000,
+      wInLb:            wIn,
+      wInGr:            wIn * 7000,
+      rhAfterHeating,
+      freshCFM:         freshCFMwinter,
+      humidifierRateBase: humRateBase,
+      humidifierRate:   humRate,       // lbs/hr with 10% margin
+      energyBTU:        humEnergyBTU,
+      energyKW:         humEnergyKW,
+      exceedsCap62,
+      outdoorTemp:      wOD,
+      outdoorRH:        wORH,
+      indoorTemp:       wIT,
+      indoorRH:         wIRH,
+    };
+
+    // ── Design Heating Load — with safety factors ─────────────────────────────
+    // ASHRAE recommendation (Fundamentals 2017 Ch.18, Carrier Manual Pt.1):
+    //   Transmission safety 10%  — thermal bridges, cold corners, simplified U-values
+    //   Ventilation safety  10%  — actual infiltration > calculated, door openings
+    //   Pickup factor       15%  — morning warm-up after night setback (commercial)
+    // Applied as: subtotal = (trans + vent) × (1+safety), design = subtotal × (1+pickup)
+    const heatingSafetyFactor = Number(room.heatingSafetyPercent ?? 10) / 100;
+    const heatingPickupFactor = Number(room.heatingPickupPercent ?? 15) / 100;
+    const includeHumidifier   = Boolean(room.includeHumidifier ?? false);
+
+    const hTransSafe    = heating.transmissionLoss  * (1 + heatingSafetyFactor);
+    const hVentSafe     = heating.ventilationHeating * (1 + heatingSafetyFactor);
+    const hHumLoad      = includeHumidifier && winterHumidification.needed ? winterHumidification.energyBTU : 0;
+    const heatingSubtotal    = hTransSafe + hVentSafe + hHumLoad;
+    const designHeatingLoad  = heatingSubtotal * (1 + heatingPickupFactor);
 
     // Separate OA FACPH from total-supply ACH requirement.
     // OA FACPH drives outdoor-air load; total ACH (preset) drives minimum supply airflow.
@@ -236,8 +352,8 @@ function useRoomCalc(room: any, elements: any[], designConditions: DesignConditi
     const designCFM = Math.max(coil.dehumidifiedCFM, totalSupplyCFM);
     const achGovernsAirflow = coil.dehumidifiedCFM < totalSupplyCFM;
 
-    // CFM-based TR from governing design airflow, using nominal 20F supply-room delta.
-    const cfmTR = (designCFM * 1.08 * 20) / 12000;
+    // 400 CFM/Ton: ASHRAE minimum for adequate dehumidification (sensible + latent)
+    const cfmTR = designCFM / 400;
     const governingTR = Math.max(grandTotalTR, cfmTR);
     
     // Apply overall safety factor to final TR
@@ -260,6 +376,8 @@ function useRoomCalc(room: any, elements: any[], designConditions: DesignConditi
       vent,
       heating,
       parasitic,
+      ershRaw,
+      erlhRaw,
       ersh,
       erlh,
       erh,
@@ -286,6 +404,16 @@ function useRoomCalc(room: any, elements: any[], designConditions: DesignConditi
       moisture,
       reheat,
       coil,
+      supplyAir,
+      winterHumidification,
+      heatingSafetyFactor,
+      heatingPickupFactor,
+      includeHumidifier,
+      hTransSafe,
+      hVentSafe,
+      hHumLoad,
+      heatingSubtotal,
+      designHeatingLoad,
       designCFM,
       achGovernsAirflow,
       presetTotalACH,
@@ -863,8 +991,26 @@ function RoomDetail({
               <TableCell className="text-xs py-1 text-right text-gray-400">—</TableCell>
               <TableCell className="text-xs py-1 text-right font-mono">{n(calc.parasitic.fanGain)}</TableCell>
             </TableRow>
+            <TableRow className="bg-slate-50 border-t border-slate-200">
+              <TableCell className="text-xs py-1.5 font-semibold text-slate-700">Sub-total (before safety)</TableCell>
+              <TableCell className="text-xs py-1.5 text-right font-mono text-slate-700">{n(calc.ershRaw)}</TableCell>
+              <TableCell className="text-xs py-1.5 text-right font-mono text-slate-700">{n(calc.erlhRaw)}</TableCell>
+              <TableCell className="text-xs py-1.5 text-right font-mono text-slate-700">{n(calc.ershRaw + calc.erlhRaw)}</TableCell>
+            </TableRow>
+            <TableRow className="bg-yellow-50">
+              <TableCell className="text-xs py-1 pl-8 text-yellow-800">Sensible Safety ({(calc.sensibleSafetyFactor * 100).toFixed(0)}%)</TableCell>
+              <TableCell className="text-xs py-1 text-right font-mono text-yellow-700">+{n(calc.ersh - calc.ershRaw)}</TableCell>
+              <TableCell className="text-xs py-1 text-right text-gray-400">—</TableCell>
+              <TableCell className="text-xs py-1 text-right font-mono text-yellow-700">+{n(calc.ersh - calc.ershRaw)}</TableCell>
+            </TableRow>
+            <TableRow className="bg-yellow-50">
+              <TableCell className="text-xs py-1 pl-8 text-yellow-800">Latent Safety ({(calc.latentSafetyFactor * 100).toFixed(0)}%)</TableCell>
+              <TableCell className="text-xs py-1 text-right text-gray-400">—</TableCell>
+              <TableCell className="text-xs py-1 text-right font-mono text-yellow-700">+{n(calc.erlh - calc.erlhRaw)}</TableCell>
+              <TableCell className="text-xs py-1 text-right font-mono text-yellow-700">+{n(calc.erlh - calc.erlhRaw)}</TableCell>
+            </TableRow>
             <TableRow className="bg-slate-100 border-t-2 border-slate-300">
-              <TableCell className="text-xs py-2 font-bold text-slate-900">EFFECTIVE ROOM HEAT</TableCell>
+              <TableCell className="text-xs py-2 font-bold text-slate-900">EFFECTIVE ROOM HEAT (after safety)</TableCell>
               <TableCell className="text-xs py-2 text-right font-mono font-bold text-slate-900">{n(calc.ersh)}</TableCell>
               <TableCell className="text-xs py-2 text-right font-mono font-bold text-slate-900">{n(calc.erlh)}</TableCell>
               <TableCell className="text-xs py-2 text-right font-mono font-bold text-slate-900">{n(calc.erh)}</TableCell>
@@ -875,11 +1021,46 @@ function RoomDetail({
               <TableCell className="text-xs py-1.5 text-right font-mono">{n(calc.oaLatent)}</TableCell>
               <TableCell className="text-xs py-1.5 text-right font-mono font-semibold">{n(calc.oaTotal)}</TableCell>
             </TableRow>
+
+            {/* Grand Total — direct arithmetic sum of all rows above */}
+            <TableRow className="bg-indigo-700 border-t-2 border-indigo-900">
+              <TableCell className="text-xs py-2 font-bold text-white">GRAND TOTAL COIL LOAD</TableCell>
+              <TableCell className="text-xs py-2 text-right font-mono font-bold text-white">{n(calc.coilSensible)}</TableCell>
+              <TableCell className="text-xs py-2 text-right font-mono font-bold text-white">{n(calc.coilLatent)}</TableCell>
+              <TableCell className="text-xs py-2 text-right font-mono font-bold text-white">{n(calc.grandTotal)}  ({calc.grandTotalTR.toFixed(2)} TR)</TableCell>
+            </TableRow>
+
+            {/* Equipment Sizing section */}
+            <TableRow className="bg-gray-800">
+              <TableCell colSpan={4} className="text-[10px] py-1 font-bold text-gray-300 uppercase tracking-widest pl-3">Equipment Sizing</TableCell>
+            </TableRow>
+            <TableRow>
+              <TableCell className="text-xs py-1 pl-8 text-gray-600">Load TR  (Grand Total ÷ 12,000)</TableCell>
+              <TableCell className="text-xs py-1 text-right text-gray-400" colSpan={2}>—</TableCell>
+              <TableCell className="text-xs py-1 text-right font-mono">{calc.grandTotalTR.toFixed(2)} TR</TableCell>
+            </TableRow>
+            <TableRow className="bg-gray-50">
+              <TableCell className="text-xs py-1 pl-8 text-gray-600">CFM TR  ({n(calc.designCFM)} CFM ÷ 400)</TableCell>
+              <TableCell className="text-xs py-1 text-right text-gray-400" colSpan={2}>—</TableCell>
+              <TableCell className="text-xs py-1 text-right font-mono">{calc.cfmTR.toFixed(2)} TR</TableCell>
+            </TableRow>
+            <TableRow>
+              <TableCell className="text-xs py-1.5 pl-8 font-semibold text-indigo-700">
+                Governing TR&nbsp;
+                <span className="font-normal text-gray-500">({calc.cfmTR >= calc.grandTotalTR ? 'CFM governed' : 'Load governed'})</span>
+              </TableCell>
+              <TableCell className="text-xs py-1.5 text-right text-gray-400" colSpan={2}>—</TableCell>
+              <TableCell className="text-xs py-1.5 text-right font-mono font-bold text-indigo-700">{calc.governingTR.toFixed(2)} TR</TableCell>
+            </TableRow>
+            <TableRow className="bg-yellow-50">
+              <TableCell className="text-xs py-1 pl-8 text-yellow-800">Overall Safety  (+{(calc.overallSafetyFactor * 100).toFixed(0)}%)</TableCell>
+              <TableCell className="text-xs py-1 text-right text-gray-400" colSpan={2}>—</TableCell>
+              <TableCell className="text-xs py-1 text-right font-mono text-yellow-700">+{n((calc.requiredTR - calc.governingTR) * 12000)} BTU/h</TableCell>
+            </TableRow>
             <TableRow className="bg-orange-600 border-t-2 border-orange-700">
-              <TableCell className="text-xs py-2 font-bold text-white">OVERALL TOTAL COOLING</TableCell>
-              <TableCell className="text-xs py-2 text-right text-orange-200">—</TableCell>
-              <TableCell className="text-xs py-2 text-right text-orange-200">—</TableCell>
-              <TableCell className="text-xs py-2 text-right font-mono font-bold text-white">{n(calc.requiredTR * 12000)} BTU/h / {calc.requiredTR.toFixed(2)} TR</TableCell>
+              <TableCell className="text-xs py-2 font-bold text-white">REQUIRED EQUIPMENT CAPACITY</TableCell>
+              <TableCell className="text-xs py-2 text-right text-orange-200" colSpan={2}>—</TableCell>
+              <TableCell className="text-xs py-2 text-right font-mono font-bold text-white">{n(calc.requiredTR * 12000)} BTU/h  /  {calc.requiredTR.toFixed(2)} TR</TableCell>
             </TableRow>
           </TableBody>
         </Table>
@@ -938,47 +1119,96 @@ function RoomDetail({
     </div>
   );
 
-  const renderMoistureSection = (calc: any, seasonalDc: DesignConditions, title: string) => (
-    <div className="space-y-4 rounded-xl border border-emerald-100 bg-emerald-50/15 p-4">
-      <h4 className="text-xs font-bold text-emerald-700 uppercase tracking-widest">{title} Moisture Control</h4>
-      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-        <div className="rounded-xl border border-red-100 bg-red-50/30 p-4">
-          <h4 className="text-xs font-bold text-red-700 uppercase tracking-widest mb-2">Outdoor Conditions</h4>
-          <dl className="space-y-1 text-xs">
-            <div className="flex justify-between"><dt className="text-gray-500">Dry Bulb Temp</dt><dd className="font-mono font-semibold">{seasonalDc.outdoorTemp} °F</dd></div>
-            <div className="flex justify-between"><dt className="text-gray-500">Relative Humidity</dt><dd className="font-mono font-semibold">{seasonalDc.outdoorHumidity} %</dd></div>
-            <div className="flex justify-between"><dt className="text-gray-500">Humidity Ratio (W)</dt><dd className="font-mono font-semibold">{(calc.outdoorPsych.humidityRatio * 7000).toFixed(1)} gr/lb</dd></div>
-            <div className="flex justify-between"><dt className="text-gray-500">Enthalpy (h)</dt><dd className="font-mono font-semibold">{calc.outdoorPsych.enthalpy.toFixed(1)} BTU/lb</dd></div>
-          </dl>
+  const renderMoistureSection = (calc: any, seasonalDc: DesignConditions, title: string) => {
+    const actionColor =
+      calc.moisture.action === 'Dehumidify' ? 'text-amber-700' :
+      calc.moisture.action === 'Humidify'   ? 'text-blue-700'  : 'text-emerald-700';
+    const reheatNeeded = calc.reheat?.needed && calc.reheat.reheatBTU > 0;
+    return (
+      <div className="space-y-4 rounded-xl border border-emerald-100 bg-emerald-50/15 p-4">
+        <h4 className="text-xs font-bold text-emerald-700 uppercase tracking-widest">{title} Moisture Control</h4>
+
+        {/* Air-state conditions: Outdoor | Indoor | Supply */}
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+          <div className="rounded-xl border border-red-100 bg-red-50/30 p-4">
+            <h4 className="text-xs font-bold text-red-700 uppercase tracking-widest mb-2">Outdoor Air</h4>
+            <dl className="space-y-1 text-xs">
+              <div className="flex justify-between"><dt className="text-gray-500">Dry Bulb</dt><dd className="font-mono font-semibold">{seasonalDc.outdoorTemp} °F</dd></div>
+              <div className="flex justify-between"><dt className="text-gray-500">Rel. Humidity</dt><dd className="font-mono font-semibold">{seasonalDc.outdoorHumidity} %</dd></div>
+              <div className="flex justify-between"><dt className="text-gray-500">W (gr/lb)</dt><dd className="font-mono font-semibold">{(calc.outdoorPsych.humidityRatio * 7000).toFixed(1)}</dd></div>
+              <div className="flex justify-between"><dt className="text-gray-500">h (BTU/lb)</dt><dd className="font-mono font-semibold">{calc.outdoorPsych.enthalpy.toFixed(1)}</dd></div>
+            </dl>
+          </div>
+          <div className="rounded-xl border border-blue-100 bg-blue-50/30 p-4">
+            <h4 className="text-xs font-bold text-blue-700 uppercase tracking-widest mb-2">Indoor Design</h4>
+            <dl className="space-y-1 text-xs">
+              <div className="flex justify-between"><dt className="text-gray-500">Dry Bulb</dt><dd className="font-mono font-semibold">{seasonalDc.indoorTemp} °F</dd></div>
+              <div className="flex justify-between"><dt className="text-gray-500">Rel. Humidity</dt><dd className="font-mono font-semibold">{seasonalDc.indoorHumidity} %</dd></div>
+              <div className="flex justify-between"><dt className="text-gray-500">W (gr/lb)</dt><dd className="font-mono font-semibold">{(calc.indoorPsych.humidityRatio * 7000).toFixed(1)}</dd></div>
+              <div className="flex justify-between"><dt className="text-gray-500">h (BTU/lb)</dt><dd className="font-mono font-semibold">{calc.indoorPsych.enthalpy.toFixed(1)}</dd></div>
+            </dl>
+          </div>
+          <div className="rounded-xl border border-violet-100 bg-violet-50/30 p-4">
+            <h4 className="text-xs font-bold text-violet-700 uppercase tracking-widest mb-2">Supply Air (AHU Discharge)</h4>
+            <dl className="space-y-1 text-xs">
+              <div className="flex justify-between"><dt className="text-gray-500">Dry Bulb</dt><dd className="font-mono font-semibold">{calc.supplyAir.temp.toFixed(1)} °F</dd></div>
+              <div className="flex justify-between"><dt className="text-gray-500">ADP (selected)</dt><dd className="font-mono font-semibold">{calc.coil.selectedADP.toFixed(0)} °F</dd></div>
+              <div className="flex justify-between"><dt className="text-gray-500">W (gr/lb)</dt><dd className="font-mono font-semibold">{calc.supplyAir.humidityRatioGr.toFixed(1)}</dd></div>
+              <div className="flex justify-between"><dt className="text-gray-500">h (BTU/lb)</dt><dd className="font-mono font-semibold">{calc.supplyAir.enthalpy.toFixed(1)}</dd></div>
+            </dl>
+          </div>
         </div>
-        <div className="rounded-xl border border-blue-100 bg-blue-50/30 p-4">
-          <h4 className="text-xs font-bold text-blue-700 uppercase tracking-widest mb-2">Indoor Design Conditions</h4>
-          <dl className="space-y-1 text-xs">
-            <div className="flex justify-between"><dt className="text-gray-500">Dry Bulb Temp</dt><dd className="font-mono font-semibold">{seasonalDc.indoorTemp} °F</dd></div>
-            <div className="flex justify-between"><dt className="text-gray-500">Relative Humidity</dt><dd className="font-mono font-semibold">{seasonalDc.indoorHumidity} %</dd></div>
-            <div className="flex justify-between"><dt className="text-gray-500">Humidity Ratio (W)</dt><dd className="font-mono font-semibold">{(calc.indoorPsych.humidityRatio * 7000).toFixed(1)} gr/lb</dd></div>
-            <div className="flex justify-between"><dt className="text-gray-500">Enthalpy (h)</dt><dd className="font-mono font-semibold">{calc.indoorPsych.enthalpy.toFixed(1)} BTU/lb</dd></div>
-          </dl>
-        </div>
-      </div>
-      <div className="rounded-xl border border-emerald-100 bg-emerald-50/30 p-4">
-        <h4 className="text-xs font-bold text-emerald-700 uppercase tracking-widest mb-3">Moisture Management</h4>
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-          {[
-            { label: 'Action Required', value: calc.moisture.action, color: calc.moisture.action === 'Dehumidify' ? 'text-amber-700' : 'text-emerald-700' },
-            { label: 'Moisture Rate', value: `${calc.moisture.rate.toFixed(2)} lbs/hr`, color: 'text-gray-800' },
-            { label: 'Latent Load', value: `${n(calc.moisture.loadBTU ?? 0)} BTU/h`, color: 'text-gray-800' },
-            { label: 'ΔW (gr/lb)', value: `${((calc.outdoorPsych.humidityRatio - calc.indoorPsych.humidityRatio) * 7000).toFixed(1)}`, color: 'text-gray-800' },
-          ].map(item => (
-            <div key={item.label} className="bg-white border border-emerald-100 rounded-lg px-3 py-2 text-center">
-              <p className="text-[10px] text-gray-500 uppercase tracking-wide mb-0.5">{item.label}</p>
-              <p className={`text-sm font-bold ${item.color}`}>{item.value}</p>
+
+        {/* Moisture management summary */}
+        <div className="rounded-xl border border-emerald-100 bg-emerald-50/30 p-4">
+          <h4 className="text-xs font-bold text-emerald-700 uppercase tracking-widest mb-3">Moisture Management</h4>
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+            <div className="bg-white border border-emerald-100 rounded-lg px-3 py-2 text-center">
+              <p className="text-[10px] text-gray-500 uppercase tracking-wide mb-0.5">Action Required</p>
+              <p className={`text-sm font-bold ${actionColor}`}>{calc.moisture.action}</p>
             </div>
-          ))}
+            <div className="bg-white border border-emerald-100 rounded-lg px-3 py-2 text-center">
+              <p className="text-[10px] text-gray-500 uppercase tracking-wide mb-0.5">Moisture Rate</p>
+              <p className="text-sm font-bold text-gray-800">{calc.moisture.rate.toFixed(2)} lbs/hr</p>
+            </div>
+            <div className="bg-white border border-emerald-100 rounded-lg px-3 py-2 text-center">
+              <p className="text-[10px] text-gray-500 uppercase tracking-wide mb-0.5">Coil Latent Load</p>
+              <p className="text-sm font-bold text-gray-800">{n(calc.moisture.loadBTU ?? 0)} BTU/h</p>
+            </div>
+            <div className="bg-white border border-emerald-100 rounded-lg px-3 py-2 text-center">
+              <p className="text-[10px] text-gray-500 uppercase tracking-wide mb-0.5">ΔW Coil (gr/lb)</p>
+              <p className="text-sm font-bold text-gray-800">{calc.supplyAir.deltaWGr.toFixed(1)}</p>
+              <p className="text-[9px] text-gray-400">W_room − W_supply</p>
+            </div>
+          </div>
         </div>
+
+        {/* Reheat warning */}
+        {reheatNeeded && (
+          <div className="rounded-xl border border-orange-200 bg-orange-50/40 p-4">
+            <h4 className="text-xs font-bold text-orange-700 uppercase tracking-widest mb-2">Reheat Requirement</h4>
+            <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 text-xs">
+              <div className="bg-white border border-orange-100 rounded-lg px-3 py-2 text-center">
+                <p className="text-[10px] text-gray-500 uppercase tracking-wide mb-0.5">Current SHR (GSHF)</p>
+                <p className="text-sm font-bold text-orange-700">{(calc.reheat.currentSHR * 100).toFixed(1)} %</p>
+              </div>
+              <div className="bg-white border border-orange-100 rounded-lg px-3 py-2 text-center">
+                <p className="text-[10px] text-gray-500 uppercase tracking-wide mb-0.5">Target SHR</p>
+                <p className="text-sm font-bold text-gray-700">{(calc.reheat.targetSHR * 100).toFixed(1)} %</p>
+              </div>
+              <div className="bg-white border border-orange-100 rounded-lg px-3 py-2 text-center">
+                <p className="text-[10px] text-gray-500 uppercase tracking-wide mb-0.5">Reheat Needed</p>
+                <p className="text-sm font-bold text-orange-700">{n(calc.reheat.reheatBTU)} BTU/h</p>
+              </div>
+            </div>
+            <p className="text-[10px] text-orange-600 mt-2">
+              SHR is below target — coil removes latent load faster than sensible; reheat coil or VAV mixing recommended to maintain comfort.
+            </p>
+          </div>
+        )}
       </div>
-    </div>
-  );
+    );
+  };
 
   const formatSavedAt = (value: any) => {
     if (!value) return 'Not saved yet';
@@ -1256,15 +1486,39 @@ function RoomDetail({
             />
           </Field>
           <Field label="Overall Safety (%)">
-            <BufferedNumberInput 
-              committersRef={draftCommittersRef} 
-              draftKey={`${id}-overall-safety`} 
-              value={roomDraft.overallSafetyPercent} 
+            <BufferedNumberInput
+              committersRef={draftCommittersRef}
+              draftKey={`${id}-overall-safety`}
+              value={roomDraft.overallSafetyPercent}
               defaultValue={3}
               onDraftChange={(draft, parsed) => handleNumericDraftChange('overallSafetyPercent', draft, parsed)}
-              onCommit={next => patchRoomDraft({ overallSafetyPercent: next })} 
-              className="h-8 text-sm" 
+              onCommit={next => patchRoomDraft({ overallSafetyPercent: next })}
+              className="h-8 text-sm"
               title="Safety factor for final TR (default: 3%)"
+            />
+          </Field>
+          <Field label="Heating Safety (%)">
+            <BufferedNumberInput
+              committersRef={draftCommittersRef}
+              draftKey={`${id}-heating-safety`}
+              value={roomDraft.heatingSafetyPercent}
+              defaultValue={10}
+              onDraftChange={(draft, parsed) => handleNumericDraftChange('heatingSafetyPercent', draft, parsed)}
+              onCommit={next => patchRoomDraft({ heatingSafetyPercent: next })}
+              className="h-8 text-sm"
+              title="Safety on transmission + ventilation heating (ASHRAE Ch.18 default: 10%)"
+            />
+          </Field>
+          <Field label="Pickup Factor (%)">
+            <BufferedNumberInput
+              committersRef={draftCommittersRef}
+              draftKey={`${id}-heating-pickup`}
+              value={roomDraft.heatingPickupPercent}
+              defaultValue={15}
+              onDraftChange={(draft, parsed) => handleNumericDraftChange('heatingPickupPercent', draft, parsed)}
+              onCommit={next => patchRoomDraft({ heatingPickupPercent: next })}
+              className="h-8 text-sm"
+              title="Morning warm-up pickup allowance (Carrier Manual default: 15%; heavy setback: 25%)"
             />
           </Field>
         </div>
@@ -1657,35 +1911,178 @@ function RoomDetail({
 
       {/* ── Heating Load ───────────────────────────────────────────── */}
       {activeStep === 'heating' && (
-      <div className="rounded-xl border border-blue-100 bg-blue-50/30 p-4">
-        <h4 className="text-xs font-bold text-gray-500 uppercase tracking-widest mb-2">Heating Load (Winter)</h4>
-        <div className="overflow-x-auto rounded-lg border border-gray-200">
-          <Table>
-            <TableHeader>
-              <TableRow className="bg-blue-700">
-                <TableHead className="text-xs py-2 text-white font-semibold">Component</TableHead>
-                <TableHead className="text-xs py-2 text-white font-semibold text-right">Sensible (BTU/h)</TableHead>
-                <TableHead className="text-xs py-2 text-white font-semibold text-right">Total (BTU/h)</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              <TableRow>
-                <TableCell className="text-xs py-1.5 text-gray-700">Transmission Loss (U × A × ΔT)</TableCell>
-                <TableCell className="text-xs py-1.5 text-right font-mono">{n(c.heating.transmissionLoss)}</TableCell>
-                <TableCell className="text-xs py-1.5 text-right font-mono">{n(c.heating.transmissionLoss)}</TableCell>
-              </TableRow>
-              <TableRow className="bg-gray-50">
-                <TableCell className="text-xs py-1.5 text-gray-700">Ventilation Heating (1.08 × CFM × ΔT)</TableCell>
-                <TableCell className="text-xs py-1.5 text-right font-mono">{n(c.heating.ventilationHeating)}</TableCell>
-                <TableCell className="text-xs py-1.5 text-right font-mono">{n(c.heating.ventilationHeating)}</TableCell>
-              </TableRow>
-              <TableRow className="bg-blue-700">
-                <TableCell className="text-xs py-2 font-bold text-white">TOTAL HEATING LOAD</TableCell>
-                <TableCell className="text-xs py-2 text-right text-blue-200">—</TableCell>
-                <TableCell className="text-xs py-2 text-right font-mono font-bold text-white">{n(c.heating.totalHeatingLoad)} BTU/h</TableCell>
-              </TableRow>
-            </TableBody>
-          </Table>
+      <div className="space-y-4">
+        {/* Heating load table */}
+        <div className="rounded-xl border border-blue-100 bg-blue-50/30 p-4">
+          <div className="flex items-center justify-between mb-2">
+            <h4 className="text-xs font-bold text-gray-500 uppercase tracking-widest">Heating Load (Winter)</h4>
+            <span className="text-[10px] text-gray-400">Safety {(c.heatingSafetyFactor*100).toFixed(0)}% · Pickup {(c.heatingPickupFactor*100).toFixed(0)}%</span>
+          </div>
+          <div className="overflow-x-auto rounded-lg border border-gray-200">
+            <Table>
+              <TableHeader>
+                <TableRow className="bg-blue-700">
+                  <TableHead className="text-xs py-2 text-white font-semibold">Component</TableHead>
+                  <TableHead className="text-xs py-2 text-white font-semibold text-right">Raw (BTU/h)</TableHead>
+                  <TableHead className="text-xs py-2 text-white font-semibold text-right">With Safety (BTU/h)</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                <TableRow>
+                  <TableCell className="text-xs py-1.5 text-gray-700">Transmission Loss (U × A × ΔT)</TableCell>
+                  <TableCell className="text-xs py-1.5 text-right font-mono text-gray-500">{n(c.heating.transmissionLoss)}</TableCell>
+                  <TableCell className="text-xs py-1.5 text-right font-mono font-semibold">{n(c.hTransSafe)}</TableCell>
+                </TableRow>
+                <TableRow className="bg-gray-50">
+                  <TableCell className="text-xs py-1.5 text-gray-700">Ventilation Heating (1.08 × CFM × ΔT)</TableCell>
+                  <TableCell className="text-xs py-1.5 text-right font-mono text-gray-500">{n(c.heating.ventilationHeating)}</TableCell>
+                  <TableCell className="text-xs py-1.5 text-right font-mono font-semibold">{n(c.hVentSafe)}</TableCell>
+                </TableRow>
+                {c.includeHumidifier && c.winterHumidification.needed && (
+                  <TableRow className="bg-sky-50">
+                    <TableCell className="text-xs py-1.5 text-sky-700 font-medium">
+                      Humidifier Energy (ṁ={c.winterHumidification.humidifierRate.toFixed(2)} lbs/hr × 1,061)
+                    </TableCell>
+                    <TableCell className="text-xs py-1.5 text-right font-mono text-gray-500">—</TableCell>
+                    <TableCell className="text-xs py-1.5 text-right font-mono font-semibold text-sky-700">{n(c.hHumLoad)}</TableCell>
+                  </TableRow>
+                )}
+                <TableRow className="bg-blue-50">
+                  <TableCell className="text-xs py-1.5 font-semibold text-blue-800">Subtotal (before pickup)</TableCell>
+                  <TableCell className="text-xs py-1.5 text-right text-gray-400">—</TableCell>
+                  <TableCell className="text-xs py-1.5 text-right font-mono font-semibold text-blue-800">{n(c.heatingSubtotal)}</TableCell>
+                </TableRow>
+                <TableRow className="bg-amber-50">
+                  <TableCell className="text-xs py-1.5 text-amber-700">
+                    Pickup / Warm-up Allowance (+{(c.heatingPickupFactor*100).toFixed(0)}%)
+                    <span className="ml-1 text-[10px] text-amber-500">morning setback recovery</span>
+                  </TableCell>
+                  <TableCell className="text-xs py-1.5 text-right text-gray-400">—</TableCell>
+                  <TableCell className="text-xs py-1.5 text-right font-mono font-semibold text-amber-700">{n(c.designHeatingLoad - c.heatingSubtotal)}</TableCell>
+                </TableRow>
+                <TableRow className="bg-blue-700">
+                  <TableCell className="text-xs py-2 font-bold text-white">DESIGN HEATING LOAD</TableCell>
+                  <TableCell className="text-xs py-2 text-right text-blue-200">—</TableCell>
+                  <TableCell className="text-xs py-2 text-right font-mono font-bold text-white">{n(c.designHeatingLoad)} BTU/h</TableCell>
+                </TableRow>
+              </TableBody>
+            </Table>
+          </div>
+          <p className="text-[10px] text-gray-400 mt-1.5">
+            Raw total: {n(c.heating.totalHeatingLoad)} BTU/h — Safety {(c.heatingSafetyFactor*100).toFixed(0)}% per ASHRAE Ch.18 (thermal bridges + infiltration margin) — Pickup {(c.heatingPickupFactor*100).toFixed(0)}% per Carrier Manual Pt.1
+          </p>
+        </div>
+
+        {/* Winter humidification analysis */}
+        <div className="rounded-xl border border-sky-200 bg-sky-50/40 p-4 space-y-3">
+          <div className="flex items-center justify-between">
+            <h4 className="text-xs font-bold text-sky-700 uppercase tracking-widest">
+              Winter Humidification Analysis
+            </h4>
+            <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${
+              c.winterHumidification.needed
+                ? 'bg-sky-100 text-sky-800 border border-sky-300'
+                : 'bg-emerald-100 text-emerald-700 border border-emerald-200'
+            }`}>
+              {c.winterHumidification.needed ? 'HUMIDIFIER REQUIRED' : 'NO HUMIDIFIER NEEDED'}
+            </span>
+          </div>
+
+          {/* Why humidification is / is not needed */}
+          <div className="text-[11px] text-gray-600 leading-relaxed bg-white border border-sky-100 rounded-lg px-3 py-2">
+            {c.winterHumidification.needed ? (
+              <>
+                Outdoor air at <strong>{c.winterHumidification.outdoorTemp}°F / {c.winterHumidification.outdoorRH}% RH</strong> carries only <strong>{c.winterHumidification.wOutGr.toFixed(1)} gr/lb</strong> of moisture.
+                When heated to indoor setpoint <strong>({c.winterHumidification.indoorTemp}°F)</strong> without adding moisture, its RH drops to <strong className="text-rose-600">{c.winterHumidification.rhAfterHeating}%</strong> — well below the ASHRAE 55 comfort minimum of 30%.
+                A humidifier must add <strong>{c.winterHumidification.deltaWGr.toFixed(1)} gr/lb</strong> to every CFM of fresh air.
+              </>
+            ) : (
+              <>
+                Outdoor air at <strong>{c.winterHumidification.outdoorTemp}°F / {c.winterHumidification.outdoorRH}% RH</strong> carries <strong>{c.winterHumidification.wOutGr.toFixed(1)} gr/lb</strong>.
+                After heating to <strong>{c.winterHumidification.indoorTemp}°F</strong>, RH is <strong className="text-emerald-700">{c.winterHumidification.rhAfterHeating}%</strong> — within the ASHRAE 55 comfort range. No mechanical humidification required.
+              </>
+            )}
+          </div>
+
+          {/* Condition comparison cards */}
+          <div className="grid grid-cols-3 gap-2">
+            {[
+              { label: 'Outdoor Air', sub: `${c.winterHumidification.outdoorTemp}°F · ${c.winterHumidification.outdoorRH}% RH`, w: c.winterHumidification.wOutGr, color: 'border-blue-200 bg-blue-50' },
+              { label: 'Indoor Target', sub: `${c.winterHumidification.indoorTemp}°F · ${c.winterHumidification.indoorRH}% RH`, w: c.winterHumidification.wInGr, color: 'border-green-200 bg-green-50' },
+              { label: 'Moisture Deficit ΔW', sub: c.winterHumidification.needed ? 'Humidification required' : 'Sufficient moisture', w: c.winterHumidification.deltaWGr, color: c.winterHumidification.needed ? 'border-rose-200 bg-rose-50' : 'border-emerald-200 bg-emerald-50' },
+            ].map(card => (
+              <div key={card.label} className={`rounded-lg border ${card.color} px-3 py-2 text-center`}>
+                <p className="text-[10px] font-semibold text-gray-500 uppercase tracking-wide">{card.label}</p>
+                <p className="text-sm font-bold text-gray-800 mt-0.5">{card.w.toFixed(1)} <span className="text-xs font-normal">gr/lb</span></p>
+                <p className="text-[10px] text-gray-500 mt-0.5">{card.sub}</p>
+              </div>
+            ))}
+          </div>
+
+          {c.winterHumidification.needed && (
+            <>
+              {/* Include-in-heating toggle */}
+              <div className="flex items-center justify-between bg-white border border-sky-200 rounded-lg px-3 py-2">
+                <div>
+                  <p className="text-xs font-semibold text-gray-700">Include humidifier energy penalty in heating load</p>
+                  <p className="text-[10px] text-gray-400 mt-0.5">Adds {n(c.winterHumidification.energyBTU)} BTU/h to Design Heating Load in the table above</p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    const next = !c.includeHumidifier;
+                    patchRoomDraft({ includeHumidifier: next });
+                    void updateRoom(zoneId, id, { includeHumidifier: next }, systemId);
+                  }}
+                  className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors focus:outline-none ${
+                    c.includeHumidifier ? 'bg-sky-600' : 'bg-gray-300'
+                  }`}
+                >
+                  <span className={`inline-block h-4 w-4 rounded-full bg-white shadow transform transition-transform ${
+                    c.includeHumidifier ? 'translate-x-6' : 'translate-x-1'
+                  }`} />
+                </button>
+              </div>
+
+              {/* Sizing & energy */}
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                {[
+                  { label: 'Fresh Air CFM', value: `${Math.round(c.winterHumidification.freshCFM)} CFM`, sub: 'Ventilation (FACPH)' },
+                  { label: 'Humidifier Output', value: `${c.winterHumidification.humidifierRate.toFixed(2)} lbs/hr`, sub: 'Incl. 10% margin' },
+                  { label: 'Energy Penalty', value: `${n(c.winterHumidification.energyBTU)} BTU/h`, sub: `${c.winterHumidification.energyKW.toFixed(2)} kW` },
+                  { label: 'RH After Heating', value: `${c.winterHumidification.rhAfterHeating}%`, sub: 'Without humidifier' },
+                ].map(item => (
+                  <div key={item.label} className="bg-white border border-sky-100 rounded-lg px-3 py-2 text-center">
+                    <p className="text-[10px] text-gray-500 uppercase tracking-wide mb-0.5">{item.label}</p>
+                    <p className="text-sm font-bold text-sky-800">{item.value}</p>
+                    <p className="text-[10px] text-gray-400">{item.sub}</p>
+                  </div>
+                ))}
+              </div>
+
+              {/* Calculation trace */}
+              <div className="bg-white border border-sky-100 rounded-lg px-3 py-2 text-[11px] text-gray-600 space-y-0.5">
+                <p className="font-semibold text-sky-700 mb-1">Calculation — ASHRAE Fundamentals 2017 Ch.1</p>
+                <p>ΔW = W<sub>indoor</sub> − W<sub>outdoor</sub> = {c.winterHumidification.wInGr.toFixed(2)} − {c.winterHumidification.wOutGr.toFixed(2)} = <strong>{c.winterHumidification.deltaWGr.toFixed(2)} gr/lb</strong> ({(c.winterHumidification.deltaWLb * 1000).toFixed(2)} lb/lb × 10⁻³)</p>
+                <p>ṁ = 4.5 × {Math.round(c.winterHumidification.freshCFM)} CFM × {c.winterHumidification.deltaWLb.toFixed(5)} = <strong>{c.winterHumidification.humidifierRateBase.toFixed(2)} lbs/hr</strong> (base)</p>
+                <p>With 10% margin: <strong>{c.winterHumidification.humidifierRate.toFixed(2)} lbs/hr</strong> → size humidifier at this output or higher</p>
+                <p>Energy = {c.winterHumidification.humidifierRate.toFixed(2)} × 1,061 BTU/lb = <strong>{n(c.winterHumidification.energyBTU)} BTU/h</strong> ({c.winterHumidification.energyKW.toFixed(2)} kW)</p>
+              </div>
+
+              {/* ASHRAE 62.1 cap warning */}
+              {c.winterHumidification.exceedsCap62 ? (
+                <div className="flex items-start gap-2 p-2.5 rounded-lg bg-amber-50 border border-amber-200 text-xs text-amber-800">
+                  <span className="font-bold shrink-0">⚠ ASHRAE 62.1-2022 §5.9 Caution:</span>
+                  <span>Indoor target humidity ratio ({c.winterHumidification.wInGr.toFixed(1)} gr/lb = {c.winterHumidification.wInLb.toFixed(4)} lb/lb) exceeds the 87 gr/lb (0.0125 lb/lb) supply-air cap. Risk of microbial growth in ductwork. Reduce indoor RH setpoint or verify duct insulation and vapour barrier.</span>
+                </div>
+              ) : (
+                <div className="flex items-start gap-2 p-2.5 rounded-lg bg-emerald-50 border border-emerald-200 text-xs text-emerald-700">
+                  <span className="font-bold shrink-0">✓ ASHRAE 62.1-2022 §5.9:</span>
+                  <span>Indoor target W ({c.winterHumidification.wInGr.toFixed(1)} gr/lb) is within the 87 gr/lb maximum. No duct condensation risk.</span>
+                </div>
+              )}
+            </>
+          )}
         </div>
       </div>
       )}

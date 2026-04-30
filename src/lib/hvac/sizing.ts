@@ -41,8 +41,8 @@ export const sizeRectangularDuct = (
   aspectRatio: number = 2.0,
   friction: number = 0.1
 ): { width: number; height: number; velocity: number } => {
-  // First find diameter using round duct method as baseline
-  const diameter = 0.109 * Math.pow(cfm, 0.4) / Math.pow(friction, 0.2);
+  // Find equivalent round duct diameter using same Equal Friction formula as sizeDuct
+  const diameter = 0.537 * Math.pow(cfm, 0.4) / Math.pow(friction, 0.2);
   const area = Math.PI * Math.pow(diameter / 24, 2); // Area in sq ft
 
   // For rectangular duct: Area = (W × H) / 144, W = AR × H
@@ -114,10 +114,11 @@ export const calculatePipeFrictionLoss = (
 
   const C = cFactors[material] || 150;
 
-  // Hazen-Williams: hL = 10.44 × Q^1.85 / (C^1.85 × d^4.87)
-  // Where Q is GPM, d is inches, hL is loss per 100 ft in psi
+  // Hazen-Williams: hf (ft) = 10.44 × L × Q^1.85 / (C^1.85 × d^4.87)
+  // For loss per 100 ft in psi: set L=100, convert ft H₂O → psi (÷ 2.31)
+  // → 10.44 × 100 / 2.31 = 452.0
   const lossPerHundred =
-    10.44 * Math.pow(gpm, 1.85) / (Math.pow(C, 1.85) * Math.pow(diameterInches, 4.87));
+    452.0 * Math.pow(gpm, 1.85) / (Math.pow(C, 1.85) * Math.pow(diameterInches, 4.87));
 
   // Total loss accounting for length
   const totalLoss = (lossPerHundred * lengthFt) / 100;

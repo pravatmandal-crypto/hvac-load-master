@@ -223,7 +223,7 @@ export default function App() {
           )}
           {currentPage === 'takeoff' && <MaterialTakeoff />}
           {currentPage === 'team' && <UserManagement currentUser={currentUser} />}
-          {currentPage === 'methodology' && <Methodology />}
+          {currentPage === 'methodology' && <Methodology userRole={userRole} />}
         </AppLayout>
       )}
       <Toaster />
