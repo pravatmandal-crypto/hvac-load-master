@@ -72,3 +72,21 @@ export { calculateMoistureManagement, calculateReheat } from './reheat';
 
 // Parasitic gains
 export { calculateParasiticGains } from './parasitic';
+
+// ASHRAE 62.1 ventilation
+export {
+  SPACE_TYPES_62,
+  SPACE_TYPE_MAP,
+  EZ_OPTIONS,
+  EZ_MAP,
+  getSpaceType,
+  getEz,
+  calcRoomVbz,
+  calcZoneVentilation,
+  calcSystemVentilation62,
+  type SpaceType62,
+  type EzOption,
+  type RoomVbz,
+  type ZoneVentilation62,
+  type SystemVentilation62,
+} from './ventilation62';

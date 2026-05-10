@@ -124,6 +124,7 @@ export interface RoomDetails {
   facph: number;
   peopleCount: number;
   activityType?: string;   // ASHRAE Table 18-2 activity category
+  spaceType?: string;      // ASHRAE 62.1 Table 6.2.2.1 space type id
   lightsWattsPerSqft: number;
   equipmentKW: number;
   othersKW: number;
@@ -168,6 +169,8 @@ export interface CoilParameters {
   rshf: number;
   indicatedADP: number;
   selectedADP: number;
+  sensibleCFM: number;
+  minAdpSensibleCFM: number;
   dehumidifiedCFM: number;
   bypassFactor: number;
 }

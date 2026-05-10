@@ -145,12 +145,26 @@ export const calculateCoilParameters = (
   const latentCFM = roomLatent / (
     ASHRAE_CONSTANTS.LATENT_COOLING_CONSTANT * deltaWToAdpGrains * contactFactor
   );
+  // dehumidifiedCFM keeps max(sensible, latent) for diagnostic display.
+  // For equipment sizing use sensibleCFM — per methodology DSCFM = CSH / (1.08 × ΔT_supply).
   const dehumidifiedCFM = Math.max(sensibleCFM, latentCFM);
+
+  // minAdpSensibleCFM: DSCFM computed at the FIXED system design ADP (selectedAdpMinF).
+  // The 400 CFM/TR rule is calibrated for this ADP. When indicatedADP floats above
+  // selectedAdpMinF (e.g. 57°F for a high-sensible lab vs 44°F Chiller minimum),
+  // sensibleCFM inflates and cfmTR becomes unrealistically high. Use this field for
+  // cfmTR so the 400 CFM/TR rule is always applied at the correct reference ADP.
+  const minAdpDeltaT = Math.max(0.01, roomTemp - selectedAdpMinF);
+  const minAdpSensibleCFM = roomSensible / (
+    ASHRAE_CONSTANTS.SENSIBLE_COOLING_CONSTANT * minAdpDeltaT * contactFactor
+  );
 
   return {
     rshf,
     indicatedADP,
     selectedADP,
+    sensibleCFM,
+    minAdpSensibleCFM,
     dehumidifiedCFM,
     bypassFactor,
   };

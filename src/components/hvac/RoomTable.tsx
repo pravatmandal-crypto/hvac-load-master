@@ -1,10 +1,11 @@
 import { memo, useEffect, useMemo, useRef, useState } from 'react';
 import { useDraggable } from '@dnd-kit/core';
+import { collection, onSnapshot, query, where } from 'firebase/firestore';
+import { db } from '../../lib/firebase';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '../ui/table';
 import { Input } from '../ui/input';
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../ui/select';
-import { ChevronDown, ChevronRight, Trash2, Plus, Grip, Loader2, PackagePlus } from 'lucide-react';
-import EquipmentPickerDialog from './EquipmentPickerDialog';
+import { Select, SelectContent, SelectGroup, SelectItem, SelectLabel, SelectTrigger, SelectValue } from '../ui/select';
+import { ChevronDown, ChevronRight, Trash2, Plus, Grip, Loader2 } from 'lucide-react';
 import { toast } from 'sonner';
 import {
   calculateEnvelopeGain,
@@ -22,6 +23,9 @@ import {
   ACTIVITY_TYPES,
   ACTIVITY_ACH_RECOMMENDATIONS,
   getRecommendedAch,
+  SPACE_TYPES_62,
+  getSpaceType,
+  calcRoomVbz,
   type WallColor,
   type DesignConditions,
   type RoomDetails,
@@ -38,6 +42,8 @@ const BF = 0.15; // Bypass Factor
 
 const WALL_TYPES  = DEFAULT_WALL_TYPES.filter(w => w.id.startsWith('w'));
 const GLASS_TYPES = DEFAULT_WALL_TYPES.filter(w => w.id.startsWith('g'));
+const ROOF_TYPES  = DEFAULT_WALL_TYPES.filter(w => w.id.startsWith('r'));
+const FLOOR_TYPES = DEFAULT_WALL_TYPES.filter(w => w.id.startsWith('f'));
 
 /**
  * Minimum achievable ADP by system type — physical constraint of refrigerant/medium.
@@ -72,6 +78,7 @@ type RoomTableProps = {
   roomSaveStates?: Record<string, 'idle' | 'saving' | 'saved'>;
   onRoomDraftChange?: (zoneId: string, roomId: string, draft: Record<string, any> | null, systemId?: string) => void;
   onEnvelopeDraftChange?: (roomId: string, draft: EnvelopeElement[] | null) => void;
+  userId?: string;
 };
 
 type RoomParameterState = {
@@ -85,6 +92,7 @@ type RoomParameterState = {
   peopleCount: number;
   activityType: string;
   achProfile: string;
+  spaceType: string;
   lightsWattsPerSqft: number;
   equipmentKW: number;
   othersKW: number;
@@ -111,6 +119,7 @@ function getRoomParameterState(room: any): RoomParameterState {
     peopleCount: Number(room?.peopleCount) || 0,
     activityType: room?.activityType ?? 'office',
     achProfile: room?.achProfile ?? room?.activityType ?? 'office',
+    spaceType: room?.spaceType ?? 'office_general',
     lightsWattsPerSqft: Number(room?.lightsWattsPerSqft) || 0,
     equipmentKW: Number(room?.equipmentKW) || 0,
     othersKW: Number(room?.othersKW) || 0,
@@ -138,6 +147,7 @@ function areRoomParameterStatesEqual(left: RoomParameterState, right: RoomParame
     left.peopleCount === right.peopleCount &&
     left.activityType === right.activityType &&
     left.achProfile === right.achProfile &&
+    left.spaceType === right.spaceType &&
     left.lightsWattsPerSqft === right.lightsWattsPerSqft &&
     left.equipmentKW === right.equipmentKW &&
     left.othersKW === right.othersKW &&
@@ -349,10 +359,13 @@ function useRoomCalc(room: any, elements: any[], designConditions: DesignConditi
     const presetTotalACH = getRecommendedAch(room.achProfile ?? room.activityType);
     const totalSupplyACH = Math.max(presetTotalACH, rd.facph);
     const totalSupplyCFM = (calculateRoomVolume(rd) * totalSupplyACH) / 60;
-    const designCFM = Math.max(coil.dehumidifiedCFM, totalSupplyCFM);
-    const achGovernsAirflow = coil.dehumidifiedCFM < totalSupplyCFM;
-
-    // 400 CFM/Ton: ASHRAE minimum for adequate dehumidification (sensible + latent)
+    // Methodology: DSCFM = CSH / (1.08 × ΔT_supply) — sensible-only per Carrier Manual.
+    // dehumidifiedCFM (max with latent) is kept for diagnostic display only.
+    const designCFM = Math.max(coil.minAdpSensibleCFM, totalSupplyCFM);
+    const achGovernsAirflow = coil.minAdpSensibleCFM < totalSupplyCFM;
+    // cfmTR enforces the 400 CFM/TR checkpoint: governingTR must cover designCFM at 400 CFM/TR.
+    // designCFM already uses minAdpSensibleCFM (fixed system ADP) as its base — so dividing by 400
+    // ensures both the psychrometric ADP constraint AND the ACPH air-distribution requirement are met.
     const cfmTR = designCFM / 400;
     const governingTR = Math.max(grandTotalTR, cfmTR);
     
@@ -445,7 +458,7 @@ function getMonsoonDesignConditions(project?: any, base?: DesignConditions): Des
 function Field({ label, children }: { label: string; children: React.ReactNode }) {
   return (
     <div>
-      <p className="text-[10px] font-semibold text-gray-500 uppercase tracking-wide mb-1">{label}</p>
+      <p className="text-[10px] font-semibold text-gray-500 dark:text-slate-400 uppercase tracking-wide mb-1">{label}</p>
       {children}
     </div>
   );
@@ -634,10 +647,12 @@ function BufferedNumberInput({
 
 // ─── Single room expanded detail ──────────────────────────────────────────────
 
+type CustomWallType = { id: string; displayId: string; name: string; uValue: number; wallCategory: string };
+
 function RoomDetail({
   room, zoneId, systemId, elements, designConditions, project,
   updateRoom, addEnvelopeElement, updateEnvelopeElement, deleteEnvelopeElement, saveEnvelopeChanges,
-  saveState, onDirtyChange, onRoomDraftChange, onEnvelopeDraftChange,
+  saveState, onDirtyChange, onRoomDraftChange, onEnvelopeDraftChange, customWallTypes = [], customRoofTypes = [], customFloorTypes = [],
 }: {
   room: any; zoneId: string; systemId?: string; elements: any[];
   designConditions: DesignConditions;
@@ -651,10 +666,13 @@ function RoomDetail({
   onDirtyChange?: (roomId: string, isDirty: boolean) => void;
   onRoomDraftChange?: (zoneId: string, roomId: string, draft: Record<string, any> | null, systemId?: string) => void;
   onEnvelopeDraftChange?: (roomId: string, draft: EnvelopeElement[] | null) => void;
+  customWallTypes?: CustomWallType[];
+  customRoofTypes?: CustomWallType[];
+  customFloorTypes?: CustomWallType[];
 }) {
   const id = room.id;
   const [activeStep, setActiveStep] = useState<'inputs' | 'envelope' | 'cooling' | 'heating' | 'moisture'>('inputs');
-  const [equipmentPickerOpen, setEquipmentPickerOpen] = useState(false);
+  const [showSafetyOverrides, setShowSafetyOverrides] = useState(false);
   const [coolingPanelsOpen, setCoolingPanelsOpen] = useState({ summer: true, monsoon: false });
   const [moisturePanelsOpen, setMoisturePanelsOpen] = useState({ summer: true, monsoon: false });
   const [psychroChartsOpen, setPsychroChartsOpen] = useState({ summer: true, monsoon: false });
@@ -671,6 +689,15 @@ function RoomDetail({
   // ── Envelope draft state ──────────────────────────────────────────────────
   const [envelopeDraft, setEnvelopeDraft] = useState<EnvelopeElement[] | null>(null);
   const [isSavingEnvelope, setIsSavingEnvelope] = useState(false);
+  // Holds the Firestore-saved baseline for save comparison. Cannot use `elements`
+  // prop directly: liveEnvelopeElements feeds draft data back into it, so comparing
+  // draft vs elements would always find zero differences and save nothing.
+  const committedElementsRef = useRef<EnvelopeElement[]>(elements as EnvelopeElement[]);
+  useEffect(() => {
+    if (envelopeDraft === null) {
+      committedElementsRef.current = elements as EnvelopeElement[];
+    }
+  }, [envelopeDraft, elements]);
   const isEnvelopeDirty = envelopeDraft !== null;
   const liveElements: EnvelopeElement[] = (envelopeDraft ?? elements) as EnvelopeElement[];
 
@@ -719,12 +746,15 @@ function RoomDetail({
   }, [roomDraft]);
 
   useEffect(() => {
-    // Only reset draft on parent update if there are no active edits
-    if (!isRoomDirty && !hasActiveEdits) {
+    // Sync to Firestore data whenever the user has not actively edited.
+    // isRoomDirty cannot guard this — it becomes true during the initial
+    // load race (component mounts before Firestore arrives), which would
+    // permanently block the sync and leave all inputs blank.
+    if (!hasActiveEdits) {
       setRoomDraft(committedRoomState);
       roomDraftRef.current = committedRoomState;
     }
-  }, [committedRoomState, isRoomDirty, hasActiveEdits]);
+  }, [committedRoomState, hasActiveEdits]);
 
   useEffect(() => {
     onDirtyChange?.(id, isRoomDirty);
@@ -825,6 +855,8 @@ function RoomDetail({
     if (type === 'Partition') base.orientation = 'N';
     if (type === 'Glass') { base.shgc = 0.7; base.solarFactor = getSHGF(defaultOrient as any, altFt); base.wallTypeId = 'g2'; const g = GLASS_TYPES.find(w => w.id === 'g2'); if (g) base.uValue = g.uValue; }
     if (type === 'Wall' || type === 'Partition') { base.wallTypeId = 'w1'; const w = WALL_TYPES.find(w => w.id === 'w1'); if (w) base.uValue = w.uValue; }
+    if (type === 'Roof')  { base.wallTypeId = 'r1'; const r = ROOF_TYPES.find(r => r.id === 'r1'); if (r) base.uValue = r.uValue; }
+    if (type === 'Floor') { base.wallTypeId = 'f1'; const f = FLOOR_TYPES.find(f => f.id === 'f1'); if (f) base.uValue = f.uValue; }
     return base as Omit<EnvelopeElement, 'id'>;
   };
 
@@ -866,14 +898,15 @@ function RoomDetail({
     flushDraftInputs();
     setIsSavingEnvelope(true);
     try {
-      const committedIds = new Set((elements as EnvelopeElement[]).map(el => el.id));
+      const committedBase = committedElementsRef.current;
+      const committedIds = new Set(committedBase.map(el => el.id));
       const draftIds = new Set(envelopeDraft.map(el => el.id));
-      const deleted = (elements as EnvelopeElement[]).filter(el => !draftIds.has(el.id)).map(el => el.id);
+      const deleted = committedBase.filter(el => !draftIds.has(el.id)).map(el => el.id);
       const added = envelopeDraft.filter(el => el.id.startsWith('draft_')).map(({ id: _t, ...rest }) => rest as Omit<EnvelopeElement, 'id'>);
       const updated: Array<{ id: string; data: Partial<EnvelopeElement> }> = [];
       for (const el of envelopeDraft) {
         if (!el.id.startsWith('draft_') && committedIds.has(el.id)) {
-          const committed = (elements as EnvelopeElement[]).find(e => e.id === el.id)!;
+          const committed = committedBase.find(e => e.id === el.id)!;
           const { id: _a, ...elData } = el;
           const { id: _b, ...committedData } = committed;
           if (JSON.stringify(elData) !== JSON.stringify(committedData)) updated.push({ id: el.id, data: elData });
@@ -907,16 +940,16 @@ function RoomDetail({
   ) => {
     const isOpen = group === 'cooling' ? coolingPanelsOpen[season] : moisturePanelsOpen[season];
     return (
-      <div className="rounded-xl border border-slate-200 bg-white overflow-hidden">
+      <div className="rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 overflow-hidden">
         <button
           type="button"
           onClick={() => toggleSeasonPanel(group, season)}
-          className="flex w-full items-center justify-between px-4 py-3 text-left hover:bg-slate-50 transition-colors"
+          className="flex w-full items-center justify-between px-4 py-3 text-left hover:bg-slate-50 dark:hover:bg-slate-800 transition-colors"
         >
-          <span className="text-sm font-semibold text-slate-800">{title}</span>
-          {isOpen ? <ChevronDown className="h-4 w-4 text-slate-500" /> : <ChevronRight className="h-4 w-4 text-slate-500" />}
+          <span className="text-sm font-semibold text-slate-800 dark:text-slate-200">{title}</span>
+          {isOpen ? <ChevronDown className="h-4 w-4 text-slate-500 dark:text-slate-400" /> : <ChevronRight className="h-4 w-4 text-slate-500 dark:text-slate-400" />}
         </button>
-        {isOpen && <div className="border-t border-slate-100 p-4">{content}</div>}
+        {isOpen && <div className="border-t border-slate-100 dark:border-slate-700 p-4">{content}</div>}
       </div>
     );
   };
@@ -924,7 +957,7 @@ function RoomDetail({
   const renderCoolingSection = (calc: any, seasonalDc: DesignConditions, title: string, accent: string) => (
     <div className={`rounded-xl border p-4 ${accent}`}>
       <h4 className="text-xs font-bold uppercase tracking-widest mb-2">{title}</h4>
-      <div className="overflow-x-auto rounded-lg border border-gray-200 bg-white">
+      <div className="overflow-x-auto rounded-lg border border-gray-200 dark:border-slate-700 bg-white dark:bg-slate-900">
         <Table>
           <TableHeader>
             <TableRow className="bg-slate-700">
@@ -935,88 +968,88 @@ function RoomDetail({
             </TableRow>
           </TableHeader>
           <TableBody>
-            <TableRow className="bg-amber-50">
-              <TableCell className="text-xs py-1.5 font-semibold text-amber-800">1. Solar Heat Gain</TableCell>
+            <TableRow className="bg-amber-50 dark:bg-amber-950/30">
+              <TableCell className="text-xs py-1.5 font-semibold text-amber-800 dark:text-amber-300">1. Solar Heat Gain</TableCell>
               <TableCell className="text-xs py-1.5 text-right font-mono">{n(calc.envelope.breakdown.glassSolar)}</TableCell>
               <TableCell className="text-xs py-1.5 text-right text-gray-400">—</TableCell>
               <TableCell className="text-xs py-1.5 text-right font-mono font-semibold">{n(calc.envelope.breakdown.glassSolar)}</TableCell>
             </TableRow>
-            <TableRow className="bg-orange-50">
-              <TableCell className="text-xs py-1.5 font-semibold text-orange-800">2. Transmission Heat Gain</TableCell>
+            <TableRow className="bg-orange-50 dark:bg-orange-950/30">
+              <TableCell className="text-xs py-1.5 font-semibold text-orange-800 dark:text-orange-300">2. Transmission Heat Gain</TableCell>
               <TableCell colSpan={3}></TableCell>
             </TableRow>
             <TableRow>
-              <TableCell className="text-xs py-1 pl-8 text-gray-600">Walls &amp; Partitions</TableCell>
+              <TableCell className="text-xs py-1 pl-8 text-gray-600 dark:text-slate-400">Walls &amp; Partitions</TableCell>
               <TableCell className="text-xs py-1 text-right font-mono">{n(calc.envelope.breakdown.walls + calc.envelope.breakdown.partitions)}</TableCell>
               <TableCell className="text-xs py-1 text-right text-gray-400">—</TableCell>
               <TableCell className="text-xs py-1 text-right font-mono">{n(calc.envelope.breakdown.walls + calc.envelope.breakdown.partitions)}</TableCell>
             </TableRow>
-            <TableRow className="bg-gray-50">
-              <TableCell className="text-xs py-1 pl-8 text-gray-600">Roof &amp; Floor</TableCell>
+            <TableRow className="bg-gray-50 dark:bg-slate-800/50">
+              <TableCell className="text-xs py-1 pl-8 text-gray-600 dark:text-slate-400">Roof &amp; Floor</TableCell>
               <TableCell className="text-xs py-1 text-right font-mono">{n(calc.envelope.breakdown.roof + calc.envelope.breakdown.floor)}</TableCell>
               <TableCell className="text-xs py-1 text-right text-gray-400">—</TableCell>
               <TableCell className="text-xs py-1 text-right font-mono">{n(calc.envelope.breakdown.roof + calc.envelope.breakdown.floor)}</TableCell>
             </TableRow>
             <TableRow>
-              <TableCell className="text-xs py-1 pl-8 text-gray-600">Glass Transmission</TableCell>
+              <TableCell className="text-xs py-1 pl-8 text-gray-600 dark:text-slate-400">Glass Transmission</TableCell>
               <TableCell className="text-xs py-1 text-right font-mono">{n(calc.envelope.breakdown.glassTransmission)}</TableCell>
               <TableCell className="text-xs py-1 text-right text-gray-400">—</TableCell>
               <TableCell className="text-xs py-1 text-right font-mono">{n(calc.envelope.breakdown.glassTransmission)}</TableCell>
             </TableRow>
-            <TableRow className="bg-blue-50">
-              <TableCell className="text-xs py-1.5 font-semibold text-blue-800">3. Internal Heat Gain</TableCell>
+            <TableRow className="bg-blue-50 dark:bg-blue-950/30">
+              <TableCell className="text-xs py-1.5 font-semibold text-blue-800 dark:text-blue-300">3. Internal Heat Gain</TableCell>
               <TableCell className="text-xs py-1.5 text-right font-mono">{n(calc.internal.sensible)}</TableCell>
               <TableCell className="text-xs py-1.5 text-right font-mono">{n(calc.internal.latent)}</TableCell>
               <TableCell className="text-xs py-1.5 text-right font-mono font-semibold">{n(calc.internal.sensible + calc.internal.latent)}</TableCell>
             </TableRow>
-            <TableRow className="bg-green-50">
-              <TableCell className="text-xs py-1.5 font-semibold text-green-800">4. Ventilation (BF: {BF})</TableCell>
+            <TableRow className="bg-green-50 dark:bg-green-950/30">
+              <TableCell className="text-xs py-1.5 font-semibold text-green-800 dark:text-green-300">4. Ventilation (BF: {BF})</TableCell>
               <TableCell className="text-xs py-1.5 text-right font-mono">{n(calc.vent.sensible * BF)}</TableCell>
               <TableCell className="text-xs py-1.5 text-right font-mono">{n(calc.vent.latent * BF)}</TableCell>
               <TableCell className="text-xs py-1.5 text-right font-mono font-semibold">{n((calc.vent.sensible + calc.vent.latent) * BF)}</TableCell>
             </TableRow>
-            <TableRow className="bg-purple-50">
-              <TableCell className="text-xs py-1.5 font-semibold text-purple-800">5. Parasitic Gains</TableCell>
+            <TableRow className="bg-purple-50 dark:bg-purple-950/30">
+              <TableCell className="text-xs py-1.5 font-semibold text-purple-800 dark:text-purple-300">5. Parasitic Gains</TableCell>
               <TableCell colSpan={3}></TableCell>
             </TableRow>
             <TableRow>
-              <TableCell className="text-xs py-1 pl-8 text-gray-600">Duct Heat Gain ({calc.ductPct}%)</TableCell>
+              <TableCell className="text-xs py-1 pl-8 text-gray-600 dark:text-slate-400">Duct Heat Gain ({calc.ductPct}%)</TableCell>
               <TableCell className="text-xs py-1 text-right font-mono">{n(calc.parasitic.ductGain)}</TableCell>
               <TableCell className="text-xs py-1 text-right text-gray-400">—</TableCell>
               <TableCell className="text-xs py-1 text-right font-mono">{n(calc.parasitic.ductGain)}</TableCell>
             </TableRow>
-            <TableRow className="bg-gray-50">
-              <TableCell className="text-xs py-1 pl-8 text-gray-600">Fan Heat Gain ({calc.fanPct}%)</TableCell>
+            <TableRow className="bg-gray-50 dark:bg-slate-800/50">
+              <TableCell className="text-xs py-1 pl-8 text-gray-600 dark:text-slate-400">Fan Heat Gain ({calc.fanPct}%)</TableCell>
               <TableCell className="text-xs py-1 text-right font-mono">{n(calc.parasitic.fanGain)}</TableCell>
               <TableCell className="text-xs py-1 text-right text-gray-400">—</TableCell>
               <TableCell className="text-xs py-1 text-right font-mono">{n(calc.parasitic.fanGain)}</TableCell>
             </TableRow>
-            <TableRow className="bg-slate-50 border-t border-slate-200">
-              <TableCell className="text-xs py-1.5 font-semibold text-slate-700">Sub-total (before safety)</TableCell>
-              <TableCell className="text-xs py-1.5 text-right font-mono text-slate-700">{n(calc.ershRaw)}</TableCell>
-              <TableCell className="text-xs py-1.5 text-right font-mono text-slate-700">{n(calc.erlhRaw)}</TableCell>
-              <TableCell className="text-xs py-1.5 text-right font-mono text-slate-700">{n(calc.ershRaw + calc.erlhRaw)}</TableCell>
+            <TableRow className="bg-slate-50 dark:bg-slate-800 border-t border-slate-200 dark:border-slate-600">
+              <TableCell className="text-xs py-1.5 font-semibold text-slate-700 dark:text-slate-300">Sub-total (before safety)</TableCell>
+              <TableCell className="text-xs py-1.5 text-right font-mono text-slate-700 dark:text-slate-300">{n(calc.ershRaw)}</TableCell>
+              <TableCell className="text-xs py-1.5 text-right font-mono text-slate-700 dark:text-slate-300">{n(calc.erlhRaw)}</TableCell>
+              <TableCell className="text-xs py-1.5 text-right font-mono text-slate-700 dark:text-slate-300">{n(calc.ershRaw + calc.erlhRaw)}</TableCell>
             </TableRow>
-            <TableRow className="bg-yellow-50">
-              <TableCell className="text-xs py-1 pl-8 text-yellow-800">Sensible Safety ({(calc.sensibleSafetyFactor * 100).toFixed(0)}%)</TableCell>
-              <TableCell className="text-xs py-1 text-right font-mono text-yellow-700">+{n(calc.ersh - calc.ershRaw)}</TableCell>
-              <TableCell className="text-xs py-1 text-right text-gray-400">—</TableCell>
-              <TableCell className="text-xs py-1 text-right font-mono text-yellow-700">+{n(calc.ersh - calc.ershRaw)}</TableCell>
+            <TableRow className="bg-yellow-50 dark:bg-yellow-950/30">
+              <TableCell className="text-xs py-1 pl-8 text-yellow-800 dark:text-yellow-300">Sensible Safety ({(calc.sensibleSafetyFactor * 100).toFixed(0)}%)</TableCell>
+              <TableCell className="text-xs py-1 text-right font-mono text-yellow-700 dark:text-yellow-400">+{n(calc.ersh - calc.ershRaw)}</TableCell>
+              <TableCell className="text-xs py-1 text-right text-gray-400 dark:text-slate-500">—</TableCell>
+              <TableCell className="text-xs py-1 text-right font-mono text-yellow-700 dark:text-yellow-400">+{n(calc.ersh - calc.ershRaw)}</TableCell>
             </TableRow>
-            <TableRow className="bg-yellow-50">
-              <TableCell className="text-xs py-1 pl-8 text-yellow-800">Latent Safety ({(calc.latentSafetyFactor * 100).toFixed(0)}%)</TableCell>
-              <TableCell className="text-xs py-1 text-right text-gray-400">—</TableCell>
-              <TableCell className="text-xs py-1 text-right font-mono text-yellow-700">+{n(calc.erlh - calc.erlhRaw)}</TableCell>
-              <TableCell className="text-xs py-1 text-right font-mono text-yellow-700">+{n(calc.erlh - calc.erlhRaw)}</TableCell>
+            <TableRow className="bg-yellow-50 dark:bg-yellow-950/30">
+              <TableCell className="text-xs py-1 pl-8 text-yellow-800 dark:text-yellow-300">Latent Safety ({(calc.latentSafetyFactor * 100).toFixed(0)}%)</TableCell>
+              <TableCell className="text-xs py-1 text-right text-gray-400 dark:text-slate-500">—</TableCell>
+              <TableCell className="text-xs py-1 text-right font-mono text-yellow-700 dark:text-yellow-400">+{n(calc.erlh - calc.erlhRaw)}</TableCell>
+              <TableCell className="text-xs py-1 text-right font-mono text-yellow-700 dark:text-yellow-400">+{n(calc.erlh - calc.erlhRaw)}</TableCell>
             </TableRow>
-            <TableRow className="bg-slate-100 border-t-2 border-slate-300">
-              <TableCell className="text-xs py-2 font-bold text-slate-900">EFFECTIVE ROOM HEAT (after safety)</TableCell>
-              <TableCell className="text-xs py-2 text-right font-mono font-bold text-slate-900">{n(calc.ersh)}</TableCell>
-              <TableCell className="text-xs py-2 text-right font-mono font-bold text-slate-900">{n(calc.erlh)}</TableCell>
-              <TableCell className="text-xs py-2 text-right font-mono font-bold text-slate-900">{n(calc.erh)}</TableCell>
+            <TableRow className="bg-slate-100 dark:bg-slate-700 border-t-2 border-slate-300 dark:border-slate-500">
+              <TableCell className="text-xs py-2 font-bold text-slate-900 dark:text-slate-100">EFFECTIVE ROOM HEAT (after safety)</TableCell>
+              <TableCell className="text-xs py-2 text-right font-mono font-bold text-slate-900 dark:text-slate-100">{n(calc.ersh)}</TableCell>
+              <TableCell className="text-xs py-2 text-right font-mono font-bold text-slate-900 dark:text-slate-100">{n(calc.erlh)}</TableCell>
+              <TableCell className="text-xs py-2 text-right font-mono font-bold text-slate-900 dark:text-slate-100">{n(calc.erh)}</TableCell>
             </TableRow>
-            <TableRow className="bg-red-50">
-              <TableCell className="text-xs py-1.5 font-semibold text-red-700">Outside Air (1−BF)</TableCell>
+            <TableRow className="bg-red-50 dark:bg-red-950/30">
+              <TableCell className="text-xs py-1.5 font-semibold text-red-700 dark:text-red-400">Outside Air (1−BF)</TableCell>
               <TableCell className="text-xs py-1.5 text-right font-mono">{n(calc.oaSensible)}</TableCell>
               <TableCell className="text-xs py-1.5 text-right font-mono">{n(calc.oaLatent)}</TableCell>
               <TableCell className="text-xs py-1.5 text-right font-mono font-semibold">{n(calc.oaTotal)}</TableCell>
@@ -1039,8 +1072,8 @@ function RoomDetail({
               <TableCell className="text-xs py-1 text-right text-gray-400" colSpan={2}>—</TableCell>
               <TableCell className="text-xs py-1 text-right font-mono">{calc.grandTotalTR.toFixed(2)} TR</TableCell>
             </TableRow>
-            <TableRow className="bg-gray-50">
-              <TableCell className="text-xs py-1 pl-8 text-gray-600">CFM TR  ({n(calc.designCFM)} CFM ÷ 400)</TableCell>
+            <TableRow className="bg-gray-50 dark:bg-slate-800/50">
+              <TableCell className="text-xs py-1 pl-8 text-gray-600 dark:text-slate-400">CFM TR  ({n(calc.designCFM)} CFM ÷ 400)</TableCell>
               <TableCell className="text-xs py-1 text-right text-gray-400" colSpan={2}>—</TableCell>
               <TableCell className="text-xs py-1 text-right font-mono">{calc.cfmTR.toFixed(2)} TR</TableCell>
             </TableRow>
@@ -1052,10 +1085,10 @@ function RoomDetail({
               <TableCell className="text-xs py-1.5 text-right text-gray-400" colSpan={2}>—</TableCell>
               <TableCell className="text-xs py-1.5 text-right font-mono font-bold text-indigo-700">{calc.governingTR.toFixed(2)} TR</TableCell>
             </TableRow>
-            <TableRow className="bg-yellow-50">
-              <TableCell className="text-xs py-1 pl-8 text-yellow-800">Overall Safety  (+{(calc.overallSafetyFactor * 100).toFixed(0)}%)</TableCell>
-              <TableCell className="text-xs py-1 text-right text-gray-400" colSpan={2}>—</TableCell>
-              <TableCell className="text-xs py-1 text-right font-mono text-yellow-700">+{n((calc.requiredTR - calc.governingTR) * 12000)} BTU/h</TableCell>
+            <TableRow className="bg-yellow-50 dark:bg-yellow-950/30">
+              <TableCell className="text-xs py-1 pl-8 text-yellow-800 dark:text-yellow-300">Overall Safety  (+{(calc.overallSafetyFactor * 100).toFixed(0)}%)</TableCell>
+              <TableCell className="text-xs py-1 text-right text-gray-400 dark:text-slate-500" colSpan={2}>—</TableCell>
+              <TableCell className="text-xs py-1 text-right font-mono text-yellow-700 dark:text-yellow-400">+{n((calc.requiredTR - calc.governingTR) * 12000)} BTU/h</TableCell>
             </TableRow>
             <TableRow className="bg-orange-600 border-t-2 border-orange-700">
               <TableCell className="text-xs py-2 font-bold text-white">REQUIRED EQUIPMENT CAPACITY</TableCell>
@@ -1067,17 +1100,17 @@ function RoomDetail({
       </div>
 
       <div className="mt-2 grid grid-cols-3 gap-2">
-        <div className="bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-center">
-          <p className="text-[10px] text-gray-500 uppercase tracking-wide">RSHF</p>
-          <p className="text-sm font-bold text-slate-800">{f1(calc.rshf * 100)}%</p>
+        <div className="bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-2 text-center">
+          <p className="text-[10px] text-gray-500 dark:text-slate-400 uppercase tracking-wide">RSHF</p>
+          <p className="text-sm font-bold text-slate-800 dark:text-slate-100">{f1(calc.rshf * 100)}%</p>
         </div>
-        <div className="bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-center">
-          <p className="text-[10px] text-gray-500 uppercase tracking-wide">Supply Air CFM</p>
-          <p className="text-sm font-bold text-slate-800">{Math.round(calc.designCFM)}</p>
+        <div className="bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-2 text-center">
+          <p className="text-[10px] text-gray-500 dark:text-slate-400 uppercase tracking-wide">Supply Air CFM</p>
+          <p className="text-sm font-bold text-slate-800 dark:text-slate-100">{Math.round(calc.designCFM)}</p>
         </div>
-        <div className="bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-center">
-          <p className="text-[10px] text-gray-500 uppercase tracking-wide">Area</p>
-          <p className="text-sm font-bold text-slate-800">{calc.rd.length * calc.rd.width} ft²</p>
+        <div className="bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-2 text-center">
+          <p className="text-[10px] text-gray-500 dark:text-slate-400 uppercase tracking-wide">Area</p>
+          <p className="text-sm font-bold text-slate-800 dark:text-slate-100">{calc.rd.length * calc.rd.width} ft²</p>
         </div>
       </div>
 
@@ -1087,7 +1120,7 @@ function RoomDetail({
           <button
             type="button"
             onClick={() => setPsychroChartsOpen((prev) => ({ ...prev, [title.toLowerCase().includes('monsoon') ? 'monsoon' : 'summer']: !prev[title.toLowerCase().includes('monsoon') ? 'monsoon' : 'summer'] }))}
-            className="h-8 rounded-md border border-indigo-200 bg-white px-3 text-xs font-semibold text-indigo-700 hover:bg-indigo-50"
+            className="h-8 rounded-md border border-indigo-200 dark:border-indigo-800 bg-white dark:bg-slate-800 px-3 text-xs font-semibold text-indigo-700 dark:text-indigo-400 hover:bg-indigo-50 dark:hover:bg-indigo-950"
             aria-expanded={title.toLowerCase().includes('monsoon') ? psychroChartsOpen.monsoon : psychroChartsOpen.summer}
           >
             {title.toLowerCase().includes('monsoon')
@@ -1125,80 +1158,80 @@ function RoomDetail({
       calc.moisture.action === 'Humidify'   ? 'text-blue-700'  : 'text-emerald-700';
     const reheatNeeded = calc.reheat?.needed && calc.reheat.reheatBTU > 0;
     return (
-      <div className="space-y-4 rounded-xl border border-emerald-100 bg-emerald-50/15 p-4">
-        <h4 className="text-xs font-bold text-emerald-700 uppercase tracking-widest">{title} Moisture Control</h4>
+      <div className="space-y-4 rounded-xl border border-emerald-100 dark:border-emerald-900 bg-emerald-50/15 dark:bg-emerald-950/10 p-4">
+        <h4 className="text-xs font-bold text-emerald-700 dark:text-emerald-400 uppercase tracking-widest">{title} Moisture Control</h4>
 
         {/* Air-state conditions: Outdoor | Indoor | Supply */}
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-          <div className="rounded-xl border border-red-100 bg-red-50/30 p-4">
-            <h4 className="text-xs font-bold text-red-700 uppercase tracking-widest mb-2">Outdoor Air</h4>
+          <div className="rounded-xl border border-red-100 dark:border-red-900 bg-red-50/30 dark:bg-red-950/20 p-4">
+            <h4 className="text-xs font-bold text-red-700 dark:text-red-400 uppercase tracking-widest mb-2">Outdoor Air</h4>
             <dl className="space-y-1 text-xs">
-              <div className="flex justify-between"><dt className="text-gray-500">Dry Bulb</dt><dd className="font-mono font-semibold">{seasonalDc.outdoorTemp} °F</dd></div>
-              <div className="flex justify-between"><dt className="text-gray-500">Rel. Humidity</dt><dd className="font-mono font-semibold">{seasonalDc.outdoorHumidity} %</dd></div>
-              <div className="flex justify-between"><dt className="text-gray-500">W (gr/lb)</dt><dd className="font-mono font-semibold">{(calc.outdoorPsych.humidityRatio * 7000).toFixed(1)}</dd></div>
-              <div className="flex justify-between"><dt className="text-gray-500">h (BTU/lb)</dt><dd className="font-mono font-semibold">{calc.outdoorPsych.enthalpy.toFixed(1)}</dd></div>
+              <div className="flex justify-between"><dt className="text-gray-500 dark:text-slate-400">Dry Bulb</dt><dd className="font-mono font-semibold dark:text-slate-200">{seasonalDc.outdoorTemp} °F</dd></div>
+              <div className="flex justify-between"><dt className="text-gray-500 dark:text-slate-400">Rel. Humidity</dt><dd className="font-mono font-semibold dark:text-slate-200">{seasonalDc.outdoorHumidity} %</dd></div>
+              <div className="flex justify-between"><dt className="text-gray-500 dark:text-slate-400">W (gr/lb)</dt><dd className="font-mono font-semibold dark:text-slate-200">{(calc.outdoorPsych.humidityRatio * 7000).toFixed(1)}</dd></div>
+              <div className="flex justify-between"><dt className="text-gray-500 dark:text-slate-400">h (BTU/lb)</dt><dd className="font-mono font-semibold dark:text-slate-200">{calc.outdoorPsych.enthalpy.toFixed(1)}</dd></div>
             </dl>
           </div>
-          <div className="rounded-xl border border-blue-100 bg-blue-50/30 p-4">
-            <h4 className="text-xs font-bold text-blue-700 uppercase tracking-widest mb-2">Indoor Design</h4>
+          <div className="rounded-xl border border-blue-100 dark:border-blue-900 bg-blue-50/30 dark:bg-blue-950/20 p-4">
+            <h4 className="text-xs font-bold text-blue-700 dark:text-blue-400 uppercase tracking-widest mb-2">Indoor Design</h4>
             <dl className="space-y-1 text-xs">
-              <div className="flex justify-between"><dt className="text-gray-500">Dry Bulb</dt><dd className="font-mono font-semibold">{seasonalDc.indoorTemp} °F</dd></div>
-              <div className="flex justify-between"><dt className="text-gray-500">Rel. Humidity</dt><dd className="font-mono font-semibold">{seasonalDc.indoorHumidity} %</dd></div>
-              <div className="flex justify-between"><dt className="text-gray-500">W (gr/lb)</dt><dd className="font-mono font-semibold">{(calc.indoorPsych.humidityRatio * 7000).toFixed(1)}</dd></div>
-              <div className="flex justify-between"><dt className="text-gray-500">h (BTU/lb)</dt><dd className="font-mono font-semibold">{calc.indoorPsych.enthalpy.toFixed(1)}</dd></div>
+              <div className="flex justify-between"><dt className="text-gray-500 dark:text-slate-400">Dry Bulb</dt><dd className="font-mono font-semibold dark:text-slate-200">{seasonalDc.indoorTemp} °F</dd></div>
+              <div className="flex justify-between"><dt className="text-gray-500 dark:text-slate-400">Rel. Humidity</dt><dd className="font-mono font-semibold dark:text-slate-200">{seasonalDc.indoorHumidity} %</dd></div>
+              <div className="flex justify-between"><dt className="text-gray-500 dark:text-slate-400">W (gr/lb)</dt><dd className="font-mono font-semibold dark:text-slate-200">{(calc.indoorPsych.humidityRatio * 7000).toFixed(1)}</dd></div>
+              <div className="flex justify-between"><dt className="text-gray-500 dark:text-slate-400">h (BTU/lb)</dt><dd className="font-mono font-semibold dark:text-slate-200">{calc.indoorPsych.enthalpy.toFixed(1)}</dd></div>
             </dl>
           </div>
-          <div className="rounded-xl border border-violet-100 bg-violet-50/30 p-4">
-            <h4 className="text-xs font-bold text-violet-700 uppercase tracking-widest mb-2">Supply Air (AHU Discharge)</h4>
+          <div className="rounded-xl border border-violet-100 dark:border-violet-900 bg-violet-50/30 dark:bg-violet-950/20 p-4">
+            <h4 className="text-xs font-bold text-violet-700 dark:text-violet-400 uppercase tracking-widest mb-2">Supply Air (AHU Discharge)</h4>
             <dl className="space-y-1 text-xs">
-              <div className="flex justify-between"><dt className="text-gray-500">Dry Bulb</dt><dd className="font-mono font-semibold">{calc.supplyAir.temp.toFixed(1)} °F</dd></div>
-              <div className="flex justify-between"><dt className="text-gray-500">ADP (selected)</dt><dd className="font-mono font-semibold">{calc.coil.selectedADP.toFixed(0)} °F</dd></div>
-              <div className="flex justify-between"><dt className="text-gray-500">W (gr/lb)</dt><dd className="font-mono font-semibold">{calc.supplyAir.humidityRatioGr.toFixed(1)}</dd></div>
-              <div className="flex justify-between"><dt className="text-gray-500">h (BTU/lb)</dt><dd className="font-mono font-semibold">{calc.supplyAir.enthalpy.toFixed(1)}</dd></div>
+              <div className="flex justify-between"><dt className="text-gray-500 dark:text-slate-400">Dry Bulb</dt><dd className="font-mono font-semibold dark:text-slate-200">{calc.supplyAir.temp.toFixed(1)} °F</dd></div>
+              <div className="flex justify-between"><dt className="text-gray-500 dark:text-slate-400">ADP (selected)</dt><dd className="font-mono font-semibold dark:text-slate-200">{calc.coil.selectedADP.toFixed(0)} °F</dd></div>
+              <div className="flex justify-between"><dt className="text-gray-500 dark:text-slate-400">W (gr/lb)</dt><dd className="font-mono font-semibold dark:text-slate-200">{calc.supplyAir.humidityRatioGr.toFixed(1)}</dd></div>
+              <div className="flex justify-between"><dt className="text-gray-500 dark:text-slate-400">h (BTU/lb)</dt><dd className="font-mono font-semibold dark:text-slate-200">{calc.supplyAir.enthalpy.toFixed(1)}</dd></div>
             </dl>
           </div>
         </div>
 
         {/* Moisture management summary */}
-        <div className="rounded-xl border border-emerald-100 bg-emerald-50/30 p-4">
+        <div className="rounded-xl border border-emerald-100 dark:border-emerald-900 bg-emerald-50/30 dark:bg-emerald-950/20 p-4">
           <h4 className="text-xs font-bold text-emerald-700 uppercase tracking-widest mb-3">Moisture Management</h4>
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-            <div className="bg-white border border-emerald-100 rounded-lg px-3 py-2 text-center">
-              <p className="text-[10px] text-gray-500 uppercase tracking-wide mb-0.5">Action Required</p>
+            <div className="bg-white dark:bg-slate-800 border border-emerald-100 dark:border-emerald-900 rounded-lg px-3 py-2 text-center">
+              <p className="text-[10px] text-gray-500 dark:text-slate-400 uppercase tracking-wide mb-0.5">Action Required</p>
               <p className={`text-sm font-bold ${actionColor}`}>{calc.moisture.action}</p>
             </div>
-            <div className="bg-white border border-emerald-100 rounded-lg px-3 py-2 text-center">
-              <p className="text-[10px] text-gray-500 uppercase tracking-wide mb-0.5">Moisture Rate</p>
-              <p className="text-sm font-bold text-gray-800">{calc.moisture.rate.toFixed(2)} lbs/hr</p>
+            <div className="bg-white dark:bg-slate-800 border border-emerald-100 dark:border-emerald-900 rounded-lg px-3 py-2 text-center">
+              <p className="text-[10px] text-gray-500 dark:text-slate-400 uppercase tracking-wide mb-0.5">Moisture Rate</p>
+              <p className="text-sm font-bold text-gray-800 dark:text-slate-100">{calc.moisture.rate.toFixed(2)} lbs/hr</p>
             </div>
-            <div className="bg-white border border-emerald-100 rounded-lg px-3 py-2 text-center">
-              <p className="text-[10px] text-gray-500 uppercase tracking-wide mb-0.5">Coil Latent Load</p>
-              <p className="text-sm font-bold text-gray-800">{n(calc.moisture.loadBTU ?? 0)} BTU/h</p>
+            <div className="bg-white dark:bg-slate-800 border border-emerald-100 dark:border-emerald-900 rounded-lg px-3 py-2 text-center">
+              <p className="text-[10px] text-gray-500 dark:text-slate-400 uppercase tracking-wide mb-0.5">Coil Latent Load</p>
+              <p className="text-sm font-bold text-gray-800 dark:text-slate-100">{n(calc.moisture.loadBTU ?? 0)} BTU/h</p>
             </div>
-            <div className="bg-white border border-emerald-100 rounded-lg px-3 py-2 text-center">
-              <p className="text-[10px] text-gray-500 uppercase tracking-wide mb-0.5">ΔW Coil (gr/lb)</p>
-              <p className="text-sm font-bold text-gray-800">{calc.supplyAir.deltaWGr.toFixed(1)}</p>
-              <p className="text-[9px] text-gray-400">W_room − W_supply</p>
+            <div className="bg-white dark:bg-slate-800 border border-emerald-100 dark:border-emerald-900 rounded-lg px-3 py-2 text-center">
+              <p className="text-[10px] text-gray-500 dark:text-slate-400 uppercase tracking-wide mb-0.5">ΔW Coil (gr/lb)</p>
+              <p className="text-sm font-bold text-gray-800 dark:text-slate-100">{calc.supplyAir.deltaWGr.toFixed(1)}</p>
+              <p className="text-[9px] text-gray-400 dark:text-slate-500">W_room − W_supply</p>
             </div>
           </div>
         </div>
 
         {/* Reheat warning */}
         {reheatNeeded && (
-          <div className="rounded-xl border border-orange-200 bg-orange-50/40 p-4">
-            <h4 className="text-xs font-bold text-orange-700 uppercase tracking-widest mb-2">Reheat Requirement</h4>
+          <div className="rounded-xl border border-orange-200 dark:border-orange-900 bg-orange-50/40 dark:bg-orange-950/20 p-4">
+            <h4 className="text-xs font-bold text-orange-700 dark:text-orange-400 uppercase tracking-widest mb-2">Reheat Requirement</h4>
             <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 text-xs">
-              <div className="bg-white border border-orange-100 rounded-lg px-3 py-2 text-center">
-                <p className="text-[10px] text-gray-500 uppercase tracking-wide mb-0.5">Current SHR (GSHF)</p>
-                <p className="text-sm font-bold text-orange-700">{(calc.reheat.currentSHR * 100).toFixed(1)} %</p>
+              <div className="bg-white dark:bg-slate-800 border border-orange-100 dark:border-orange-900/50 rounded-lg px-3 py-2 text-center">
+                <p className="text-[10px] text-gray-500 dark:text-slate-400 uppercase tracking-wide mb-0.5">Current SHR (GSHF)</p>
+                <p className="text-sm font-bold text-orange-700 dark:text-orange-400">{(calc.reheat.currentSHR * 100).toFixed(1)} %</p>
               </div>
-              <div className="bg-white border border-orange-100 rounded-lg px-3 py-2 text-center">
-                <p className="text-[10px] text-gray-500 uppercase tracking-wide mb-0.5">Target SHR</p>
-                <p className="text-sm font-bold text-gray-700">{(calc.reheat.targetSHR * 100).toFixed(1)} %</p>
+              <div className="bg-white dark:bg-slate-800 border border-orange-100 dark:border-orange-900/50 rounded-lg px-3 py-2 text-center">
+                <p className="text-[10px] text-gray-500 dark:text-slate-400 uppercase tracking-wide mb-0.5">Target SHR</p>
+                <p className="text-sm font-bold text-gray-700 dark:text-slate-300">{(calc.reheat.targetSHR * 100).toFixed(1)} %</p>
               </div>
-              <div className="bg-white border border-orange-100 rounded-lg px-3 py-2 text-center">
-                <p className="text-[10px] text-gray-500 uppercase tracking-wide mb-0.5">Reheat Needed</p>
-                <p className="text-sm font-bold text-orange-700">{n(calc.reheat.reheatBTU)} BTU/h</p>
+              <div className="bg-white dark:bg-slate-800 border border-orange-100 dark:border-orange-900/50 rounded-lg px-3 py-2 text-center">
+                <p className="text-[10px] text-gray-500 dark:text-slate-400 uppercase tracking-wide mb-0.5">Reheat Needed</p>
+                <p className="text-sm font-bold text-orange-700 dark:text-orange-400">{n(calc.reheat.reheatBTU)} BTU/h</p>
               </div>
             </div>
             <p className="text-[10px] text-orange-600 mt-2">
@@ -1229,11 +1262,11 @@ function RoomDetail({
   };
 
   return (
-    <div className="bg-white border-t border-blue-100 px-4 py-5 space-y-5">
+    <div className="bg-white dark:bg-slate-900 border-t border-blue-100 dark:border-slate-700 px-4 py-5 space-y-5">
 
-      <div className="sticky top-0 z-10 -mx-4 px-4 py-2.5 bg-white/95 backdrop-blur border-b border-slate-100">
+      <div className="sticky top-0 z-10 -mx-4 px-4 py-2.5 bg-white/95 dark:bg-slate-900/95 backdrop-blur border-b border-slate-100 dark:border-slate-700">
         <div className="flex flex-wrap items-center gap-2">
-          <h4 className="text-sm font-semibold text-slate-900 truncate">{room?.name || 'Room'}</h4>
+          <h4 className="text-sm font-semibold text-slate-900 dark:text-slate-100 truncate">{room?.name || 'Room'}</h4>
           <span
             className={`text-[11px] rounded border px-2 py-0.5 font-semibold ${
               equipmentBasis.governingSeason === 'Monsoon'
@@ -1303,7 +1336,7 @@ function RoomDetail({
               className={`text-xs rounded-md px-2 py-1.5 border transition-colors ${
                 activeStep === step
                   ? 'bg-slate-800 text-white border-slate-800'
-                  : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50'
+                  : 'bg-white dark:bg-slate-800 text-slate-600 dark:text-slate-400 border-slate-200 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-700'
               }`}
             >
               {label}
@@ -1312,34 +1345,47 @@ function RoomDetail({
         </div>
       </div>
 
+      {/* ── Combined unsaved-changes banner ── */}
+      {(isRoomDirty || isEnvelopeDirty) && (
+        <div className="flex items-center justify-between gap-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2">
+          <p className="text-[11px] font-medium text-amber-800">
+            Unsaved changes to{' '}
+            {isRoomDirty && isEnvelopeDirty
+              ? 'room parameters and building envelope'
+              : isRoomDirty
+              ? 'room parameters'
+              : 'building envelope'}{' '}
+            are affecting live calculations.
+          </p>
+          <div className="flex items-center gap-2 shrink-0">
+            <button
+              type="button"
+              onClick={() => { handleCancelRoomParameters(); handleCancelEnvelope(); }}
+              className="h-7 rounded-md border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 px-2.5 text-[11px] font-semibold text-slate-700 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-700"
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              onClick={async () => {
+                if (isRoomDirty) await handleUpdateRoomParameters();
+                if (isEnvelopeDirty) await handleSaveEnvelope();
+              }}
+              disabled={isUpdating || isSavingEnvelope}
+              className="inline-flex h-7 items-center gap-1 rounded-md border border-blue-300 bg-blue-600 px-2.5 text-[11px] font-semibold text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              {(isUpdating || isSavingEnvelope) && <Loader2 className="h-3 w-3 animate-spin" />}
+              Update Inputs
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* ── Room Inputs ───────────────────────────────────────────── */}
       {activeStep === 'inputs' && (
-      <div className="rounded-xl border border-slate-200 bg-slate-50/60 p-4">
-        <h4 className="text-xs font-bold text-gray-500 uppercase tracking-widest mb-3">Room Parameters</h4>
-        <p className="mb-3 text-[11px] font-medium text-slate-600">Step 1 inputs and dropdowns use live app-engine recalculation immediately. Database is updated only when you click Update.</p>
-        {isRoomDirty && (
-          <div className="mb-3 flex items-center justify-between gap-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2">
-            <p className="text-[11px] font-medium text-amber-800">Unsaved room parameter changes are affecting live calculations. Update or cancel before leaving this room.</p>
-            <div className="flex items-center gap-2">
-              <button
-                type="button"
-                onClick={handleCancelRoomParameters}
-                className="h-7 rounded-md border border-slate-300 bg-white px-2.5 text-[11px] font-semibold text-slate-700 hover:bg-slate-50"
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                onClick={() => void handleUpdateRoomParameters()}
-                disabled={isUpdating}
-                className="inline-flex h-7 items-center gap-1 rounded-md border border-blue-300 bg-blue-600 px-2.5 text-[11px] font-semibold text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-60"
-              >
-                {isUpdating && <Loader2 className="h-3 w-3 animate-spin" />}
-                Update
-              </button>
-            </div>
-          </div>
-        )}
+      <div className="rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50/60 dark:bg-slate-800/60 p-4">
+        <h4 className="text-xs font-bold text-gray-500 dark:text-slate-400 uppercase tracking-widest mb-3">Room Parameters</h4>
+        <p className="mb-3 text-[11px] font-medium text-slate-600 dark:text-slate-400">Step 1 inputs and dropdowns use live app-engine recalculation immediately. Database is updated only when you click Update.</p>
         <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-6 gap-3">
           <Field label="Name">
             <Input value={roomDraft.name} onChange={e => patchRoomDraft({ name: e.target.value })} className="h-8 text-sm" />
@@ -1357,7 +1403,7 @@ function RoomDetail({
             <BufferedNumberInput committersRef={draftCommittersRef} draftKey={`${id}-height`} value={roomDraft.height} onDraftChange={(draft, parsed) => handleNumericDraftChange('height', draft, parsed)} onCommit={next => patchRoomDraft({ height: next })} className="h-8 text-sm" title="Type =10m to convert 10 meters to feet, or =32.8 for feet" />
           </Field>
           <Field label={`Area: ${c.rd.length * c.rd.width} ft²`}>
-            <div className="h-8 flex items-center text-sm font-semibold text-gray-700">
+            <div className="h-8 flex items-center text-sm font-semibold text-gray-700 dark:text-slate-300">
               Vol (effective): {Math.round(c.rd.length * c.rd.width * (c.rd.hasFalseCeiling ? (c.rd.falseCeilingHeight || c.rd.height) : c.rd.height))} ft³
             </div>
           </Field>
@@ -1365,7 +1411,7 @@ function RoomDetail({
 
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mt-3">
           <Field label="False Ceiling">
-            <label className="h-8 inline-flex items-center gap-2 text-xs text-slate-700">
+            <label className="h-8 inline-flex items-center gap-2 text-xs text-slate-700 dark:text-slate-300">
               <input
                 type="checkbox"
                 checked={!!roomDraft.hasFalseCeiling}
@@ -1392,7 +1438,7 @@ function RoomDetail({
             )}
           </Field>
           <Field label="Effective Height (ft)">
-            <div className="h-8 flex items-center text-sm font-semibold text-gray-700">
+            <div className="h-8 flex items-center text-sm font-semibold text-gray-700 dark:text-slate-300">
               {roomDraft.hasFalseCeiling ? (roomDraft.falseCeilingHeight ?? c.rd.height) : c.rd.height}
             </div>
           </Field>
@@ -1460,76 +1506,142 @@ function RoomDetail({
           </Field>
         </div>
 
-        <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-6 gap-3 mt-3">
-          <Field label="Sensible Safety (%)">
-            <BufferedNumberInput 
-              committersRef={draftCommittersRef} 
-              draftKey={`${id}-sensible-safety`} 
-              value={roomDraft.sensibleSafetyPercent} 
-              defaultValue={10}
-              onDraftChange={(draft, parsed) => handleNumericDraftChange('sensibleSafetyPercent', draft, parsed)}
-              onCommit={next => patchRoomDraft({ sensibleSafetyPercent: next })} 
-              className="h-8 text-sm" 
-              title="Safety factor for sensible loads (default: 10%)"
-            />
-          </Field>
-          <Field label="Latent Safety (%)">
-            <BufferedNumberInput 
-              committersRef={draftCommittersRef} 
-              draftKey={`${id}-latent-safety`} 
-              value={roomDraft.latentSafetyPercent} 
-              defaultValue={5}
-              onDraftChange={(draft, parsed) => handleNumericDraftChange('latentSafetyPercent', draft, parsed)}
-              onCommit={next => patchRoomDraft({ latentSafetyPercent: next })} 
-              className="h-8 text-sm" 
-              title="Safety factor for latent loads (default: 5%)"
-            />
-          </Field>
-          <Field label="Overall Safety (%)">
-            <BufferedNumberInput
-              committersRef={draftCommittersRef}
-              draftKey={`${id}-overall-safety`}
-              value={roomDraft.overallSafetyPercent}
-              defaultValue={3}
-              onDraftChange={(draft, parsed) => handleNumericDraftChange('overallSafetyPercent', draft, parsed)}
-              onCommit={next => patchRoomDraft({ overallSafetyPercent: next })}
-              className="h-8 text-sm"
-              title="Safety factor for final TR (default: 3%)"
-            />
-          </Field>
-          <Field label="Heating Safety (%)">
-            <BufferedNumberInput
-              committersRef={draftCommittersRef}
-              draftKey={`${id}-heating-safety`}
-              value={roomDraft.heatingSafetyPercent}
-              defaultValue={10}
-              onDraftChange={(draft, parsed) => handleNumericDraftChange('heatingSafetyPercent', draft, parsed)}
-              onCommit={next => patchRoomDraft({ heatingSafetyPercent: next })}
-              className="h-8 text-sm"
-              title="Safety on transmission + ventilation heating (ASHRAE Ch.18 default: 10%)"
-            />
-          </Field>
-          <Field label="Pickup Factor (%)">
-            <BufferedNumberInput
-              committersRef={draftCommittersRef}
-              draftKey={`${id}-heating-pickup`}
-              value={roomDraft.heatingPickupPercent}
-              defaultValue={15}
-              onDraftChange={(draft, parsed) => handleNumericDraftChange('heatingPickupPercent', draft, parsed)}
-              onCommit={next => patchRoomDraft({ heatingPickupPercent: next })}
-              className="h-8 text-sm"
-              title="Morning warm-up pickup allowance (Carrier Manual default: 15%; heavy setback: 25%)"
-            />
-          </Field>
-        </div>
-
-        <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-6 gap-3 mt-3">
-          <Field label={`OA CFM: ${Math.round(c.vent.cfm)}`}>
-            <div className="grid grid-cols-2 gap-1">
-              <BufferedNumberInput committersRef={draftCommittersRef} draftKey={`${id}-duct-gain`} placeholder="Duct%" value={roomDraft.ductGainPct} defaultValue={2} onDraftChange={(draft, parsed) => handleNumericDraftChange('ductGainPct', draft, parsed)} onCommit={next => patchRoomDraft({ ductGainPct: next })} className="h-8 text-xs border rounded px-2 w-full" title="Duct Gain % (default: 2%)" />
-              <BufferedNumberInput committersRef={draftCommittersRef} draftKey={`${id}-fan-gain`} placeholder="Fan%" value={roomDraft.fanGainPct} defaultValue={3} onDraftChange={(draft, parsed) => handleNumericDraftChange('fanGainPct', draft, parsed)} onCommit={next => patchRoomDraft({ fanGainPct: next })} className="h-8 text-xs border rounded px-2 w-full" title="Fan Gain % (default: 3%)" />
+        {/* ASHRAE 62.1 Breathing Zone OA */}
+        {(() => {
+          const st62 = getSpaceType(roomDraft.spaceType);
+          const vbz62 = calcRoomVbz({ id, spaceType: roomDraft.spaceType, peopleCount: roomDraft.peopleCount, length: c.rd.length, width: c.rd.width });
+          const spaceCategories = [...new Set(SPACE_TYPES_62.map(s => s.category))];
+          return (
+            <div className="mt-3 bg-sky-50 dark:bg-sky-950/20 border border-sky-200 dark:border-sky-800 rounded-lg px-3 py-2.5">
+              <div className="flex items-center gap-2 mb-2">
+                <span className="text-[10px] font-bold uppercase tracking-wider text-sky-700 dark:text-sky-400">ASHRAE 62.1 Breathing Zone OA</span>
+                <span className="text-[9px] text-sky-500 dark:text-sky-500">(supplementary — System Design uses these for multi-space calc)</span>
+              </div>
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 items-end">
+                <div className="sm:col-span-2">
+                  <label className="block text-[10px] font-medium text-slate-500 mb-1">Space Type (62.1 Table 6.2.2.1)</label>
+                  <Select
+                    value={roomDraft.spaceType}
+                    onValueChange={v => patchRoomDraft({ spaceType: v ?? 'office_general' })}
+                  >
+                    <SelectTrigger className="h-8 text-xs"><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      {spaceCategories.map(cat => (
+                        <SelectGroup key={cat}>
+                          <SelectLabel className="text-[10px] uppercase tracking-wide text-slate-400 py-1">{cat}</SelectLabel>
+                          {SPACE_TYPES_62.filter(s => s.category === cat).map(s => (
+                            <SelectItem key={s.id} value={s.id} className="text-xs">{s.label}</SelectItem>
+                          ))}
+                        </SelectGroup>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div>
+                  <label className="block text-[10px] font-medium text-slate-500 dark:text-slate-400 mb-1">Rp · Ra (cfm)</label>
+                  <div className="h-8 flex items-center text-xs font-mono text-slate-700 dark:text-slate-300 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded px-2">
+                    {st62.Rp}/person · {st62.Ra}/ft²
+                  </div>
+                </div>
+                <div>
+                  <label className="block text-[10px] font-medium text-slate-500 dark:text-slate-400 mb-1">Vbz (breathing zone)</label>
+                  <div className="h-8 flex items-center text-xs font-semibold text-sky-800 dark:text-sky-300 bg-white dark:bg-slate-800 border border-sky-200 dark:border-sky-800 rounded px-2 font-mono">
+                    {Math.round(vbz62.Vbz)} CFM
+                    <span className="ml-1.5 text-[9px] text-slate-400 font-normal">
+                      {st62.Rp > 0 && `${st62.Rp}×${vbz62.peopleCount}p`}
+                      {st62.Rp > 0 && st62.Ra > 0 && ' + '}
+                      {st62.Ra > 0 && `${st62.Ra}×${Math.round(vbz62.areaSqFt)}ft²`}
+                    </span>
+                  </div>
+                </div>
+              </div>
             </div>
-          </Field>
+          );
+        })()}
+
+        {/* Safety & Design Overrides — collapsible */}
+        <div className="mt-3 border border-slate-200 dark:border-slate-700 rounded-lg">
+          <button
+            type="button"
+            onClick={() => setShowSafetyOverrides(v => !v)}
+            className="flex w-full items-center gap-1.5 px-3 py-2 text-[11px] font-semibold text-slate-500 dark:text-slate-400 hover:text-slate-700 dark:hover:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800 rounded-lg transition-colors"
+          >
+            <ChevronDown className={`h-3.5 w-3.5 transition-transform ${showSafetyOverrides ? '' : '-rotate-90'}`} />
+            Safety &amp; Design Overrides
+            <span className="ml-1 font-normal text-slate-400">(sensible {roomDraft.sensibleSafetyPercent ?? 10}% · latent {roomDraft.latentSafetyPercent ?? 5}% · overall {roomDraft.overallSafetyPercent ?? 3}% · heating {roomDraft.heatingSafetyPercent ?? 10}% · pickup {roomDraft.heatingPickupPercent ?? 15}%)</span>
+          </button>
+          {showSafetyOverrides && (
+            <div className="px-3 pb-3 pt-1 border-t border-slate-200 dark:border-slate-700">
+              <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-6 gap-3">
+                <Field label="Sensible Safety (%)">
+                  <BufferedNumberInput
+                    committersRef={draftCommittersRef}
+                    draftKey={`${id}-sensible-safety`}
+                    value={roomDraft.sensibleSafetyPercent}
+                    defaultValue={10}
+                    onDraftChange={(draft, parsed) => handleNumericDraftChange('sensibleSafetyPercent', draft, parsed)}
+                    onCommit={next => patchRoomDraft({ sensibleSafetyPercent: next })}
+                    className="h-8 text-sm"
+                    title="Safety factor for sensible loads (default: 10%)"
+                  />
+                </Field>
+                <Field label="Latent Safety (%)">
+                  <BufferedNumberInput
+                    committersRef={draftCommittersRef}
+                    draftKey={`${id}-latent-safety`}
+                    value={roomDraft.latentSafetyPercent}
+                    defaultValue={5}
+                    onDraftChange={(draft, parsed) => handleNumericDraftChange('latentSafetyPercent', draft, parsed)}
+                    onCommit={next => patchRoomDraft({ latentSafetyPercent: next })}
+                    className="h-8 text-sm"
+                    title="Safety factor for latent loads (default: 5%)"
+                  />
+                </Field>
+                <Field label="Overall Safety (%)">
+                  <BufferedNumberInput
+                    committersRef={draftCommittersRef}
+                    draftKey={`${id}-overall-safety`}
+                    value={roomDraft.overallSafetyPercent}
+                    defaultValue={3}
+                    onDraftChange={(draft, parsed) => handleNumericDraftChange('overallSafetyPercent', draft, parsed)}
+                    onCommit={next => patchRoomDraft({ overallSafetyPercent: next })}
+                    className="h-8 text-sm"
+                    title="Safety factor for final TR (default: 3%)"
+                  />
+                </Field>
+                <Field label="Heating Safety (%)">
+                  <BufferedNumberInput
+                    committersRef={draftCommittersRef}
+                    draftKey={`${id}-heating-safety`}
+                    value={roomDraft.heatingSafetyPercent}
+                    defaultValue={10}
+                    onDraftChange={(draft, parsed) => handleNumericDraftChange('heatingSafetyPercent', draft, parsed)}
+                    onCommit={next => patchRoomDraft({ heatingSafetyPercent: next })}
+                    className="h-8 text-sm"
+                    title="Safety on transmission + ventilation heating (ASHRAE Ch.18 default: 10%)"
+                  />
+                </Field>
+                <Field label="Pickup Factor (%)">
+                  <BufferedNumberInput
+                    committersRef={draftCommittersRef}
+                    draftKey={`${id}-heating-pickup`}
+                    value={roomDraft.heatingPickupPercent}
+                    defaultValue={15}
+                    onDraftChange={(draft, parsed) => handleNumericDraftChange('heatingPickupPercent', draft, parsed)}
+                    onCommit={next => patchRoomDraft({ heatingPickupPercent: next })}
+                    className="h-8 text-sm"
+                    title="Morning warm-up pickup allowance (Carrier Manual default: 15%; heavy setback: 25%)"
+                  />
+                </Field>
+                <Field label={`OA CFM: ${Math.round(c.vent.cfm)}`}>
+                  <div className="grid grid-cols-2 gap-1">
+                    <BufferedNumberInput committersRef={draftCommittersRef} draftKey={`${id}-duct-gain`} placeholder="Duct%" value={roomDraft.ductGainPct} defaultValue={2} onDraftChange={(draft, parsed) => handleNumericDraftChange('ductGainPct', draft, parsed)} onCommit={next => patchRoomDraft({ ductGainPct: next })} className="h-8 text-xs border rounded px-2 w-full" title="Duct Gain % (default: 2%)" />
+                    <BufferedNumberInput committersRef={draftCommittersRef} draftKey={`${id}-fan-gain`} placeholder="Fan%" value={roomDraft.fanGainPct} defaultValue={3} onDraftChange={(draft, parsed) => handleNumericDraftChange('fanGainPct', draft, parsed)} onCommit={next => patchRoomDraft({ fanGainPct: next })} className="h-8 text-xs border rounded px-2 w-full" title="Fan Gain % (default: 3%)" />
+                  </div>
+                </Field>
+              </div>
+            </div>
+          )}
         </div>
       </div>
       )}
@@ -1561,9 +1673,9 @@ function RoomDetail({
 
         const WallRow = ({ el, elIdx }: { el: any; elIdx: number }) => {
           const elId = el?.id;
-          const wt = WALL_TYPES.find(w => w.id === (el?.wallTypeId || 'w1'));
+          const wt = WALL_TYPES.find(w => w.id === el?.wallTypeId) ?? customWallTypes.find(c => c.id === el?.wallTypeId);
           return (
-            <TableRow key={elId || elIdx} className={elIdx % 2 === 0 ? 'bg-white' : 'bg-gray-50'}>
+            <TableRow key={elId || elIdx} className={elIdx % 2 === 0 ? 'bg-white dark:bg-slate-900' : 'bg-gray-50 dark:bg-slate-800/50'}>
               <TableCell className="py-1.5">
                 <Select value={el?.type || 'Wall'} onValueChange={v => handleDraftUpdate(elId, { type: v as ElementType, orientation: v === 'Partition' ? 'N' : (el?.orientation || 'S') })}>
                   <SelectTrigger className="h-7 text-xs min-w-max"><SelectValue /></SelectTrigger>
@@ -1574,14 +1686,37 @@ function RoomDetail({
               </TableCell>
               <TableCell className="py-1.5">
                 <Select
-                  value={el?.wallTypeId && WALL_TYPES.find(w => w.id === el.wallTypeId) ? el.wallTypeId : 'w1'}
+                  value={el?.wallTypeId || 'w1'}
                   onValueChange={v => {
-                    const w = WALL_TYPES.find(wt => wt.id === v);
-                    if (w) handleDraftUpdate(elId, { wallTypeId: v, uValue: w.uValue });
+                    const w = WALL_TYPES.find(wt => wt.id === v) ?? customWallTypes.find(c => c.id === v);
+                    handleDraftUpdate(elId, { wallTypeId: v, ...(w ? { uValue: w.uValue } : {}) });
                   }}
                 >
-                  <SelectTrigger className="h-7 text-xs min-w-max"><SelectValue /></SelectTrigger>
-                  <SelectContent>{WALL_TYPES.map(w => <SelectItem key={w.id} value={w.id} className="text-xs">{w.name}</SelectItem>)}</SelectContent>
+                  <SelectTrigger className="h-7 text-xs min-w-max">
+                    <span>{(() => {
+                      const sid = el?.wallTypeId || 'w1';
+                      const std = WALL_TYPES.find(w => w.id === sid);
+                      if (std) return std.id;
+                      const cust = customWallTypes.find(c => c.id === sid);
+                      return cust ? cust.displayId : sid;
+                    })()}</span>
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectGroup>
+                      <SelectLabel className="text-xs text-slate-400 px-2 py-1">Standard</SelectLabel>
+                      {WALL_TYPES.map(w => <SelectItem key={w.id} value={w.id} className="text-xs">{w.name}</SelectItem>)}
+                    </SelectGroup>
+                    {customWallTypes.length > 0 && (
+                      <SelectGroup>
+                        <SelectLabel className="text-xs text-blue-600 px-2 py-1">Custom (U Builder)</SelectLabel>
+                        {customWallTypes.map(c => (
+                          <SelectItem key={c.id} value={c.id} className="text-xs">
+                            {c.displayId}: {c.name} ({c.uValue.toFixed(3)})
+                          </SelectItem>
+                        ))}
+                      </SelectGroup>
+                    )}
+                  </SelectContent>
                 </Select>
               </TableCell>
               <TableCell className="py-1.5">
@@ -1629,7 +1764,7 @@ function RoomDetail({
           const elId = el?.id;
           const gt = GLASS_TYPES.find(g => g.id === (el?.wallTypeId || 'g2'));
           return (
-            <TableRow key={elId || elIdx} className={elIdx % 2 === 0 ? 'bg-white' : 'bg-sky-50/40'}>
+            <TableRow key={elId || elIdx} className={elIdx % 2 === 0 ? 'bg-white dark:bg-slate-900' : 'bg-sky-50/40 dark:bg-sky-950/30'}>
               <TableCell className="py-1.5">
                 <Select
                   value={el?.wallTypeId && GLASS_TYPES.find(g => g.id === el.wallTypeId) ? el.wallTypeId : 'g2'}
@@ -1673,42 +1808,30 @@ function RoomDetail({
         return (
           <div className="space-y-4">
             {/* ── Unsaved envelope changes banner ── */}
-            {isEnvelopeDirty && (
-              <div className="flex items-center justify-between gap-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2">
-                <p className="text-[11px] font-medium text-amber-800">Unsaved envelope changes are affecting live calculations. Save or cancel before leaving.</p>
-                <div className="flex items-center gap-2 shrink-0">
-                  <button type="button" onClick={handleCancelEnvelope} className="h-7 rounded-md border border-slate-300 bg-white px-2.5 text-[11px] font-semibold text-slate-700 hover:bg-slate-50">Cancel</button>
-                  <button type="button" onClick={() => void handleSaveEnvelope()} disabled={isSavingEnvelope} className="inline-flex h-7 items-center gap-1 rounded-md border border-blue-300 bg-blue-600 px-2.5 text-[11px] font-semibold text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-60">
-                    {isSavingEnvelope && <Loader2 className="h-3 w-3 animate-spin" />}
-                    Save Envelope
-                  </button>
-                </div>
-              </div>
-            )}
             {/* ── Side-by-side: Walls & Partitions | Glass ── */}
             <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
 
               {/* Walls & Partitions Card */}
-              <div className="rounded-xl border border-amber-200 bg-amber-50/30 p-4">
+              <div className="rounded-xl border border-amber-200 dark:border-amber-900 bg-amber-50/30 dark:bg-amber-950/20 p-4">
                 <div className="flex items-center justify-between mb-3">
-                  <h4 className="text-xs font-bold text-amber-800 uppercase tracking-widest">Walls &amp; Partitions</h4>
+                  <h4 className="text-xs font-bold text-amber-800 dark:text-amber-400 uppercase tracking-widest">Walls &amp; Partitions</h4>
                   <div className="flex gap-1">
                     <button type="button" onClick={() => handleDraftAdd('Wall')}
-                      className="flex items-center gap-0.5 text-[11px] px-2 py-1 rounded border border-amber-300 hover:bg-amber-100 text-amber-700 font-medium">
+                      className="flex items-center gap-0.5 text-[11px] px-2 py-1 rounded border border-amber-300 dark:border-amber-700 hover:bg-amber-100 dark:hover:bg-amber-900 text-amber-700 dark:text-amber-400 font-medium">
                       <Plus className="w-3 h-3" />Wall
                     </button>
                     <button type="button" onClick={() => handleDraftAdd('Partition')}
-                      className="flex items-center gap-0.5 text-[11px] px-2 py-1 rounded border border-amber-300 hover:bg-amber-100 text-amber-700 font-medium">
+                      className="flex items-center gap-0.5 text-[11px] px-2 py-1 rounded border border-amber-300 dark:border-amber-700 hover:bg-amber-100 dark:hover:bg-amber-900 text-amber-700 dark:text-amber-400 font-medium">
                       <Plus className="w-3 h-3" />Partition
                     </button>
                   </div>
                 </div>
                 {wallEls.length === 0 ? (
-                  <div className="text-center py-6 border border-dashed border-amber-200 rounded-lg text-xs text-amber-400">
+                  <div className="text-center py-6 border border-dashed border-amber-200 dark:border-amber-800 rounded-lg text-xs text-amber-400 dark:text-amber-600">
                     No walls or partitions — click Add above.
                   </div>
                 ) : (
-                  <div className="overflow-x-auto rounded-lg border border-gray-200">
+                  <div className="overflow-x-auto rounded-lg border border-gray-200 dark:border-slate-700">
                     <Table>
                       <TableHeader>
                         <TableRow className="bg-amber-600">
@@ -1732,20 +1855,20 @@ function RoomDetail({
               </div>
 
               {/* Glass Card */}
-              <div className="rounded-xl border border-sky-200 bg-sky-50/30 p-4">
+              <div className="rounded-xl border border-sky-200 dark:border-sky-800 bg-sky-50/30 dark:bg-sky-950/20 p-4">
                 <div className="flex items-center justify-between mb-3">
-                  <h4 className="text-xs font-bold text-sky-800 uppercase tracking-widest">Glass / Fenestration</h4>
+                  <h4 className="text-xs font-bold text-sky-800 dark:text-sky-400 uppercase tracking-widest">Glass / Fenestration</h4>
                   <button type="button" onClick={() => handleDraftAdd('Glass')}
-                    className="flex items-center gap-0.5 text-[11px] px-2 py-1 rounded border border-sky-300 hover:bg-sky-100 text-sky-700 font-medium">
+                    className="flex items-center gap-0.5 text-[11px] px-2 py-1 rounded border border-sky-300 dark:border-sky-700 hover:bg-sky-100 dark:hover:bg-sky-900 text-sky-700 dark:text-sky-400 font-medium">
                     <Plus className="w-3 h-3" />Glass
                   </button>
                 </div>
                 {glassEls.length === 0 ? (
-                  <div className="text-center py-6 border border-dashed border-sky-200 rounded-lg text-xs text-sky-400">
+                  <div className="text-center py-6 border border-dashed border-sky-200 dark:border-sky-800 rounded-lg text-xs text-sky-400 dark:text-sky-600">
                     No glass elements — click Add above.
                   </div>
                 ) : (
-                  <div className="overflow-x-auto rounded-lg border border-gray-200">
+                  <div className="overflow-x-auto rounded-lg border border-gray-200 dark:border-slate-700">
                     <Table>
                       <TableHeader>
                         <TableRow className="bg-sky-600">
@@ -1769,30 +1892,31 @@ function RoomDetail({
             </div>
 
             {/* ── Roof & Floor ── */}
-            <div className="rounded-xl border border-slate-200 bg-slate-50/30 p-4">
+            <div className="rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50/30 dark:bg-slate-800/20 p-4">
               <div className="flex items-center justify-between mb-3">
-                <h4 className="text-xs font-bold text-slate-600 uppercase tracking-widest">Roof &amp; Floor</h4>
+                <h4 className="text-xs font-bold text-slate-600 dark:text-slate-400 uppercase tracking-widest">Roof &amp; Floor</h4>
                 <div className="flex gap-1">
                   <button type="button" onClick={() => handleDraftAdd('Roof')}
-                    className="flex items-center gap-0.5 text-[11px] px-2 py-1 rounded border border-slate-300 hover:bg-slate-100 text-slate-600 font-medium">
+                    className="flex items-center gap-0.5 text-[11px] px-2 py-1 rounded border border-slate-300 dark:border-slate-600 hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-600 dark:text-slate-400 font-medium">
                     <Plus className="w-3 h-3" />Roof
                   </button>
                   <button type="button" onClick={() => handleDraftAdd('Floor')}
-                    className="flex items-center gap-0.5 text-[11px] px-2 py-1 rounded border border-slate-300 hover:bg-slate-100 text-slate-600 font-medium">
+                    className="flex items-center gap-0.5 text-[11px] px-2 py-1 rounded border border-slate-300 dark:border-slate-600 hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-600 dark:text-slate-400 font-medium">
                     <Plus className="w-3 h-3" />Floor
                   </button>
                 </div>
               </div>
               {roofFloorEls.length === 0 ? (
-                <div className="text-center py-4 border border-dashed border-slate-200 rounded-lg text-xs text-slate-400">
+                <div className="text-center py-4 border border-dashed border-slate-200 dark:border-slate-700 rounded-lg text-xs text-slate-400 dark:text-slate-600">
                   No roof or floor elements added.
                 </div>
               ) : (
-                <div className="overflow-x-auto rounded-lg border border-gray-200">
+                <div className="overflow-x-auto rounded-lg border border-gray-200 dark:border-slate-700">
                   <Table>
                     <TableHeader>
                       <TableRow className="bg-slate-600">
                         <TableHead className="text-xs py-2 text-white font-semibold">Type</TableHead>
+                        <TableHead className="text-xs py-2 text-white font-semibold">Assembly</TableHead>
                         <TableHead className="text-xs py-2 text-white font-semibold">Dir</TableHead>
                         <TableHead className="text-xs py-2 text-white font-semibold">Color</TableHead>
                         <TableHead className="text-xs py-2 text-white font-semibold text-right">Area (ft²)</TableHead>
@@ -1806,7 +1930,7 @@ function RoomDetail({
                       {roofFloorEls.map((el: any, elIdx: number) => {
                         const elId = el?.id;
                         return (
-                          <TableRow key={elId || elIdx} className={elIdx % 2 === 0 ? 'bg-white' : 'bg-gray-50'}>
+                          <TableRow key={elId || elIdx} className={elIdx % 2 === 0 ? 'bg-white dark:bg-slate-900' : 'bg-gray-50 dark:bg-slate-800/50'}>
                             <TableCell className="py-1.5">
                               <Select value={el?.type || 'Roof'} onValueChange={v => handleDraftUpdate(elId, { type: v as ElementType })}>
                                 <SelectTrigger className="h-7 text-xs w-20"><SelectValue /></SelectTrigger>
@@ -1814,6 +1938,49 @@ function RoomDetail({
                                   {(['Roof', 'Floor'] as ElementType[]).map(t => <SelectItem key={t} value={t} className="text-xs">{t}</SelectItem>)}
                                 </SelectContent>
                               </Select>
+                            </TableCell>
+                            <TableCell className="py-1.5">
+                              {(() => {
+                                const isFloor = el?.type === 'Floor';
+                                const stdTypes = isFloor ? FLOOR_TYPES : ROOF_TYPES;
+                                const custTypes = isFloor ? customFloorTypes : customRoofTypes;
+                                const defaultId = isFloor ? 'f1' : 'r1';
+                                const sid = el?.wallTypeId || defaultId;
+                                return (
+                                  <Select
+                                    value={sid}
+                                    onValueChange={v => {
+                                      const t = stdTypes.find(x => x.id === v) ?? custTypes.find(x => x.id === v);
+                                      handleDraftUpdate(elId, { wallTypeId: v, ...(t ? { uValue: t.uValue } : {}) });
+                                    }}
+                                  >
+                                    <SelectTrigger className="h-7 text-xs min-w-max">
+                                      <span>{(() => {
+                                        const std = stdTypes.find(x => x.id === sid);
+                                        if (std) return std.id;
+                                        const cust = custTypes.find(x => x.id === sid);
+                                        return cust ? cust.displayId : sid;
+                                      })()}</span>
+                                    </SelectTrigger>
+                                    <SelectContent>
+                                      <SelectGroup>
+                                        <SelectLabel className="text-xs text-slate-400 px-2 py-1">Standard</SelectLabel>
+                                        {stdTypes.map(t => <SelectItem key={t.id} value={t.id} className="text-xs">{t.name}</SelectItem>)}
+                                      </SelectGroup>
+                                      {custTypes.length > 0 && (
+                                        <SelectGroup>
+                                          <SelectLabel className="text-xs text-blue-600 px-2 py-1">Custom (U Builder)</SelectLabel>
+                                          {custTypes.map(c => (
+                                            <SelectItem key={c.id} value={c.id} className="text-xs">
+                                              {c.displayId}: {c.name} ({c.uValue.toFixed(3)})
+                                            </SelectItem>
+                                          ))}
+                                        </SelectGroup>
+                                      )}
+                                    </SelectContent>
+                                  </Select>
+                                );
+                              })()}
                             </TableCell>
                             <TableCell className="py-1.5">
                               <Select value={el?.orientation || 'H'} onValueChange={v => handleDraftUpdate(elId, { orientation: v as any })}>
@@ -1867,7 +2034,7 @@ function RoomDetail({
           'cooling',
           'summer',
           'Summer Cooling Analysis',
-          renderCoolingSection(c, designConditions, 'Summer Cooling Load Breakdown', 'border-slate-200 bg-white'),
+          renderCoolingSection(c, designConditions, 'Summer Cooling Load Breakdown', 'border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900'),
         )}
         {hasMonsoon && renderSeasonPanel(
           'cooling',
@@ -1876,49 +2043,20 @@ function RoomDetail({
           renderCoolingSection(monsoonCalc, monsoonDc, 'Monsoon Cooling Load Breakdown', 'border-teal-200 bg-teal-50/20'),
         )}
 
-        {/* Add Equipment for this room */}
-        {project?.id && (
-          <div className="mt-3 flex justify-end">
-            <button
-              type="button"
-              onClick={() => setEquipmentPickerOpen(true)}
-              className="flex items-center gap-1.5 text-xs bg-blue-600 hover:bg-blue-700 text-white px-3 py-1.5 rounded-md font-medium transition-colors shadow-sm"
-            >
-              <PackagePlus className="w-3.5 h-3.5" />
-              Add Equipment to This Room
-            </button>
-          </div>
-        )}
       </div>
       )}
 
-      {/* Equipment Picker Dialog for this room */}
-      {project?.id && (
-        <EquipmentPickerDialog
-          open={equipmentPickerOpen}
-          onClose={() => setEquipmentPickerOpen(false)}
-          projectId={project.id}
-          roomId={room.id}
-          roomName={room.name}
-          requiredTR={equipmentBasis.requiredTR}
-          loadTR={equipmentBasis.loadGoverningTR}
-          cfmTR={equipmentBasis.cfmGoverningTR}
-          governingTR={equipmentBasis.governingTR}
-          designCFM={equipmentBasis.designCFM}
-          achGovernsAirflow={equipmentBasis.achGovernsAirflow}
-        />
-      )}
 
       {/* ── Heating Load ───────────────────────────────────────────── */}
       {activeStep === 'heating' && (
       <div className="space-y-4">
         {/* Heating load table */}
-        <div className="rounded-xl border border-blue-100 bg-blue-50/30 p-4">
+        <div className="rounded-xl border border-blue-100 dark:border-blue-900 bg-blue-50/30 dark:bg-blue-950/20 p-4">
           <div className="flex items-center justify-between mb-2">
-            <h4 className="text-xs font-bold text-gray-500 uppercase tracking-widest">Heating Load (Winter)</h4>
-            <span className="text-[10px] text-gray-400">Safety {(c.heatingSafetyFactor*100).toFixed(0)}% · Pickup {(c.heatingPickupFactor*100).toFixed(0)}%</span>
+            <h4 className="text-xs font-bold text-gray-500 dark:text-slate-400 uppercase tracking-widest">Heating Load (Winter)</h4>
+            <span className="text-[10px] text-gray-400 dark:text-slate-500">Safety {(c.heatingSafetyFactor*100).toFixed(0)}% · Pickup {(c.heatingPickupFactor*100).toFixed(0)}%</span>
           </div>
-          <div className="overflow-x-auto rounded-lg border border-gray-200">
+          <div className="overflow-x-auto rounded-lg border border-gray-200 dark:border-slate-700">
             <Table>
               <TableHeader>
                 <TableRow className="bg-blue-700">
@@ -1929,31 +2067,31 @@ function RoomDetail({
               </TableHeader>
               <TableBody>
                 <TableRow>
-                  <TableCell className="text-xs py-1.5 text-gray-700">Transmission Loss (U × A × ΔT)</TableCell>
-                  <TableCell className="text-xs py-1.5 text-right font-mono text-gray-500">{n(c.heating.transmissionLoss)}</TableCell>
+                  <TableCell className="text-xs py-1.5 text-gray-700 dark:text-slate-300">Transmission Loss (U × A × ΔT)</TableCell>
+                  <TableCell className="text-xs py-1.5 text-right font-mono text-gray-500 dark:text-slate-400">{n(c.heating.transmissionLoss)}</TableCell>
                   <TableCell className="text-xs py-1.5 text-right font-mono font-semibold">{n(c.hTransSafe)}</TableCell>
                 </TableRow>
-                <TableRow className="bg-gray-50">
-                  <TableCell className="text-xs py-1.5 text-gray-700">Ventilation Heating (1.08 × CFM × ΔT)</TableCell>
-                  <TableCell className="text-xs py-1.5 text-right font-mono text-gray-500">{n(c.heating.ventilationHeating)}</TableCell>
+                <TableRow className="bg-gray-50 dark:bg-slate-800/50">
+                  <TableCell className="text-xs py-1.5 text-gray-700 dark:text-slate-300">Ventilation Heating (1.08 × CFM × ΔT)</TableCell>
+                  <TableCell className="text-xs py-1.5 text-right font-mono text-gray-500 dark:text-slate-400">{n(c.heating.ventilationHeating)}</TableCell>
                   <TableCell className="text-xs py-1.5 text-right font-mono font-semibold">{n(c.hVentSafe)}</TableCell>
                 </TableRow>
                 {c.includeHumidifier && c.winterHumidification.needed && (
-                  <TableRow className="bg-sky-50">
-                    <TableCell className="text-xs py-1.5 text-sky-700 font-medium">
+                  <TableRow className="bg-sky-50 dark:bg-sky-950/30">
+                    <TableCell className="text-xs py-1.5 text-sky-700 dark:text-sky-400 font-medium">
                       Humidifier Energy (ṁ={c.winterHumidification.humidifierRate.toFixed(2)} lbs/hr × 1,061)
                     </TableCell>
                     <TableCell className="text-xs py-1.5 text-right font-mono text-gray-500">—</TableCell>
                     <TableCell className="text-xs py-1.5 text-right font-mono font-semibold text-sky-700">{n(c.hHumLoad)}</TableCell>
                   </TableRow>
                 )}
-                <TableRow className="bg-blue-50">
-                  <TableCell className="text-xs py-1.5 font-semibold text-blue-800">Subtotal (before pickup)</TableCell>
+                <TableRow className="bg-blue-50 dark:bg-blue-950/30">
+                  <TableCell className="text-xs py-1.5 font-semibold text-blue-800 dark:text-blue-300">Subtotal (before pickup)</TableCell>
                   <TableCell className="text-xs py-1.5 text-right text-gray-400">—</TableCell>
                   <TableCell className="text-xs py-1.5 text-right font-mono font-semibold text-blue-800">{n(c.heatingSubtotal)}</TableCell>
                 </TableRow>
-                <TableRow className="bg-amber-50">
-                  <TableCell className="text-xs py-1.5 text-amber-700">
+                <TableRow className="bg-amber-50 dark:bg-amber-950/30">
+                  <TableCell className="text-xs py-1.5 text-amber-700 dark:text-amber-400">
                     Pickup / Warm-up Allowance (+{(c.heatingPickupFactor*100).toFixed(0)}%)
                     <span className="ml-1 text-[10px] text-amber-500">morning setback recovery</span>
                   </TableCell>
@@ -1974,7 +2112,7 @@ function RoomDetail({
         </div>
 
         {/* Winter humidification analysis */}
-        <div className="rounded-xl border border-sky-200 bg-sky-50/40 p-4 space-y-3">
+        <div className="rounded-xl border border-sky-200 dark:border-sky-800 bg-sky-50/40 dark:bg-sky-950/20 p-4 space-y-3">
           <div className="flex items-center justify-between">
             <h4 className="text-xs font-bold text-sky-700 uppercase tracking-widest">
               Winter Humidification Analysis
@@ -1989,7 +2127,7 @@ function RoomDetail({
           </div>
 
           {/* Why humidification is / is not needed */}
-          <div className="text-[11px] text-gray-600 leading-relaxed bg-white border border-sky-100 rounded-lg px-3 py-2">
+          <div className="text-[11px] text-gray-600 dark:text-slate-300 leading-relaxed bg-white dark:bg-slate-800 border border-sky-100 dark:border-sky-900 rounded-lg px-3 py-2">
             {c.winterHumidification.needed ? (
               <>
                 Outdoor air at <strong>{c.winterHumidification.outdoorTemp}°F / {c.winterHumidification.outdoorRH}% RH</strong> carries only <strong>{c.winterHumidification.wOutGr.toFixed(1)} gr/lb</strong> of moisture.
@@ -2022,10 +2160,10 @@ function RoomDetail({
           {c.winterHumidification.needed && (
             <>
               {/* Include-in-heating toggle */}
-              <div className="flex items-center justify-between bg-white border border-sky-200 rounded-lg px-3 py-2">
+              <div className="flex items-center justify-between bg-white dark:bg-slate-800 border border-sky-200 dark:border-sky-900 rounded-lg px-3 py-2">
                 <div>
-                  <p className="text-xs font-semibold text-gray-700">Include humidifier energy penalty in heating load</p>
-                  <p className="text-[10px] text-gray-400 mt-0.5">Adds {n(c.winterHumidification.energyBTU)} BTU/h to Design Heating Load in the table above</p>
+                  <p className="text-xs font-semibold text-gray-700 dark:text-slate-300">Include humidifier energy penalty in heating load</p>
+                  <p className="text-[10px] text-gray-400 dark:text-slate-500 mt-0.5">Adds {n(c.winterHumidification.energyBTU)} BTU/h to Design Heating Load in the table above</p>
                 </div>
                 <button
                   type="button"
@@ -2052,16 +2190,16 @@ function RoomDetail({
                   { label: 'Energy Penalty', value: `${n(c.winterHumidification.energyBTU)} BTU/h`, sub: `${c.winterHumidification.energyKW.toFixed(2)} kW` },
                   { label: 'RH After Heating', value: `${c.winterHumidification.rhAfterHeating}%`, sub: 'Without humidifier' },
                 ].map(item => (
-                  <div key={item.label} className="bg-white border border-sky-100 rounded-lg px-3 py-2 text-center">
-                    <p className="text-[10px] text-gray-500 uppercase tracking-wide mb-0.5">{item.label}</p>
-                    <p className="text-sm font-bold text-sky-800">{item.value}</p>
-                    <p className="text-[10px] text-gray-400">{item.sub}</p>
+                  <div key={item.label} className="bg-white dark:bg-slate-800 border border-sky-100 dark:border-sky-900 rounded-lg px-3 py-2 text-center">
+                    <p className="text-[10px] text-gray-500 dark:text-slate-400 uppercase tracking-wide mb-0.5">{item.label}</p>
+                    <p className="text-sm font-bold text-sky-800 dark:text-sky-300">{item.value}</p>
+                    <p className="text-[10px] text-gray-400 dark:text-slate-500">{item.sub}</p>
                   </div>
                 ))}
               </div>
 
               {/* Calculation trace */}
-              <div className="bg-white border border-sky-100 rounded-lg px-3 py-2 text-[11px] text-gray-600 space-y-0.5">
+              <div className="bg-white dark:bg-slate-800 border border-sky-100 dark:border-sky-900 rounded-lg px-3 py-2 text-[11px] text-gray-600 dark:text-slate-300 space-y-0.5">
                 <p className="font-semibold text-sky-700 mb-1">Calculation — ASHRAE Fundamentals 2017 Ch.1</p>
                 <p>ΔW = W<sub>indoor</sub> − W<sub>outdoor</sub> = {c.winterHumidification.wInGr.toFixed(2)} − {c.winterHumidification.wOutGr.toFixed(2)} = <strong>{c.winterHumidification.deltaWGr.toFixed(2)} gr/lb</strong> ({(c.winterHumidification.deltaWLb * 1000).toFixed(2)} lb/lb × 10⁻³)</p>
                 <p>ṁ = 4.5 × {Math.round(c.winterHumidification.freshCFM)} CFM × {c.winterHumidification.deltaWLb.toFixed(5)} = <strong>{c.winterHumidification.humidifierRateBase.toFixed(2)} lbs/hr</strong> (base)</p>
@@ -2104,8 +2242,8 @@ function RoomDetail({
         )}
 
         {/* Coil & reheat analysis */}
-        <div className="rounded-xl border border-purple-100 bg-purple-50/30 p-4">
-          <h4 className="text-xs font-bold text-purple-700 uppercase tracking-widest mb-3">Coil &amp; Reheat Analysis</h4>
+        <div className="rounded-xl border border-purple-100 dark:border-purple-900 bg-purple-50/30 dark:bg-purple-950/20 p-4">
+          <h4 className="text-xs font-bold text-purple-700 dark:text-purple-400 uppercase tracking-widest mb-3">Coil &amp; Reheat Analysis</h4>
           <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-3">
             {[
               { label: 'Room SHR',        value: `${f1(c.rshf * 100)} %` },
@@ -2121,8 +2259,8 @@ function RoomDetail({
               { label: 'Bypass Factor',   value: `${(c.coil.bypassFactor * 100).toFixed(0)} %` },
               { label: 'Design Supply CFM', value: `${Math.round(c.designCFM)}${c.achGovernsAirflow ? ' ⚠ ACH' : ''}` },
             ].map(item => (
-              <div key={item.label} className="bg-white border border-purple-100 rounded-lg px-3 py-2 text-center">
-                <p className="text-[10px] text-gray-500 uppercase tracking-wide mb-0.5">{item.label}</p>
+              <div key={item.label} className="bg-white dark:bg-slate-800 border border-purple-100 dark:border-purple-900 rounded-lg px-3 py-2 text-center">
+                <p className="text-[10px] text-gray-500 dark:text-slate-400 uppercase tracking-wide mb-0.5">{item.label}</p>
                 <p className={`text-sm font-bold ${item.label === 'Design Supply CFM' && c.achGovernsAirflow ? 'text-amber-700' : 'text-purple-800'}`}>{item.value}</p>
               </div>
             ))}
@@ -2217,7 +2355,6 @@ function calculateRoomStripMetrics(room: any, elements: any[], dc: DesignConditi
   const coilLatent = erlh + oaLatent;
   const grandTotal = coilSensible + coilLatent;
 
-  const isChiller = String(project?.systemType || '').toLowerCase().includes('chiller');
   const coil = calculateCoilParameters(
     coilSensible,
     coilLatent,
@@ -2227,14 +2364,14 @@ function calculateRoomStripMetrics(room: any, elements: any[], dc: DesignConditi
     BF,
     35,
     65,
-    isChiller ? 50 : 54,
+    getMinAdp(project?.systemType),
   );
 
   return {
     totalBTU: grandTotal,
     totalTR: grandTotal / 12000,
     designSupplyCFM: Math.max(
-      coil.dehumidifiedCFM,
+      coil.sensibleCFM,
       (calculateRoomVolume(rd) * Math.max(getRecommendedAch(room.achProfile ?? room.activityType), rd.facph)) / 60,
     ),
   };
@@ -2265,12 +2402,12 @@ function DraggableRoomHeader({
     <div
       ref={setNodeRef}
       className={`flex items-center gap-3 px-4 py-2.5 cursor-pointer select-none transition-colors border-l-2 ${
-        isExpanded ? 'bg-blue-50 border-l-blue-500' : 'hover:bg-gray-50 border-l-transparent'
+        isExpanded ? 'bg-blue-50 dark:bg-blue-950/30 border-l-blue-500' : 'hover:bg-gray-50 dark:hover:bg-slate-800 border-l-transparent'
       } ${isDragging ? 'opacity-70' : ''}`}
       onClick={onToggle}
     >
       <span
-        className="text-gray-400 flex-shrink-0 cursor-grab active:cursor-grabbing"
+        className="text-gray-400 dark:text-slate-500 flex-shrink-0 cursor-grab active:cursor-grabbing"
         title="Drag room to another zone"
         {...listeners}
         {...attributes}
@@ -2278,31 +2415,31 @@ function DraggableRoomHeader({
       >
         <Grip className="w-4 h-4" />
       </span>
-      <span className="text-gray-400 flex-shrink-0">
+      <span className="text-gray-400 dark:text-slate-500 flex-shrink-0">
         {isExpanded ? <ChevronDown className="w-4 h-4" /> : <ChevronRight className="w-4 h-4" />}
       </span>
-      <span className="font-medium text-sm text-gray-900 flex-1 min-w-0 truncate">{room?.name ?? 'Room'}</span>
-      <span className="text-xs text-gray-400 hidden sm:inline">{room?.floor ?? ''}</span>
-      <span className="text-xs text-gray-400 hidden md:inline">{room?.length ?? 0}×{room?.width ?? 0}×{room?.height ?? 0} ft</span>
-      {area > 0 && <span className="text-xs text-gray-400 hidden md:inline">{area} ft²</span>}
+      <span className="font-medium text-sm text-gray-900 dark:text-slate-100 flex-1 min-w-0 truncate">{room?.name ?? 'Room'}</span>
+      <span className="text-xs text-gray-400 dark:text-slate-500 hidden sm:inline">{room?.floor ?? ''}</span>
+      <span className="text-xs text-gray-400 dark:text-slate-500 hidden md:inline">{room?.length ?? 0}×{room?.width ?? 0}×{room?.height ?? 0} ft</span>
+      {area > 0 && <span className="text-xs text-gray-400 dark:text-slate-500 hidden md:inline">{area} ft²</span>}
 
-      <span className="text-[10px] bg-blue-50 text-blue-700 border border-blue-200 rounded px-1.5 py-0.5">
+      <span className="text-[10px] bg-blue-50 dark:bg-blue-950/30 text-blue-700 dark:text-blue-400 border border-blue-200 dark:border-blue-800 rounded px-1.5 py-0.5">
         {metrics.totalTR.toFixed(2)} TR
       </span>
-      <span className="text-[10px] bg-amber-50 text-amber-700 border border-amber-200 rounded px-1.5 py-0.5">
+      <span className="text-[10px] bg-amber-50 dark:bg-amber-950/30 text-amber-700 dark:text-amber-400 border border-amber-200 dark:border-amber-800 rounded px-1.5 py-0.5">
         {Math.round(metrics.totalBTU).toLocaleString()} BTU/h
       </span>
-      <span className="text-[10px] bg-emerald-50 text-emerald-700 border border-emerald-200 rounded px-1.5 py-0.5">
+      <span className="text-[10px] bg-emerald-50 dark:bg-emerald-950/30 text-emerald-700 dark:text-emerald-400 border border-emerald-200 dark:border-emerald-800 rounded px-1.5 py-0.5">
         {Math.round(metrics.designSupplyCFM)} Design CFM
       </span>
 
-      <span className="text-xs bg-gray-100 text-gray-600 rounded px-1.5 py-0.5 flex-shrink-0">
+      <span className="text-xs bg-gray-100 dark:bg-slate-700 text-gray-600 dark:text-slate-400 rounded px-1.5 py-0.5 flex-shrink-0">
         {elementCount} element{elementCount !== 1 ? 's' : ''}
       </span>
       <button
         type="button"
         title="Delete room"
-        className="p-1 text-gray-300 hover:text-red-500 transition-colors flex-shrink-0"
+        className="p-1 text-gray-300 dark:text-slate-600 hover:text-red-500 dark:hover:text-red-400 transition-colors flex-shrink-0"
         onClick={e => { e.stopPropagation(); onDelete(); }}
       >
         <Trash2 className="w-3.5 h-3.5" />
@@ -2329,12 +2466,55 @@ const MemoDraggableRoomHeader = memo(DraggableRoomHeader, (prev, next) => {
 
 // ─── Main RoomTable component ─────────────────────────────────────────────────
 
+// SI (W/m²K) → IP (BTU/h·ft²·°F)
+const SI_TO_IP = 1 / 5.6783;
+
 export default function RoomTable({
   rooms, liveRooms, zoneId, systemId, expandedRoom, setExpandedRoom,
   updateRoom, deleteRoom, addEnvelopeElement, updateEnvelopeElement,
   deleteEnvelopeElement, saveEnvelopeChanges, envelopeElements, project, designConditions, roomSaveStates, onRoomDraftChange, onEnvelopeDraftChange,
+  userId,
 }: RoomTableProps) {
   const [dirtyRoomId, setDirtyRoomId] = useState<string | null>(null);
+
+  // Custom wall assemblies from U Builder (Firestore: u_assemblies)
+  const [customAssemblies, setCustomAssemblies] = useState<Array<{ id: string; displayId: string; name: string; uValue: number; wallCategory: string }>>([]);
+  useEffect(() => {
+    if (!userId) return;
+    const q = query(collection(db, 'u_assemblies'), where('userId', '==', userId));
+    const unsub = onSnapshot(q, snap => {
+      const sorted = [...snap.docs].sort(
+        (a, b) => ((a.data().createdAt?.seconds ?? 0) - (b.data().createdAt?.seconds ?? 0)),
+      );
+      setCustomAssemblies(
+        sorted.map((d, i) => ({
+          id: d.id,
+          displayId: `sw${i + 1}`,
+          name: d.data().name as string,
+          uValue: (d.data().uValue as number) * SI_TO_IP,
+          wallCategory: d.data().wallCategory as string,
+        })),
+      );
+    }, () => { /* ignore permission errors silently */ });
+    return unsub;
+  }, [userId]);
+
+  const customWallTypes = useMemo(
+    () => customAssemblies.filter(a => a.wallCategory === 'above_ground' || a.wallCategory === 'below_ground'),
+    [customAssemblies],
+  );
+  const customRoofTypes = useMemo(
+    () => customAssemblies
+      .filter(a => a.wallCategory === 'roof')
+      .map((a, i) => ({ ...a, displayId: `sr${i + 1}` })),
+    [customAssemblies],
+  );
+  const customFloorTypes = useMemo(
+    () => customAssemblies
+      .filter(a => a.wallCategory === 'floor')
+      .map((a, i) => ({ ...a, displayId: `sf${i + 1}` })),
+    [customAssemblies],
+  );
 
   // Build design conditions from project if not passed explicitly
   const dc: DesignConditions = designConditions ?? {
@@ -2349,12 +2529,19 @@ export default function RoomTable({
     winterOutdoorHumidity: project?.winterDesignHumidity ?? project?.data?.winterDesignHumidity ?? 30,
   };
 
-  const sortedRooms = useMemo(
-    () => [...(rooms || [])].sort((a, b) =>
-      String(a?.name || '').localeCompare(String(b?.name || ''), undefined, { numeric: true, sensitivity: 'base' })
-    ),
-    [rooms]
-  );
+  const sortedRooms = useMemo(() => {
+    const seen = new Set<string>();
+    return [...(rooms || [])]
+      .filter(room => {
+        if (!room?.id) return true;
+        if (seen.has(room.id)) return false;
+        seen.add(room.id);
+        return true;
+      })
+      .sort((a, b) =>
+        String(a?.name || '').localeCompare(String(b?.name || ''), undefined, { numeric: true, sensitivity: 'base' })
+      );
+  }, [rooms]);
 
   const liveRoomMap = useMemo(
     () => new Map((liveRooms || rooms || []).map((room) => [room?.id, room])),
@@ -2449,6 +2636,9 @@ export default function RoomTable({
                 saveEnvelopeChanges={saveEnvelopeChanges}
                 onRoomDraftChange={onRoomDraftChange}
                 onEnvelopeDraftChange={onEnvelopeDraftChange}
+                customWallTypes={customWallTypes}
+                customRoofTypes={customRoofTypes}
+                customFloorTypes={customFloorTypes}
                 onDirtyChange={(roomId, isDirty) => {
                   setDirtyRoomId((prev) => {
                     if (isDirty) return roomId;

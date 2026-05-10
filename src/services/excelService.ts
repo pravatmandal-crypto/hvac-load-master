@@ -1,5 +1,16 @@
-// Utility to safely handle missing/undefined values for Excel export
-const safeValue = (val: any, fallback: string = 'N/A') => (val === undefined || val === null || val === '' ? fallback : val);
+// ============================================================================
+// excelService.ts — HVAC Load Master
+// Professional multi-sheet Excel workbook for client / consultant submission
+//
+// Sheet order:
+//   1. Cover               — project summary, totals, design conditions
+//   2. Design Conditions   — full seasonal conditions + safety factors
+//   3. Zone Summary        — zone-level aggregated loads + equipment fit
+//   4. Equipment Schedule  — all installed equipment (ODU / IDU / Chiller)
+//   5. Load Summary        — room-by-room summary table
+//   6+. Room sheets        — individual room heat load calculations
+// ============================================================================
+
 import * as XLSX from 'xlsx';
 import {
   calculateCoilParameters,
@@ -16,1131 +27,1424 @@ import {
   type EnvelopeElement,
 } from '../lib/hvac';
 
-type SeasonKey = 'summer' | 'monsoon';
+// ─── Types ────────────────────────────────────────────────────────────────────
 
 type SeasonResult = {
-  area: number;
-  volume: number;
-  ventCfm: number;
-  ventSensible: number;
-  ventLatent: number;
-  internalSensible: number;
-  internalLatent: number;
-  envelopeSensible: number;
-  envelopeLatent: number;
-  ductGain: number;
-  fanGain: number;
-  ersh: number;
-  erlh: number;
-  coilSensible: number;
-  coilLatent: number;
-  grandTotal: number;
-  totalTR: number;
-  totalSupplyCFM: number;
-  designSupplyCFM: number;
+  area: number; volume: number;
+  ventCfm: number; ventSensible: number; ventLatent: number;
+  internalSensible: number; internalLatent: number;
+  envelopeSensible: number; envelopeLatent: number;
+  ductGain: number; fanGain: number;
+  ersh: number; erlh: number;
+  coilSensible: number; coilLatent: number;
+  grandTotal: number; totalTR: number;
+  totalSupplyCFM: number; designSupplyCFM: number;
   heatingLoad: number;
 };
 
+type WinterResult = { total: number; envelope: number; internal: number; vent: number };
+
 type RoomRecord = {
   room: any;
-  zoneId: string;
-  zoneName: string;
-  systemName: string;
+  zoneId: string; zoneName: string; systemName: string;
   sheetName: string;
   elements: EnvelopeElement[];
   zoneOrSystem: any;
   summer: SeasonResult;
   monsoon?: SeasonResult;
-  winterHeatingLoad: number;
-  winterEnvelopeSensible?: number;
-  winterInternalSensible?: number;
-  winterVentSensible?: number;
+  winter: WinterResult;
+  governingTR: number;
 };
 
 type RoomSheetRefs = {
   sheetName: string;
-  zoneName: string;
-  systemName: string;
-  roomName: string;
-  floorName: string;
-  areaCell: string;
-  heightCell: string;
-  falseCeilingCell: string;
-  freshAirCell: string;
-  occupancyCell: string;
-  electricalCell: string;
-  summerTrCell: string;
-  summerCfmCell: string;
-  monsoonTrCell?: string;
-  monsoonCfmCell?: string;
-  winterLoadCell: string;
-  governingTrCell: string;
+  zoneName: string; systemName: string;
+  roomName: string; floorName: string;
+  areaCell: string; heightCell: string; falseCeilingCell: string;
+  freshAirCell: string; occupancyCell: string;
+  lightingCell: string; equipKwCell: string;
+  summerTrCell: string; summerCfmCell: string;
+  monsoonTrCell?: string; monsoonCfmCell?: string;
+  winterLoadCell: string; governingTrCell: string;
   iduConfigCell: string;
 };
 
-const BF = 0.15;
-const ORIENTATIONS: Array<'N' | 'NE' | 'E' | 'SE' | 'S' | 'SW' | 'W' | 'NW'> = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'];
+// ─── Constants ────────────────────────────────────────────────────────────────
 
-const asNumber = (value: any, fallback: number) => {
-  const parsed = Number(value);
-  return Number.isFinite(parsed) ? parsed : fallback;
+const BF = 0.15;
+const ORIENTATIONS = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'] as const;
+
+// ─── Color palette ────────────────────────────────────────────────────────────
+
+const CLR = {
+  navyBg: '1F4E79',   navyFg: 'FFFFFF',
+  blueBg: '2E75B6',   blueFg: 'FFFFFF',
+  tealBg: '17596B',   tealFg: 'FFFFFF',
+  greenBg: '375623',  greenFg: 'FFFFFF',
+  purpleBg: '7030A0', purpleFg: 'FFFFFF',
+  amberBg: 'C55A11',  amberFg: 'FFFFFF',
+  headerBg: 'BDD7EE',
+  sectionBg: 'DEEAF1',
+  inputBg: 'FFF2CC',
+  totalBg: 'D9E1F2',
+  okBg: 'E2EFDA',    okFg: '375623',
+  warnBg: 'FCE4D6',  warnFg: 'C00000',
+  overBg: 'FFEB9C',  overFg: '7F6000',
+  border: 'B8CCE4',
 };
 
-const sanitizeSheetName = (name: string) =>
-  name
-    .replace(/[\\/?*\[\]:]/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
+// ─── Number / string helpers ──────────────────────────────────────────────────
 
-const makeUniqueSheetName = (preferred: string, used: Set<string>) => {
-  const base = sanitizeSheetName(preferred) || 'Room';
-  let candidate = base.slice(0, 31);
-  let counter = 1;
+const asNum = (v: any, fb = 0): number => { const n = Number(v); return isFinite(n) ? n : fb; };
+const r2 = (v: number) => Math.round(v * 100) / 100;
+const r0 = (v: number) => Math.round(v);
+const safeStr = (v: any, fb = ''): string => (v == null || v === '' ? fb : String(v));
+const fmtDate = (d = new Date()) =>
+  `${String(d.getDate()).padStart(2, '0')}-${String(d.getMonth() + 1).padStart(2, '0')}-${d.getFullYear()}`;
+const fmtDateFile = (d = new Date()) =>
+  `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+const toGR = (hr: number) => hr * 7000;
 
-  while (used.has(candidate)) {
-    const suffix = `_${counter}`;
-    const limit = Math.max(1, 31 - suffix.length);
-    candidate = `${base.slice(0, limit)}${suffix}`;
-    counter += 1;
+// ─── Cell / sheet helpers ─────────────────────────────────────────────────────
+
+// 1-based row & col → "A1" address
+const rc = (row: number, col: number) => XLSX.utils.encode_cell({ r: row - 1, c: col - 1 });
+
+function putV(ws: XLSX.WorkSheet, row: number, col: number, val: any, sty?: any): void {
+  const addr = rc(row, col);
+  const t = typeof val === 'number' ? 'n' : 's';
+  ws[addr] = { t: (val == null || val === '') ? 's' : t, v: val ?? '', ...(sty ? { s: sty } : {}) };
+}
+
+function putF(ws: XLSX.WorkSheet, row: number, col: number, formula: string, t: 'n' | 's' = 'n', sty?: any): void {
+  ws[rc(row, col)] = { t, f: formula, ...(sty ? { s: sty } : {}) };
+}
+
+function addMerge(ws: XLSX.WorkSheet, r1: number, c1: number, r2: number, c2: number): void {
+  if (!ws['!merges']) ws['!merges'] = [];
+  ws['!merges'].push({ s: { r: r1 - 1, c: c1 - 1 }, e: { r: r2 - 1, c: c2 - 1 } });
+}
+
+function addBorders(ws: XLSX.WorkSheet, r1: number, c1: number, r2: number, c2: number): void {
+  const thin = { style: 'thin', color: { rgb: CLR.border } };
+  const b = { top: thin, bottom: thin, left: thin, right: thin };
+  for (let r = r1; r <= r2; r++) {
+    for (let c = c1; c <= c2; c++) {
+      const addr = rc(r, c);
+      if (!ws[addr]) ws[addr] = { t: 's', v: '' };
+      ws[addr].s = { ...(ws[addr].s || {}), border: b };
+    }
+  }
+}
+
+function shRef(sheetName: string, cell: string): string {
+  return `'${sheetName.replace(/'/g, "''")}'!${cell}`;
+}
+
+function setRef(ws: XLSX.WorkSheet, maxRow: number, maxCol: number): void {
+  ws['!ref'] = XLSX.utils.encode_range({ s: { r: 0, c: 0 }, e: { r: maxRow - 1, c: maxCol - 1 } });
+}
+
+// ─── Style factory ────────────────────────────────────────────────────────────
+
+function mkS(fontOpts: any, fillRgb?: string, align?: any): any {
+  const s: any = { font: { name: 'Arial', sz: 10, ...fontOpts }, alignment: align ?? {} };
+  if (fillRgb) s.fill = { fgColor: { rgb: fillRgb } };
+  return s;
+}
+
+const S = {
+  titleLg:  mkS({ sz: 16, bold: true,  color: { rgb: CLR.navyFg  } }, CLR.navyBg,   { horizontal: 'center', vertical: 'center', wrapText: true }),
+  titleSm:  mkS({ sz: 11, bold: true,  color: { rgb: CLR.navyFg  } }, CLR.navyBg,   { horizontal: 'center', vertical: 'center' }),
+  coverSub: mkS({ sz: 11, bold: false, color: { rgb: CLR.navyFg  } }, CLR.navyBg,   { horizontal: 'center' }),
+  secHdr:   mkS({ sz: 10, bold: true,  color: { rgb: CLR.blueFg  } }, CLR.blueBg,   { wrapText: true }),
+  tealHdr:  mkS({ sz: 10, bold: true,  color: { rgb: CLR.tealFg  } }, CLR.tealBg,   { wrapText: true }),
+  greenHdr: mkS({ sz: 10, bold: true,  color: { rgb: CLR.greenFg } }, CLR.greenBg,  { wrapText: true }),
+  purpleHdr:mkS({ sz: 10, bold: true,  color: { rgb: CLR.purpleFg} }, CLR.purpleBg, { wrapText: true }),
+  amberHdr: mkS({ sz: 10, bold: true,  color: { rgb: CLR.amberFg } }, CLR.amberBg,  { wrapText: true }),
+  tableHdr: mkS({ sz: 9,  bold: true  }, CLR.headerBg, { horizontal: 'center', wrapText: true }),
+  label:    mkS({ sz: 9,  bold: true  }),
+  labelC:   mkS({ sz: 9,  bold: true  }, undefined, { horizontal: 'center' }),
+  input:    mkS({ sz: 9,  color: { rgb: '1F4E79' } }, CLR.inputBg),
+  calc:     mkS({ sz: 9  }),
+  calcC:    mkS({ sz: 9  }, undefined, { horizontal: 'center' }),
+  calcR:    mkS({ sz: 9  }, undefined, { horizontal: 'right'  }),
+  total:    mkS({ sz: 9,  bold: true  }, CLR.totalBg),
+  totalC:   mkS({ sz: 9,  bold: true  }, CLR.totalBg, { horizontal: 'center' }),
+  sub:      mkS({ sz: 9              }, CLR.sectionBg),
+  ok:       mkS({ sz: 9,  bold: true,  color: { rgb: CLR.okFg   } }, CLR.okBg,   { horizontal: 'center' }),
+  warn:     mkS({ sz: 9,  bold: true,  color: { rgb: CLR.warnFg } }, CLR.warnBg, { horizontal: 'center' }),
+  over:     mkS({ sz: 9,  bold: true,  color: { rgb: CLR.overFg } }, CLR.overBg, { horizontal: 'center' }),
+  note:     mkS({ sz: 8,  italic: true, color: { rgb: '666666'  } }, undefined, { wrapText: true }),
+};
+
+// ─── Equipment helpers ────────────────────────────────────────────────────────
+
+function normalizeIDUList(val: any): any[] {
+  if (!val) return [];
+  return Array.isArray(val) ? val : [val];
+}
+
+function getRoomEquipment(roomId: string, equipSystems: any[]): Array<{ role: string; brand: string; model: string; tr: number; cfm: number; qty: number; note: string }> {
+  const result: any[] = [];
+  for (const sys of equipSystems || []) {
+    for (const u of normalizeIDUList((sys.iduSelections as any)?.[roomId])) {
+      result.push({ role: 'IDU', brand: safeStr(u.brand), model: safeStr(u.modelId), tr: asNum(u.trCapacity), cfm: asNum(u.cfmRated), qty: asNum(u.quantity, 1), note: '' });
+    }
+    for (const u of (sys.roomSelections?.[roomId] ?? [])) {
+      result.push({ role: 'IDU', brand: safeStr(u.brand), model: safeStr(u.modelId), tr: asNum(u.trCapacity), cfm: asNum(u.cfmRated), qty: asNum(u.quantity, 1), note: '' });
+    }
+    for (const z of (sys.zones ?? [])) {
+      if (!(z.roomIds ?? []).includes(roomId)) continue;
+      const n = (z.roomIds ?? []).length;
+      const note = n > 1 ? `Zone unit — shared (${n} rooms)` : 'Zone unit';
+      const units = (z.unitSelections ?? []).length ? z.unitSelections : z.selection ? [z.selection] : [];
+      for (const u of units) {
+        result.push({ role: 'IDU/AHU', brand: safeStr(u.brand), model: safeStr(u.modelId), tr: asNum(u.trCapacity), cfm: asNum(u.cfmRated), qty: asNum(u.quantity, 1), note });
+      }
+    }
+  }
+  return result;
+}
+
+type EqLine = { system: string; zone: string; room: string; role: string; brand: string; model: string; tr: number; cfm: number; qty: number; totalTR: number; totalCFM: number; notes: string };
+
+function buildEquipmentLines(equipSystems: any[], allRooms: Record<string, any[]>): EqLine[] {
+  const lines: EqLine[] = [];
+  const roomById: Record<string, any> = {};
+  for (const rList of Object.values(allRooms || {})) {
+    for (const r of rList) { if (r?.id) roomById[r.id] = r; }
   }
 
-  used.add(candidate);
-  return candidate;
-};
+  for (const sys of equipSystems || []) {
+    const sysName = safeStr(sys.name, 'System');
+    const sysType = safeStr(sys.type);
 
-const sheetRef = (sheetName: string, cell: string) => `'${sheetName.replace(/'/g, "''")}'!${cell}`;
+    // ODU (VRF)
+    if (sys.oduSelection) {
+      const o = sys.oduSelection;
+      const qty = asNum(o.modules, 1);
+      const tr  = asNum(o.effectiveTR || o.trCapacity);
+      lines.push({ system: sysName, zone: '—', room: '—', role: 'ODU', brand: safeStr(o.brand), model: safeStr(o.modelId), tr: asNum(o.trCapacity), cfm: 0, qty, totalTR: tr * qty, totalCFM: 0, notes: safeStr(o.dischargeType) + (o.compressorType ? ` / ${o.compressorType}` : '') });
+    }
+    // ODU combination (VRF multi-ODU)
+    for (const o of (sys.oduSelection?.combination ?? [])) {
+      lines.push({ system: sysName, zone: '—', room: '—', role: 'ODU', brand: safeStr(o.brand), model: safeStr(o.modelId), tr: asNum(o.trCapacity), cfm: 0, qty: asNum(o.quantity, 1), totalTR: asNum(o.trCapacity) * asNum(o.quantity, 1), totalCFM: 0, notes: '' });
+    }
 
-const formatDate = (date = new Date()) => {
-  const y = date.getFullYear();
-  const m = String(date.getMonth() + 1).padStart(2, '0');
-  const d = String(date.getDate()).padStart(2, '0');
-  return `${d}-${m}-${y}`;
-};
+    // Chiller units
+    for (const o of (sys.chillerUnits ?? [])) {
+      lines.push({ system: sysName, zone: 'Plant', room: '—', role: 'Chiller', brand: safeStr(o.brand), model: safeStr(o.modelId), tr: asNum(o.trCapacity), cfm: 0, qty: asNum(o.quantity, 1), totalTR: asNum(o.trCapacity) * asNum(o.quantity, 1), totalCFM: 0, notes: '' });
+    }
 
-const formatDateForFileName = (date = new Date()) => {
-  const y = date.getFullYear();
-  const m = String(date.getMonth() + 1).padStart(2, '0');
-  const d = String(date.getDate()).padStart(2, '0');
-  return `${y}-${m}-${d}`;
-};
+    // Cooling tower
+    if (sys.ctSelection) {
+      const o = sys.ctSelection;
+      lines.push({ system: sysName, zone: 'Plant', room: '—', role: 'Cooling Tower', brand: safeStr(o.brand), model: safeStr(o.modelId), tr: asNum(o.trCapacity), cfm: asNum(o.cfmRated), qty: asNum(o.quantity, 1), totalTR: asNum(o.trCapacity) * asNum(o.quantity, 1), totalCFM: asNum(o.cfmRated) * asNum(o.quantity, 1), notes: '' });
+    }
 
-const toGrainsPerLb = (humidityRatioLbPerLb: number) => humidityRatioLbPerLb * 7000;
+    // AHU DX condensing units
+    const ahuUnits = (sys as any).ahuUnits?.length ? (sys as any).ahuUnits : sys.unitSelection && sysType === 'AHU' ? [sys.unitSelection] : [];
+    for (const o of ahuUnits) {
+      lines.push({ system: sysName, zone: 'Plant', room: '—', role: 'AHU Condensing Unit', brand: safeStr(o.brand), model: safeStr(o.modelId), tr: asNum(o.trCapacity), cfm: asNum(o.cfmRated), qty: asNum(o.quantity, 1), totalTR: asNum(o.trCapacity) * asNum(o.quantity, 1), totalCFM: asNum(o.cfmRated) * asNum(o.quantity, 1), notes: '' });
+    }
 
-const getProjectPsychro = (project: any, season: SeasonKey) => {
-  const isMonsoon = season === 'monsoon';
-  const outdoorTemp = asNumber(isMonsoon ? project?.monsoonDesignTemp : project?.summerDesignTemp, 95);
-  const outdoorHumidity = asNumber(isMonsoon ? project?.monsoonDesignHumidity : project?.summerDesignHumidity, isMonsoon ? 85 : 50);
-  const indoorTemp = asNumber(isMonsoon ? project?.insideMonsoonTemp : project?.insideSummerTemp, isMonsoon ? 75 : 75);
-  const indoorHumidity = asNumber(isMonsoon ? project?.insideMonsoonHumidity : project?.insideSummerHumidity, isMonsoon ? 55 : 50);
+    // Package / DuctableSplit single unit (if not already captured via zones)
+    if (!ahuUnits.length && sys.unitSelection && sysType !== 'AHU') {
+      const o = sys.unitSelection;
+      lines.push({ system: sysName, zone: '—', room: '—', role: `${sysType} Unit`, brand: safeStr(o.brand), model: safeStr(o.modelId), tr: asNum(o.trCapacity), cfm: asNum(o.cfmRated), qty: asNum(o.quantity, 1), totalTR: asNum(o.trCapacity) * asNum(o.quantity, 1), totalCFM: asNum(o.cfmRated) * asNum(o.quantity, 1), notes: '' });
+    }
 
-  const outdoor = calculatePsychrometrics(outdoorTemp, outdoorHumidity, asNumber(project?.altitude, 0));
-  const indoor = calculatePsychrometrics(indoorTemp, indoorHumidity, asNumber(project?.altitude, 0));
+    // Zone-level IDU / AHU (Chiller, Package, DuctableSplit)
+    for (const z of (sys.zones ?? [])) {
+      const zoneName = safeStr(z.name, 'Zone');
+      const units = (z.unitSelections ?? []).length ? z.unitSelections : z.selection ? [z.selection] : [];
+      for (const u of units) {
+        const qty = asNum(u.quantity, 1);
+        lines.push({ system: sysName, zone: zoneName, room: '—', role: 'IDU/AHU', brand: safeStr(u.brand), model: safeStr(u.modelId), tr: asNum(u.trCapacity), cfm: asNum(u.cfmRated), qty, totalTR: asNum(u.trCapacity) * qty, totalCFM: asNum(u.cfmRated) * qty, notes: '' });
+      }
+    }
 
+    // VRF IDU per room
+    for (const [roomId, val] of Object.entries(sys.iduSelections ?? {})) {
+      for (const u of normalizeIDUList(val)) {
+        const rName = safeStr(roomById[roomId]?.name, roomId);
+        const qty = asNum((u as any).quantity, 1);
+        lines.push({ system: sysName, zone: '—', room: rName, role: 'VRF IDU', brand: safeStr((u as any).brand), model: safeStr((u as any).modelId), tr: asNum((u as any).trCapacity), cfm: asNum((u as any).cfmRated), qty, totalTR: asNum((u as any).trCapacity) * qty, totalCFM: asNum((u as any).cfmRated) * qty, notes: safeStr((u as any).subType) });
+      }
+    }
+
+    // Split per room
+    for (const [roomId, units] of Object.entries(sys.roomSelections ?? {})) {
+      for (const u of (units as any[])) {
+        const rName = safeStr(roomById[roomId]?.name, roomId);
+        const qty = asNum((u as any).quantity, 1);
+        lines.push({ system: sysName, zone: '—', room: rName, role: 'Split IDU', brand: safeStr((u as any).brand), model: safeStr((u as any).modelId), tr: asNum((u as any).trCapacity), cfm: asNum((u as any).cfmRated), qty, totalTR: asNum((u as any).trCapacity) * qty, totalCFM: asNum((u as any).cfmRated) * qty, notes: '' });
+      }
+    }
+  }
+  return lines;
+}
+
+// ─── Psychrometrics helpers ───────────────────────────────────────────────────
+
+function getProjectPsychro(project: any, season: 'summer' | 'monsoon') {
+  const m = season === 'monsoon';
+  const odb = asNum(m ? project?.monsoonDesignTemp   : project?.summerDesignTemp,   m ? 95 : 95);
+  const orh = asNum(m ? project?.monsoonDesignHumidity : project?.summerDesignHumidity, m ? 85 : 50);
+  const idb = asNum(m ? project?.insideMonsoonTemp   : project?.insideSummerTemp,   75);
+  const irh = asNum(m ? project?.insideMonsoonHumidity : project?.insideSummerHumidity, m ? 55 : 50);
+  const alt = asNum(project?.altitude, 0);
+  const owb = asNum(m ? project?.outsideMonsoonWB    : project?.outsideSummerWB,    0);
+  const iwb = asNum(m ? project?.insideMonsoonWB     : project?.insideSummerWB,     0);
+  const out = calculatePsychrometrics(odb, orh, alt);
+  const inn = calculatePsychrometrics(idb, irh, alt);
   return {
-    outside: {
-      db: outdoorTemp,
-      rh: outdoorHumidity,
-      wb: asNumber(isMonsoon ? project?.outsideMonsoonWB : project?.outsideSummerWB, 0),
-      th: asNumber(isMonsoon ? project?.monsoonEnthalpy : project?.summerEnthalpy, outdoor.enthalpy),
-      grlb: toGrainsPerLb(asNumber(isMonsoon ? project?.monsoonHumidityRatio : project?.summerHumidityRatio, outdoor.humidityRatio)),
-    },
-    inside: {
-      db: indoorTemp,
-      rh: indoorHumidity,
-      wb: asNumber(isMonsoon ? project?.insideMonsoonWB : project?.insideSummerWB, 0),
-      th: asNumber(isMonsoon ? project?.insideMonsoonEnthalpy : project?.insideSummerEnthalpy, indoor.enthalpy),
-      grlb: toGrainsPerLb(asNumber(isMonsoon ? project?.insideMonsoonHumidityRatio : project?.insideSummerHumidityRatio, indoor.humidityRatio)),
-    },
+    outside: { db: odb, rh: orh, wb: owb, th: r2(out.enthalpy), gr: r2(toGR(out.humidityRatio)) },
+    inside:  { db: idb, rh: irh, wb: iwb, th: r2(inn.enthalpy), gr: r2(toGR(inn.humidityRatio)) },
   };
-};
+}
 
-type PsychroValue = {
-  db: number;
-  rh: number;
-  wb: number;
-  th: number;
-  grlb: number;
-};
-
-type PsychroDiff = {
-  db: number;
-  th: number;
-  grlb: number;
-};
-
-type PsychroDisplay = {
-  summer: {
-    outside: PsychroValue;
-    inside: PsychroValue;
-    diff: PsychroDiff;
-  };
-  monsoon: {
-    outside: PsychroValue;
-    inside: PsychroValue;
-    diff: PsychroDiff;
-  };
-};
-
-const getDisplayPsychro = (project: any): PsychroDisplay => {
-  const summer = getProjectPsychro(project, 'summer');
-  const monsoon = getProjectPsychro(project, 'monsoon');
-
+function getDesignConditions(project: any, zos: any, season: 'summer' | 'monsoon'): DesignConditions {
+  const m = season === 'monsoon';
   return {
-    summer: {
-      ...summer,
-      diff: {
-        db: summer.outside.db - summer.inside.db,
-        th: summer.outside.th - summer.inside.th,
-        grlb: summer.outside.grlb - summer.inside.grlb,
-      },
-    },
-    monsoon: {
-      ...monsoon,
-      diff: {
-        db: monsoon.outside.db - monsoon.inside.db,
-        th: monsoon.outside.th - monsoon.inside.th,
-        grlb: monsoon.outside.grlb - monsoon.inside.grlb,
-      },
-    },
+    outdoorTemp:      asNum(zos?.outdoorTemp,      asNum(m ? project?.monsoonDesignTemp     : project?.summerDesignTemp,     95)),
+    indoorTemp:       asNum(zos?.indoorTemp,       asNum(m ? project?.insideMonsoonTemp     : project?.insideSummerTemp,     75)),
+    outdoorHumidity:  asNum(zos?.outdoorHumidity,  asNum(m ? project?.monsoonDesignHumidity : project?.summerDesignHumidity, m ? 85 : 50)),
+    indoorHumidity:   asNum(zos?.indoorHumidity,   asNum(m ? project?.insideMonsoonHumidity : project?.insideSummerHumidity, m ? 55 : 50)),
+    winterOutdoorTemp:     asNum(project?.winterDesignTemp,    50),
+    winterOutdoorHumidity: asNum(project?.winterDesignHumidity, 80),
+    winterIndoorTemp:      asNum(zos?.winterIndoorTemp  ?? project?.insideWinterTemp,  72),
+    winterIndoorHumidity:  asNum(zos?.winterIndoorHumidity ?? project?.insideWinterHumidity, 40),
+    altitude: asNum(project?.altitude, 0),
   };
-};
+}
 
-const getDesignConditions = (project: any, zoneOrSystem: any, season: SeasonKey): DesignConditions => {
-  const isMonsoon = season === 'monsoon';
-
-  return {
-    outdoorTemp: asNumber(zoneOrSystem?.outdoorTemp, isMonsoon ? project?.monsoonDesignTemp : project?.summerDesignTemp),
-    indoorTemp: asNumber(zoneOrSystem?.indoorTemp, isMonsoon ? project?.insideMonsoonTemp : project?.insideSummerTemp),
-    outdoorHumidity: asNumber(zoneOrSystem?.outdoorHumidity, isMonsoon ? project?.monsoonDesignHumidity : project?.summerDesignHumidity),
-    indoorHumidity: asNumber(zoneOrSystem?.indoorHumidity, isMonsoon ? project?.insideMonsoonHumidity : project?.insideSummerHumidity),
-    winterOutdoorTemp: asNumber(project?.winterDesignTemp, 50),
-    winterOutdoorHumidity: asNumber(project?.winterDesignHumidity, 80),
-    winterIndoorTemp: asNumber(project?.insideWinterTemp, 72),
-    winterIndoorHumidity: asNumber(project?.insideWinterHumidity, 40),
-    altitude: asNumber(project?.altitude, 0),
-  };
-};
-
-const calculateSeasonResult = (
-  project: any,
-  zoneOrSystem: any,
-  room: any,
-  elements: EnvelopeElement[],
-  season: SeasonKey,
-): SeasonResult => {
-  const area = calculateRoomArea(room);
-  const volume = calculateRoomVolume(room);
-  const designConditions = getDesignConditions(project, zoneOrSystem, season);
-
-  const roomDetails = {
-    id: room.id,
-    name: room.name ?? '',
-    floor: room.floor ?? 'Ground',
-    length: asNumber(room.length, 0),
-    width: asNumber(room.width, 0),
-    height: asNumber(room.height, 0),
-    hasFalseCeiling: room.hasFalseCeiling ?? false,
-    falseCeilingHeight: asNumber(room.falseCeilingHeight, 0),
-    facph: asNumber(room.facph, 0),
-    peopleCount: asNumber(room.peopleCount, 0),
+function calcSeason(project: any, zos: any, room: any, elements: EnvelopeElement[], season: 'summer' | 'monsoon'): SeasonResult {
+  const dc = getDesignConditions(project, zos, season);
+  const rd = {
+    id: room.id, name: room.name ?? '', floor: room.floor ?? 'Ground',
+    length: asNum(room.length), width: asNum(room.width), height: asNum(room.height),
+    hasFalseCeiling: room.hasFalseCeiling ?? false, falseCeilingHeight: asNum(room.falseCeilingHeight),
+    facph: asNum(room.facph), peopleCount: asNum(room.peopleCount),
     activityType: room.activityType ?? 'office',
-    lightsWattsPerSqft: asNumber(room.lightsWattsPerSqft, 0),
-    equipmentKW: asNumber(room.equipmentKW, 0),
-    othersKW: asNumber(room.othersKW, 0),
+    lightsWattsPerSqft: asNum(room.lightsWattsPerSqft),
+    equipmentKW: asNum(room.equipmentKW), othersKW: asNum(room.othersKW),
   };
+  const area   = calculateRoomArea(room);
+  const volume = calculateRoomVolume(room);
+  const vent   = calculateVentilationLoad(rd, dc);
+  const int    = calculateInternalGains(rd);
+  const env    = calculateEnvelopeGain(elements, dc);
 
-  const vent = calculateVentilationLoad(roomDetails, designConditions);
-  const internal = calculateInternalGains(roomDetails);
-  const envelope = calculateEnvelopeGain(elements, designConditions);
+  const dPct = asNum(room.ductGainPct, 2);
+  const fPct = asNum(room.fanGainPct,  3);
+  const sPct = asNum(room.sensibleSafetyPercent ?? room.sensibleSafetyFactor, 10);
+  const lPct = asNum(room.latentSafetyPercent   ?? room.latentSafetyFactor,  5);
+  const oPct = asNum(room.overallSafetyPercent  ?? room.grandTotalSafetyFactor, 3);
 
-  const ductGainPct = asNumber(room.ductGainPct, 2);
-  const fanGainPct = asNumber(room.fanGainPct, 3);
-  const sensibleSafetyPct = asNumber(room.sensibleSafetyPercent ?? room.sensibleSafetyFactor, 10);
-  const latentSafetyPct = asNumber(room.latentSafetyPercent ?? room.latentSafetyFactor, 5);
-  const overallSafetyPct = asNumber(room.overallSafetyPercent ?? room.grandTotalSafetyFactor, 3);
-
-  const erSensibleBase = envelope.sensible + internal.sensible + vent.sensible * BF;
-  const erLatentBase = internal.latent + envelope.latent + vent.latent * BF;
-  const parasitic = calculateParasiticGains(erSensibleBase, erSensibleBase, ductGainPct, fanGainPct);
-
-  const ersh = (erSensibleBase + parasitic.ductGain + parasitic.fanGain) * (1 + sensibleSafetyPct / 100);
-  const erlh = erLatentBase * (1 + latentSafetyPct / 100);
-  const oaSensible = vent.sensible * (1 - BF);
-  const oaLatent = vent.latent * (1 - BF);
-  const coilSensible = ersh + oaSensible;
-  const coilLatent = erlh + oaLatent;
-  const grandTotal = (coilSensible + coilLatent) * (1 + overallSafetyPct / 100);
+  const erBase = env.sensible + int.sensible + vent.sensible * BF;
+  const para   = calculateParasiticGains(erBase, erBase, dPct, fPct);
+  const ersh   = (erBase + para.ductGain + para.fanGain) * (1 + sPct / 100);
+  const erlh   = (int.latent + env.latent + vent.latent * BF) * (1 + lPct / 100);
+  const coilS  = ersh + vent.sensible * (1 - BF);
+  const coilL  = erlh + vent.latent   * (1 - BF);
+  const grand  = (coilS + coilL) * (1 + oPct / 100);
 
   const isChiller = String(project?.systemType || '').toLowerCase().includes('chiller');
-  const coil = calculateCoilParameters(
-    coilSensible,
-    coilLatent,
-    designConditions.indoorTemp,
-    designConditions.indoorHumidity,
-    asNumber(project?.altitude, 0),
-    BF,
-    35,
-    65,
-    isChiller ? 50 : 54,
-  );
-
-  const totalSupplyAch = Math.max(getRecommendedAch(room.activityType ?? room.achProfile), asNumber(room.facph, 0));
-  const totalSupplyCFM = (volume * totalSupplyAch) / 60;
-  const designSupplyCFM = Math.max(coil.dehumidifiedCFM, totalSupplyCFM);
-  const heating = calculateHeatingLoad(roomDetails, elements, designConditions);
+  const coil = calculateCoilParameters(coilS, coilL, dc.indoorTemp, dc.indoorHumidity, asNum(project?.altitude), BF, 35, 65, isChiller ? 50 : 54);
+  const ach  = Math.max(getRecommendedAch(room.activityType ?? room.achProfile), asNum(room.facph));
+  const totCFM = (volume * ach) / 60;
+  const desCFM = Math.max(coil.dehumidifiedCFM, totCFM);
+  const heating = calculateHeatingLoad(rd, elements, dc);
 
   return {
-    area,
-    volume,
-    ventCfm: vent.cfm,
-    ventSensible: vent.sensible,
-    ventLatent: vent.latent,
-    internalSensible: internal.sensible,
-    internalLatent: internal.latent,
-    envelopeSensible: envelope.sensible,
-    envelopeLatent: envelope.latent,
-    ductGain: parasitic.ductGain,
-    fanGain: parasitic.fanGain,
-    ersh,
-    erlh,
-    coilSensible,
-    coilLatent,
-    grandTotal,
-    totalTR: grandTotal / 12000,
-    totalSupplyCFM,
-    designSupplyCFM,
+    area, volume, ventCfm: vent.cfm, ventSensible: vent.sensible, ventLatent: vent.latent,
+    internalSensible: int.sensible, internalLatent: int.latent,
+    envelopeSensible: env.sensible, envelopeLatent: env.latent,
+    ductGain: para.ductGain, fanGain: para.fanGain,
+    ersh, erlh, coilSensible: coilS, coilLatent: coilL,
+    grandTotal: grand, totalTR: grand / 12000,
+    totalSupplyCFM: totCFM, designSupplyCFM: desCFM,
     heatingLoad: heating.totalHeatingLoad,
   };
-};
+}
 
-const calculateWinterHeating = (
-  project: any,
-  zoneOrSystem: any,
-  room: any,
-  elements: EnvelopeElement[],
-) => {
-  const designConditions: DesignConditions = {
-    outdoorTemp: asNumber(project?.winterDesignTemp, 50),
-    indoorTemp: asNumber(zoneOrSystem?.winterIndoorTemp ?? project?.insideWinterTemp, 72),
-    outdoorHumidity: asNumber(project?.winterDesignHumidity, 80),
-    indoorHumidity: asNumber(zoneOrSystem?.winterIndoorHumidity ?? project?.insideWinterHumidity, 40),
-    winterOutdoorTemp: asNumber(project?.winterDesignTemp, 50),
-    winterOutdoorHumidity: asNumber(project?.winterDesignHumidity, 80),
-    winterIndoorTemp: asNumber(zoneOrSystem?.winterIndoorTemp ?? project?.insideWinterTemp, 72),
-    winterIndoorHumidity: asNumber(zoneOrSystem?.winterIndoorHumidity ?? project?.insideWinterHumidity, 40),
-    altitude: asNumber(project?.altitude, 0),
+function calcWinter(project: any, zos: any, room: any, elements: EnvelopeElement[]): WinterResult {
+  const dc: DesignConditions = {
+    outdoorTemp:      asNum(project?.winterDesignTemp, 50),
+    indoorTemp:       asNum(zos?.winterIndoorTemp  ?? project?.insideWinterTemp,  72),
+    outdoorHumidity:  asNum(project?.winterDesignHumidity, 80),
+    indoorHumidity:   asNum(zos?.winterIndoorHumidity ?? project?.insideWinterHumidity, 40),
+    winterOutdoorTemp:     asNum(project?.winterDesignTemp, 50),
+    winterOutdoorHumidity: asNum(project?.winterDesignHumidity, 80),
+    winterIndoorTemp:      asNum(zos?.winterIndoorTemp  ?? project?.insideWinterTemp,  72),
+    winterIndoorHumidity:  asNum(zos?.winterIndoorHumidity ?? project?.insideWinterHumidity, 40),
+    altitude: asNum(project?.altitude, 0),
   };
-
-  const roomDetails = {
-    id: room.id,
-    name: room.name ?? '',
-    floor: room.floor ?? 'Ground',
-    length: asNumber(room.length, 0),
-    width: asNumber(room.width, 0),
-    height: asNumber(room.height, 0),
-    hasFalseCeiling: room.hasFalseCeiling ?? false,
-    falseCeilingHeight: asNumber(room.falseCeilingHeight, 0),
-    facph: asNumber(room.facph, 0),
-    peopleCount: asNumber(room.peopleCount, 0),
+  const rd = {
+    id: room.id, name: room.name ?? '', floor: room.floor ?? 'Ground',
+    length: asNum(room.length), width: asNum(room.width), height: asNum(room.height),
+    hasFalseCeiling: room.hasFalseCeiling ?? false, falseCeilingHeight: asNum(room.falseCeilingHeight),
+    facph: asNum(room.facph), peopleCount: asNum(room.peopleCount),
     activityType: room.activityType ?? 'office',
-    lightsWattsPerSqft: asNumber(room.lightsWattsPerSqft, 0),
-    equipmentKW: asNumber(room.equipmentKW, 0),
-    othersKW: asNumber(room.othersKW, 0),
+    lightsWattsPerSqft: asNum(room.lightsWattsPerSqft),
+    equipmentKW: asNum(room.equipmentKW), othersKW: asNum(room.othersKW),
   };
+  const env  = calculateEnvelopeGain(elements, dc);
+  const int  = calculateInternalGains(rd);
+  const vent = calculateVentilationLoad(rd, dc);
+  const heat = calculateHeatingLoad(rd, elements, dc);
+  return { total: heat.totalHeatingLoad, envelope: env.sensible, internal: int.sensible, vent: vent.sensible };
+}
 
-  return calculateHeatingLoad(roomDetails, elements, designConditions).totalHeatingLoad;
-};
+// ─── Sheet-name deduplication ─────────────────────────────────────────────────
 
-const sumByOrientation = (elements: EnvelopeElement[], type: EnvelopeElement['type']) => {
-  const areas: Record<string, number> = {
-    N: 0,
-    NE: 0,
-    E: 0,
-    SE: 0,
-    S: 0,
-    SW: 0,
-    W: 0,
-    NW: 0,
-  };
+const sanitizeSheetName = (s: string) => s.replace(/[\\/?*\[\]:]/g, ' ').replace(/\s+/g, ' ').trim();
 
-  elements
-    .filter((element) => element.type === type)
-    .forEach((element) => {
-      const orientation = String(element.orientation || '').toUpperCase();
-      if (orientation in areas) {
-        areas[orientation] += asNumber(element.area, 0);
-      }
-    });
-
-  return areas;
-};
-
-const totalAreaByType = (elements: EnvelopeElement[], type: EnvelopeElement['type']) =>
-  elements.filter((element) => element.type === type).reduce((sum, element) => sum + asNumber(element.area, 0), 0);
-
-const setFormulaCell = (ws: XLSX.WorkSheet, address: string, formula: string, type: 'n' | 'str' = 'n') => {
-  const current = ws[address] || { t: type };
-  ws[address] = { ...current, t: type, f: formula } as XLSX.CellObject;
-};
-
-const style = {
-  title: { font: { name: 'Arial', sz: 14, bold: true }, alignment: { horizontal: 'center', vertical: 'center' } },
-  section: { font: { name: 'Arial', sz: 11, bold: true }, fill: { fgColor: { rgb: 'DCE6F1' } } },
-  header: { font: { name: 'Arial', sz: 10, bold: true }, fill: { fgColor: { rgb: 'EDEDED' } }, alignment: { horizontal: 'center', wrapText: true } },
-  label: { font: { name: 'Arial', sz: 10, bold: true } },
-  input: { font: { name: 'Arial', sz: 10, color: { rgb: '1F4E79' } }, fill: { fgColor: { rgb: 'FFF2CC' } } },
-  calc: { font: { name: 'Arial', sz: 10, color: { rgb: '000000' } } },
-  border: {
-    border: {
-      top: { style: 'thin', color: { rgb: '000000' } },
-      bottom: { style: 'thin', color: { rgb: '000000' } },
-      left: { style: 'thin', color: { rgb: '000000' } },
-      right: { style: 'thin', color: { rgb: '000000' } },
-    },
-  },
-};
-
-const setStyle = (ws: XLSX.WorkSheet, address: string, patch: any) => {
-  const cell = ws[address];
-  if (!cell) return;
-  cell.s = { ...(cell.s || {}), ...patch };
-};
-
-const applyBorderRange = (ws: XLSX.WorkSheet, startRow: number, endRow: number, startCol: number, endCol: number) => {
-  for (let r = startRow; r <= endRow; r += 1) {
-    for (let c = startCol; c <= endCol; c += 1) {
-      const address = XLSX.utils.encode_cell({ r: r - 1, c: c - 1 });
-      if (!ws[address]) ws[address] = { t: 's', v: '' };
-      setStyle(ws, address, style.border);
-    }
+function makeUnique(preferred: string, used: Set<string>): string {
+  const base = sanitizeSheetName(preferred) || 'Room';
+  let candidate = base.slice(0, 31);
+  let n = 1;
+  while (used.has(candidate)) {
+    const sfx = `_${n++}`;
+    candidate = `${base.slice(0, 31 - sfx.length)}${sfx}`;
   }
-};
+  used.add(candidate);
+  return candidate;
+}
 
-const toRoomRecords = (
-  project: any,
-  systems: any[],
-  zones: any[],
-  rooms: Record<string, any[]>,
-  envelopeElements: Record<string, EnvelopeElement[]>,
-) => {
-  const usedSheetNames = new Set<string>(['Summary Sheet']);
-  const systemsById = new Map((systems || []).map((system) => [system.id, system]));
-  const zonesById = new Map((zones || []).map((zone) => [zone.id, zone]));
+// ─── toRoomRecords ────────────────────────────────────────────────────────────
+
+function toRoomRecords(
+  project: any, systems: any[], zones: any[],
+  rooms: Record<string, any[]>, elements: Record<string, EnvelopeElement[]>,
+): RoomRecord[] {
+  const sysById  = new Map((systems || []).map(s => [s.id, s]));
+  const zoneById = new Map((zones   || []).map(z => [z.id, z]));
+  const FIXED_NAMES = new Set(['Cover', 'Design Conditions', 'Zone Summary', 'Equipment Schedule', 'Load Summary']);
+  const used = new Set<string>(FIXED_NAMES);
   const records: RoomRecord[] = [];
 
-  Object.keys(rooms || {})
-    .sort()
-    .forEach((groupId) => {
-      const zone = zonesById.get(groupId);
-      const system = systemsById.get(groupId);
-      const zoneOrSystem = zone || system || {};
-      const zoneName = String(zone?.name || system?.name || 'Unassigned').trim() || 'Unassigned';
-      const systemName = String(zone?.systemId ? systemsById.get(zone.systemId)?.name || 'Standalone' : system?.name || 'Standalone').trim() || 'Standalone';
+  for (const groupId of Object.keys(rooms || {}).sort()) {
+    const zone    = zoneById.get(groupId);
+    const sys     = sysById.get(groupId);
+    const zos     = zone || sys || {};
+    const zoneName   = safeStr(zone?.name || sys?.name, 'Unassigned');
+    const systemName = safeStr(zone?.systemId ? sysById.get(zone.systemId)?.name || 'Standalone' : sys?.name, 'Standalone');
 
-      (rooms[groupId] || []).forEach((room, index) => {
-        const roomName = String(room?.name || `Room ${index + 1}`).trim() || `Room ${index + 1}`;
-        const sheetName = makeUniqueSheetName(`${zoneName}_${roomName}`, usedSheetNames);
-        const elements = envelopeElements?.[room.id] || [];
+    for (const room of (rooms[groupId] || [])) {
+      const sheetName = makeUnique(`${zoneName}_${safeStr(room?.name, 'Room')}`, used);
+      const els = elements?.[room.id] ?? [];
+      const sum = calcSeason(project, zos, room, els, 'summer');
+      const mon = project?.includeMonsoon ? calcSeason(project, zos, room, els, 'monsoon') : undefined;
+      const win = calcWinter(project, zos, room, els);
 
-        // Calculate winter breakdown
-        const designConditions: DesignConditions = {
-          outdoorTemp: asNumber(project?.winterDesignTemp, 50),
-          indoorTemp: asNumber(zoneOrSystem?.winterIndoorTemp ?? project?.insideWinterTemp, 72),
-          outdoorHumidity: asNumber(project?.winterDesignHumidity, 80),
-          indoorHumidity: asNumber(zoneOrSystem?.winterIndoorHumidity ?? project?.insideWinterHumidity, 40),
-          winterOutdoorTemp: asNumber(project?.winterDesignTemp, 50),
-          winterOutdoorHumidity: asNumber(project?.winterDesignHumidity, 80),
-          winterIndoorTemp: asNumber(zoneOrSystem?.winterIndoorTemp ?? project?.insideWinterTemp, 72),
-          winterIndoorHumidity: asNumber(zoneOrSystem?.winterIndoorHumidity ?? project?.insideWinterHumidity, 40),
-          altitude: asNumber(project?.altitude, 0),
-        };
-        const roomDetails = {
-          id: room.id,
-          name: room.name ?? '',
-          floor: room.floor ?? 'Ground',
-          length: asNumber(room.length, 0),
-          width: asNumber(room.width, 0),
-          height: asNumber(room.height, 0),
-          hasFalseCeiling: room.hasFalseCeiling ?? false,
-          falseCeilingHeight: asNumber(room.falseCeilingHeight, 0),
-          facph: asNumber(room.facph, 0),
-          peopleCount: asNumber(room.peopleCount, 0),
-          activityType: room.activityType ?? 'office',
-          lightsWattsPerSqft: asNumber(room.lightsWattsPerSqft, 0),
-          equipmentKW: asNumber(room.equipmentKW, 0),
-          othersKW: asNumber(room.othersKW, 0),
-        };
-        const vent = calculateVentilationLoad(roomDetails, designConditions);
-        const internal = calculateInternalGains(roomDetails);
-        const envelope = calculateEnvelopeGain(elements, designConditions);
-        records.push({
-          room,
-          zoneId: groupId,
-          zoneName,
-          systemName,
-          sheetName,
-          elements,
-          zoneOrSystem,
-          summer: calculateSeasonResult(project, zoneOrSystem, room, elements, 'summer'),
-          monsoon: project?.includeMonsoon ? calculateSeasonResult(project, zoneOrSystem, room, elements, 'monsoon') : undefined,
-          winterHeatingLoad: calculateHeatingLoad(roomDetails, elements, designConditions).totalHeatingLoad,
-          winterEnvelopeSensible: envelope.sensible,
-          winterInternalSensible: internal.sensible,
-          winterVentSensible: vent.sensible,
-        });
-      });
-    });
+      const sumGovTR = Math.max(sum.totalTR, sum.designSupplyCFM / 400);
+      const monGovTR = mon ? Math.max(mon.totalTR, mon.designSupplyCFM / 400) : 0;
+      const govTR    = Math.max(sumGovTR, monGovTR);
 
-  return records.sort((left, right) =>
-    `${left.systemName}|${left.zoneName}|${left.room?.name || ''}`.localeCompare(`${right.systemName}|${right.zoneName}|${right.room?.name || ''}`),
+      records.push({ room, zoneId: groupId, zoneName, systemName, sheetName, elements: els, zoneOrSystem: zos, summer: sum, monsoon: mon, winter: win, governingTR: govTR });
+    }
+  }
+
+  return records.sort((a, b) =>
+    `${a.systemName}|${a.zoneName}|${a.room?.name ?? ''}`.localeCompare(`${b.systemName}|${b.zoneName}|${b.room?.name ?? ''}`),
   );
-};
+}
 
-const buildRoomSheet = (
+// ─── Sheet 1: Cover ───────────────────────────────────────────────────────────
+
+function buildCoverSheet(project: any, records: RoomRecord[], equipSystems: any[], userProfile?: any): XLSX.WorkSheet {
+  const ws: XLSX.WorkSheet = {};
+  const COLS = 8;
+  let row = 1;
+
+  // Title block
+  addMerge(ws, row, 1, row + 2, COLS);
+  putV(ws, row, 1, safeStr(project?.name, 'PROJECT').toUpperCase(), S.titleLg);
+  row += 3;
+  addMerge(ws, row, 1, row, COLS);
+  putV(ws, row, 1, 'Air Conditioning — Heat Load Calculation Report', S.coverSub);
+  row++;
+  addMerge(ws, row, 1, row, COLS);
+  putV(ws, row, 1, `Prepared as per ASHRAE 2017 Handbook of Fundamentals — CLTD Method`, S.coverSub);
+  row += 2;
+
+  // Project details
+  addMerge(ws, row, 1, row, COLS);
+  putV(ws, row, 1, 'PROJECT DETAILS', S.secHdr);
+  row++;
+
+  const engName = safeStr(userProfile?.displayName || userProfile?.email || project?.engineerName || project?.estimatedBy, 'Design Engineer');
+  const details: [string, string][] = [
+    ['Project Name',     safeStr(project?.name)],
+    ['Location',         safeStr(project?.location || project?.place, '—')],
+    ['Altitude',         `${asNum(project?.altitude, 0)} m above MSL`],
+    ['Activity Hours',   safeStr(project?.activityHours, 'As per occupancy schedule')],
+    ['Peak Load Period',  safeStr(project?.peakLoadTime, 'April — 16:00 hrs')],
+    ['Design Standard',  'ASHRAE 2017 HoF — CLTD / CSHGF / CLF Method'],
+    ['Prepared By',      engName],
+    ['Report Date',      fmtDate()],
+  ];
+  const detailStart = row;
+  for (const [k, v] of details) {
+    putV(ws, row, 1, k, S.label);
+    addMerge(ws, row, 2, row, 5);
+    putV(ws, row, 2, v, S.calc);
+    row++;
+  }
+  addBorders(ws, detailStart, 1, row - 1, 5);
+  row++;
+
+  // Design conditions
+  addMerge(ws, row, 1, row, COLS);
+  putV(ws, row, 1, 'DESIGN CONDITIONS SUMMARY', S.secHdr);
+  row++;
+  const condHdrs = ['Condition', 'DB (°F)', '% RH', 'WB (°F)', 'Enthalpy\n(BTU/lb)', 'Humidity\nRatio (GR/LB)'];
+  condHdrs.forEach((h, i) => putV(ws, row, i + 1, h, S.tableHdr));
+  row++;
+  const condStart = row;
+
+  const sumP = getProjectPsychro(project, 'summer');
+  const monP = project?.includeMonsoon ? getProjectPsychro(project, 'monsoon') : null;
+  const wODB = asNum(project?.winterDesignTemp, 50);
+  const wORH = asNum(project?.winterDesignHumidity, 80);
+  const wIDB = asNum(project?.insideWinterTemp,  72);
+  const wIRH = asNum(project?.insideWinterHumidity, 40);
+  const wOut = calculatePsychrometrics(wODB, wORH, asNum(project?.altitude));
+  const wIn  = calculatePsychrometrics(wIDB, wIRH, asNum(project?.altitude));
+
+  const condRows: [string, (number | string)[]][] = [
+    ['Summer — Outdoor', [sumP.outside.db, sumP.outside.rh, sumP.outside.wb, sumP.outside.th, sumP.outside.gr]],
+    ['Summer — Indoor',  [sumP.inside.db,  sumP.inside.rh,  sumP.inside.wb,  sumP.inside.th,  sumP.inside.gr]],
+  ];
+  if (monP) {
+    condRows.push(['Monsoon — Outdoor', [monP.outside.db, monP.outside.rh, monP.outside.wb, monP.outside.th, monP.outside.gr]]);
+    condRows.push(['Monsoon — Indoor',  [monP.inside.db,  monP.inside.rh,  monP.inside.wb,  monP.inside.th,  monP.inside.gr]]);
+  }
+  condRows.push(['Winter — Outdoor', [wODB, wORH, '—', r2(wOut.enthalpy), r2(toGR(wOut.humidityRatio))]]);
+  condRows.push(['Winter — Indoor',  [wIDB, wIRH, '—', r2(wIn.enthalpy),  r2(toGR(wIn.humidityRatio))]]);
+
+  for (const [label, vals] of condRows) {
+    putV(ws, row, 1, label, S.label);
+    vals.forEach((v, i) => putV(ws, row, i + 2, v, S.calc));
+    row++;
+  }
+  addBorders(ws, condStart, 1, row - 1, 6);
+  row++;
+
+  // Load summary
+  addMerge(ws, row, 1, row, COLS);
+  putV(ws, row, 1, 'PROJECT LOAD SUMMARY', S.tealHdr);
+  row++;
+  putV(ws, row, 1, 'Parameter', S.tableHdr);
+  putV(ws, row, 2, 'Value', S.tableHdr);
+  putV(ws, row, 3, 'Unit', S.tableHdr);
+  putV(ws, row, 4, 'Remarks', S.tableHdr);
+  addMerge(ws, row, 4, row, COLS);
+  row++;
+  const loadStart = row;
+
+  let totSumBTUH = 0, totSumCFM = 0, totMonBTUH = 0, totMonCFM = 0, totWin = 0, totArea = 0;
+  for (const rec of records) {
+    totSumBTUH += rec.summer.grandTotal;
+    totSumCFM  += rec.summer.designSupplyCFM;
+    totMonBTUH += rec.monsoon?.grandTotal ?? 0;
+    totMonCFM  += rec.monsoon?.designSupplyCFM ?? 0;
+    totWin     += rec.winter.total;
+    totArea    += rec.summer.area;
+  }
+  const sumGovTR = Math.max(totSumBTUH / 12000, totSumCFM / 400);
+  const monGovTR = project?.includeMonsoon ? Math.max(totMonBTUH / 12000, totMonCFM / 400) : 0;
+  const govTR    = Math.max(sumGovTR, monGovTR);
+
+  const loadRows: [string, any, string, string][] = [
+    ['Total Conditioned Area',     r0(totArea),              'Sq.Ft',  ''],
+    ['Total No. of Spaces / Rooms', records.length,          'Nos.',   ''],
+    ['Summer Sensible Load',        r0(totSumBTUH / 12000),  'TR',     'Load TR = Total BTUh ÷ 12,000'],
+    ['Summer Design Airflow',       r0(totSumCFM),            'CFM',   ''],
+    ...(project?.includeMonsoon ? [['Monsoon Sensible Load', r0(totMonBTUH / 12000), 'TR', ''] as [string, any, string, string]] : []),
+    ['Governing Cooling Load',      r2(govTR),                'TR',    'MAX (Load TR, Design CFM ÷ 400) — Design Basis'],
+    ['Total Winter Heating Load',   r0(totWin),               'BTU/h', ''],
+  ];
+  for (const [k, v, u, rem] of loadRows) {
+    const isBasis = k.includes('Governing');
+    putV(ws, row, 1, k,   isBasis ? S.total : S.label);
+    putV(ws, row, 2, v,   isBasis ? S.total : S.calc);
+    putV(ws, row, 3, u,   isBasis ? S.total : S.calc);
+    addMerge(ws, row, 4, row, COLS);
+    putV(ws, row, 4, rem, isBasis ? S.total : S.note);
+    row++;
+  }
+  addBorders(ws, loadStart, 1, row - 1, COLS);
+  row++;
+
+  // Workbook contents
+  addMerge(ws, row, 1, row, COLS);
+  putV(ws, row, 1, 'WORKBOOK CONTENTS', S.secHdr);
+  row++;
+  const contStart = row;
+  const contents: [string, string][] = [
+    ['1. Cover',              'Project summary, design conditions, and total load basis'],
+    ['2. Design Conditions',  'Full seasonal outdoor/indoor conditions and safety factors applied'],
+    ['3. Zone Summary',       'Zone-level aggregated load with installed equipment fit check'],
+    ['4. Equipment Schedule', 'Complete installed equipment list — ODU / IDU / AHU / Chiller'],
+    ['5. Load Summary',       'Room-by-room summary table with TR, CFM, and governing load'],
+    [`6.+ Room Sheets (${records.length})`, 'Individual CLTD heat load calculation for each conditioned space'],
+  ];
+  putV(ws, row, 1, 'Sheet', S.tableHdr);
+  addMerge(ws, row, 2, row, COLS);
+  putV(ws, row, 2, 'Description', S.tableHdr);
+  row++;
+  for (const [sh, desc] of contents) {
+    putV(ws, row, 1, sh, S.label);
+    addMerge(ws, row, 2, row, COLS);
+    putV(ws, row, 2, desc, S.calc);
+    row++;
+  }
+  addBorders(ws, contStart, 1, row - 1, COLS);
+  row += 2;
+
+  // Disclaimer
+  addMerge(ws, row, 1, row + 1, COLS);
+  putV(ws, row, 1,
+    'DISCLAIMER: This report is generated by HVAC Load Master. All calculations are based on ASHRAE 2017 CLTD method using the design conditions and safety factors entered for this project. Verify all inputs before use in final design documents.',
+    S.note);
+
+  ws['!cols'] = [{ wch: 32 }, { wch: 18 }, { wch: 10 }, { wch: 32 }, { wch: 12 }, { wch: 12 }, { wch: 12 }, { wch: 12 }];
+  ws['!rows'] = [{ hpt: 55 }, { hpt: 35 }, { hpt: 25 }];
+  setRef(ws, row + 2, COLS);
+  (ws as any)['!pageSetup'] = { paperSize: 9, orientation: 'portrait', fitToWidth: 1, fitToHeight: 0 };
+  return ws;
+}
+
+// ─── Sheet 2: Design Conditions ───────────────────────────────────────────────
+
+function buildDesignConditionsSheet(project: any): XLSX.WorkSheet {
+  const ws: XLSX.WorkSheet = {};
+  const COLS = 7;
+  let row = 1;
+
+  addMerge(ws, row, 1, row, COLS);
+  putV(ws, row, 1, `DESIGN CONDITIONS — ${safeStr(project?.name, 'PROJECT').toUpperCase()}`, S.titleSm);
+  row += 2;
+
+  // Helper: write a 2-col label/value row
+  const lv = (lbl: string, val: any, unit = '') => {
+    putV(ws, row, 1, lbl, S.label);
+    putV(ws, row, 2, val, S.calc);
+    if (unit) putV(ws, row, 3, unit, S.calc);
+    row++;
+  };
+
+  // ── Outdoor Design Conditions ──────────────────────────────────────────────
+  addMerge(ws, row, 1, row, COLS);
+  putV(ws, row, 1, 'OUTDOOR DESIGN CONDITIONS', S.secHdr);
+  row++;
+
+  const tblStart1 = row;
+  ['Parameter', 'Summer', 'Monsoon', 'Winter'].forEach((h, i) => putV(ws, row, i + 1, h, S.tableHdr));
+  row++;
+
+  const sumP = getProjectPsychro(project, 'summer');
+  const monP = getProjectPsychro(project, 'monsoon');
+  const wODB = asNum(project?.winterDesignTemp, 50);
+  const wORH = asNum(project?.winterDesignHumidity, 80);
+  const wOut = calculatePsychrometrics(wODB, wORH, asNum(project?.altitude));
+
+  const outRows: [string, any, any, any][] = [
+    ['Dry Bulb Temperature (°F)',    sumP.outside.db, monP.outside.db, wODB],
+    ['Relative Humidity (%)',        sumP.outside.rh, monP.outside.rh, wORH],
+    ['Wet Bulb Temperature (°F)',    sumP.outside.wb, monP.outside.wb, '—'],
+    ['Enthalpy (BTU/lb)',            sumP.outside.th, monP.outside.th, r2(wOut.enthalpy)],
+    ['Humidity Ratio (GR/LB)',       sumP.outside.gr, monP.outside.gr, r2(toGR(wOut.humidityRatio))],
+  ];
+  for (const [p, s, m, w] of outRows) {
+    putV(ws, row, 1, p, S.label);
+    putV(ws, row, 2, s, S.calc);
+    putV(ws, row, 3, project?.includeMonsoon ? m : '—', S.calc);
+    putV(ws, row, 4, w, S.calc);
+    row++;
+  }
+  addBorders(ws, tblStart1, 1, row - 1, 4);
+  row++;
+
+  // ── Indoor Design Conditions ───────────────────────────────────────────────
+  addMerge(ws, row, 1, row, COLS);
+  putV(ws, row, 1, 'INDOOR DESIGN CONDITIONS', S.secHdr);
+  row++;
+
+  const tblStart2 = row;
+  ['Parameter', 'Summer', 'Monsoon', 'Winter'].forEach((h, i) => putV(ws, row, i + 1, h, S.tableHdr));
+  row++;
+
+  const wIDB = asNum(project?.insideWinterTemp, 72);
+  const wIRH = asNum(project?.insideWinterHumidity, 40);
+  const wIn  = calculatePsychrometrics(wIDB, wIRH, asNum(project?.altitude));
+
+  const inRows: [string, any, any, any][] = [
+    ['Dry Bulb Temperature (°F)', sumP.inside.db, monP.inside.db, wIDB],
+    ['Relative Humidity (%)',     sumP.inside.rh, monP.inside.rh, wIRH],
+    ['Wet Bulb Temperature (°F)', sumP.inside.wb, monP.inside.wb, '—'],
+    ['Enthalpy (BTU/lb)',         sumP.inside.th, monP.inside.th, r2(wIn.enthalpy)],
+    ['Humidity Ratio (GR/LB)',    sumP.inside.gr, monP.inside.gr, r2(toGR(wIn.humidityRatio))],
+  ];
+  for (const [p, s, m, w] of inRows) {
+    putV(ws, row, 1, p, S.label);
+    putV(ws, row, 2, s, S.calc);
+    putV(ws, row, 3, project?.includeMonsoon ? m : '—', S.calc);
+    putV(ws, row, 4, w, S.calc);
+    row++;
+  }
+  addBorders(ws, tblStart2, 1, row - 1, 4);
+  row++;
+
+  // ── Project Parameters ─────────────────────────────────────────────────────
+  addMerge(ws, row, 1, row, COLS);
+  putV(ws, row, 1, 'PROJECT PARAMETERS', S.secHdr);
+  row++;
+  const paramStart = row;
+  lv('Altitude above MSL',          `${asNum(project?.altitude, 0)} m`);
+  lv('Activity Hours',               safeStr(project?.activityHours, 'As per occupancy'));
+  lv('Peak Load Period',             safeStr(project?.peakLoadTime, 'April — 16:00 hrs'));
+  lv('Bypass Factor (BF)',           BF.toFixed(2), '(fixed — ASHRAE standard)');
+  addBorders(ws, paramStart, 1, row - 1, 3);
+  row++;
+
+  // ── Safety Factors ─────────────────────────────────────────────────────────
+  addMerge(ws, row, 1, row, COLS);
+  putV(ws, row, 1, 'SAFETY FACTORS (project defaults — may vary per room)', S.secHdr);
+  row++;
+  const sfStart = row;
+  putV(ws, row, 1, 'Safety Factor', S.tableHdr);
+  putV(ws, row, 2, 'Default Value', S.tableHdr);
+  putV(ws, row, 3, 'Applied To', S.tableHdr);
+  addMerge(ws, row, 3, row, COLS);
+  row++;
+  const sfRows: [string, string, string][] = [
+    ['Sensible Heat Safety',  '10%', 'ERSH (Effective Room Sensible Heat)'],
+    ['Latent Heat Safety',    '5%',  'ERLH (Effective Room Latent Heat)'],
+    ['Overall Safety',        '3%',  'Grand Total Heat (Coil Sensible + Coil Latent)'],
+    ['Duct Gain',             '2%',  'Duct heat gain as % of ERSH base'],
+    ['Fan Gain',              '3%',  'Fan heat gain as % of ERSH base'],
+  ];
+  for (const [k, v, a] of sfRows) {
+    putV(ws, row, 1, k, S.label);
+    putV(ws, row, 2, v, S.calcC);
+    addMerge(ws, row, 3, row, COLS);
+    putV(ws, row, 3, a, S.calc);
+    row++;
+  }
+  addBorders(ws, sfStart, 1, row - 1, COLS);
+  row++;
+
+  // ── Assumptions ───────────────────────────────────────────────────────────
+  addMerge(ws, row, 1, row, COLS);
+  putV(ws, row, 1, 'GENERAL ASSUMPTIONS', S.secHdr);
+  row++;
+  const assStart = row;
+  const oDB = asNum(project?.summerDesignTemp, 95);
+  const oRH = asNum(project?.summerDesignHumidity, 50);
+  const iDB = asNum(project?.insideSummerTemp, 75);
+  const iRH = asNum(project?.insideSummerHumidity, 50);
+  const assumptions = [
+    `Outside design condition (Summer): ${oDB}°F DB / ${oRH}% RH`,
+    `Inside design condition: ${iDB}°F DB / ${iRH}% RH`,
+    `Fresh air: As per ASHRAE 62.1 — minimum ACH or 7.5 CFM/person, whichever is greater`,
+    `Glass U-value: Single-pane with internal venetian blind (default U = 0.56 BTU/h·ft²·°F)`,
+    `CFM governing rule: Design CFM ÷ 400 TR — Carrier 400 CFM/TR standard`,
+    `ADP selection: Minimum 44°F for Chiller systems, 42°F for VRF systems`,
+    `Floor above is considered air-conditioned (no floor heat gain) unless specified`,
+    `All values at project altitude: ${asNum(project?.altitude, 0)} m above MSL`,
+  ];
+  assumptions.forEach((a, i) => {
+    addMerge(ws, row, 1, row, COLS);
+    putV(ws, row, 1, `${i + 1}. ${a}`, S.calc);
+    row++;
+  });
+  addBorders(ws, assStart, 1, row - 1, COLS);
+
+  ws['!cols'] = [{ wch: 38 }, { wch: 16 }, { wch: 16 }, { wch: 16 }, { wch: 12 }, { wch: 12 }, { wch: 12 }];
+  setRef(ws, row + 1, COLS);
+  (ws as any)['!pageSetup'] = { paperSize: 9, orientation: 'portrait', fitToWidth: 1, fitToHeight: 0 };
+  return ws;
+}
+
+// ─── Sheet 3: Zone Summary ────────────────────────────────────────────────────
+
+function buildZoneSummarySheet(project: any, records: RoomRecord[], equipSystems: any[]): XLSX.WorkSheet {
+  const ws: XLSX.WorkSheet = {};
+  const incMon = !!project?.includeMonsoon;
+  // Col layout: A-M (13) or A-K (11 without monsoon)
+  const COLS = incMon ? 13 : 11;
+  let row = 1;
+
+  addMerge(ws, row, 1, row, COLS);
+  putV(ws, row, 1, `ZONE LOAD SUMMARY — ${safeStr(project?.name, 'PROJECT').toUpperCase()}`, S.titleSm);
+  row++;
+  addMerge(ws, row, 1, row, COLS);
+  putV(ws, row, 1, `Date: ${fmtDate()}  |  Governing TR = MAX (Total BTUh ÷ 12,000 ; Total CFM ÷ 400)`, mkS({ sz: 9, italic: true }, CLR.sectionBg));
+  row += 2;
+
+  // Headers
+  const hdrRow = row;
+  const hdrs: string[] = [
+    'Sr.\nNo.', 'System', 'Zone / Area', 'Rooms', 'Area\n(Sq.Ft)',
+    'Summer\nTR', 'Summer\nCFM',
+    ...(incMon ? ['Monsoon\nTR', 'Monsoon\nCFM'] : []),
+    'Governing\nTR ▶', 'Winter\nHeating\n(BTU/h)',
+    'Installed\nTR', 'Status',
+  ];
+  hdrs.forEach((h, i) => putV(ws, row, i + 1, h, S.tableHdr));
+  row++;
+
+  // Aggregate per zone
+  type ZoneAgg = {
+    systemName: string; zoneName: string; zoneId: string;
+    rooms: number; area: number;
+    sumBTUH: number; sumCFM: number;
+    monBTUH: number; monCFM: number;
+    winHeat: number;
+  };
+  const zoneMap = new Map<string, ZoneAgg>();
+  for (const rec of records) {
+    const key = `${rec.systemName}||${rec.zoneId}`;
+    if (!zoneMap.has(key)) {
+      zoneMap.set(key, { systemName: rec.systemName, zoneName: rec.zoneName, zoneId: rec.zoneId, rooms: 0, area: 0, sumBTUH: 0, sumCFM: 0, monBTUH: 0, monCFM: 0, winHeat: 0 });
+    }
+    const agg = zoneMap.get(key)!;
+    agg.rooms++;
+    agg.area    += rec.summer.area;
+    agg.sumBTUH += rec.summer.grandTotal;
+    agg.sumCFM  += rec.summer.designSupplyCFM;
+    agg.monBTUH += rec.monsoon?.grandTotal ?? 0;
+    agg.monCFM  += rec.monsoon?.designSupplyCFM ?? 0;
+    agg.winHeat += rec.winter.total;
+  }
+
+  const zones = Array.from(zoneMap.values()).sort((a, b) => `${a.systemName}|${a.zoneName}`.localeCompare(`${b.systemName}|${b.zoneName}`));
+
+  let sr = 1;
+  let totArea = 0, totSumBTUH = 0, totSumCFM = 0, totMonBTUH = 0, totMonCFM = 0, totWin = 0, totInsTR = 0;
+  const dataStart = row;
+
+  // Group by system — emit a system header when system changes
+  let lastSystem = '';
+  for (const z of zones) {
+    if (z.systemName !== lastSystem) {
+      lastSystem = z.systemName;
+      addMerge(ws, row, 1, row, COLS);
+      putV(ws, row, 1, `▶  ${z.systemName}`, S.greenHdr);
+      row++;
+    }
+
+    const sumTR  = z.sumBTUH / 12000;
+    const monTR  = z.monBTUH / 12000;
+    const govTR  = incMon ? Math.max(Math.max(sumTR, z.sumCFM / 400), Math.max(monTR, z.monCFM / 400))
+                           : Math.max(sumTR, z.sumCFM / 400);
+    const govCFM = Math.max(z.sumCFM, z.monCFM);
+
+    // Installed TR for zone
+    let insTR = 0;
+    for (const sys of equipSystems || []) {
+      const eZone = (sys.zones ?? []).find((ez: any) => ez.id === z.zoneId);
+      if (eZone) {
+        const units = (eZone.unitSelections ?? []).length ? eZone.unitSelections : eZone.selection ? [eZone.selection] : [];
+        for (const u of units) insTR += asNum(u.trCapacity) * asNum(u.quantity, 1);
+      }
+      // VRF: sum iduSelections for rooms in this zone
+      const roomsInZone = records.filter(r => r.zoneId === z.zoneId);
+      for (const rec of roomsInZone) {
+        for (const u of normalizeIDUList((sys.iduSelections as any)?.[rec.room.id])) {
+          insTR += asNum(u.trCapacity) * asNum(u.quantity, 1);
+        }
+        for (const u of (sys.roomSelections?.[rec.room.id] ?? [])) {
+          insTR += asNum(u.trCapacity);
+        }
+      }
+    }
+
+    const surplus = insTR > 0 ? insTR - govTR : null;
+    const status  = insTR === 0 ? 'Not Set' : surplus! >= -0.1 ? 'OK ✓' : 'Undersized ⚠';
+
+    const rowStyle = (col: number) => col === COLS
+      ? (insTR === 0 ? S.calcC : surplus! >= -0.1 ? S.ok : S.warn)
+      : S.calc;
+
+    const cols: any[] = [
+      sr++, z.systemName, z.zoneName, z.rooms, r0(z.area),
+      r2(sumTR), r0(govCFM),
+      ...(incMon ? [r2(monTR), r0(z.monCFM)] : []),
+      r2(govTR), r0(z.winHeat),
+      insTR > 0 ? r2(insTR) : '—', status,
+    ];
+    cols.forEach((v, i) => putV(ws, row, i + 1, v, i + 1 === COLS ? rowStyle(COLS) : (i >= 5 ? S.calcC : S.calc)));
+
+    totArea    += z.area;
+    totSumBTUH += z.sumBTUH;
+    totSumCFM  += z.sumCFM;
+    totMonBTUH += z.monBTUH;
+    totMonCFM  += z.monCFM;
+    totWin     += z.winHeat;
+    totInsTR   += insTR;
+    row++;
+  }
+
+  addBorders(ws, dataStart, 1, row - 1, COLS);
+
+  // Totals row
+  const totSumTR  = Math.max(totSumBTUH / 12000, totSumCFM / 400);
+  const totMonTR  = incMon ? Math.max(totMonBTUH / 12000, totMonCFM / 400) : 0;
+  const totGovTR  = Math.max(totSumTR, totMonTR);
+  const totGovCFM = Math.max(totSumCFM, totMonCFM);
+
+  const totCols: any[] = [
+    'PROJECT TOTAL', '', '', zones.length, r0(totArea),
+    r2(totSumBTUH / 12000), r0(totSumCFM),
+    ...(incMon ? [r2(totMonBTUH / 12000), r0(totMonCFM)] : []),
+    r2(totGovTR), r0(totWin),
+    totInsTR > 0 ? r2(totInsTR) : '—', '',
+  ];
+  addMerge(ws, row, 1, row, 3);
+  totCols.forEach((v, i) => putV(ws, row, i + 1, v, S.total));
+  addBorders(ws, row, 1, row, COLS);
+  row += 2;
+
+  // Legend
+  putV(ws, row, 1, 'STATUS LEGEND', S.secHdr);
+  addMerge(ws, row, 1, row, 4);
+  row++;
+  putV(ws, row, 1, 'OK ✓', S.ok);
+  putV(ws, row, 2, 'Installed TR ≥ Governing TR (within 10% tolerance)', S.calc);
+  addMerge(ws, row, 2, row, 4);
+  row++;
+  putV(ws, row, 1, 'Undersized ⚠', S.warn);
+  putV(ws, row, 2, 'Installed TR < Governing TR — equipment upgrade recommended', S.calc);
+  addMerge(ws, row, 2, row, 4);
+  row++;
+  putV(ws, row, 1, 'Not Set', S.calcC);
+  putV(ws, row, 2, 'No equipment assigned to this zone yet', S.calc);
+  addMerge(ws, row, 2, row, 4);
+  row++;
+
+  ws['!cols'] = [
+    { wch: 6 }, { wch: 22 }, { wch: 24 }, { wch: 7 }, { wch: 10 },
+    { wch: 10 }, { wch: 10 },
+    ...(incMon ? [{ wch: 10 }, { wch: 10 }] : []),
+    { wch: 12 }, { wch: 12 }, { wch: 12 }, { wch: 14 },
+  ];
+  ws['!rows'] = [{ hpt: 30 }];
+  ws['!autofilter'] = { ref: XLSX.utils.encode_range({ s: { r: hdrRow - 1, c: 0 }, e: { r: row - 1, c: COLS - 1 } }) };
+  (ws as any)['!freeze'] = { xSplit: 0, ySplit: hdrRow };
+  setRef(ws, row + 1, COLS);
+  (ws as any)['!pageSetup'] = { paperSize: 9, orientation: 'landscape', fitToWidth: 1, fitToHeight: 0 };
+  return ws;
+}
+
+// ─── Sheet 4: Equipment Schedule ─────────────────────────────────────────────
+
+function buildEquipmentScheduleSheet(project: any, equipSystems: any[], allRooms: Record<string, any[]>): XLSX.WorkSheet {
+  const ws: XLSX.WorkSheet = {};
+  const COLS = 11;
+  let row = 1;
+
+  addMerge(ws, row, 1, row, COLS);
+  putV(ws, row, 1, `EQUIPMENT SCHEDULE — ${safeStr(project?.name, 'PROJECT').toUpperCase()}`, S.titleSm);
+  row++;
+  addMerge(ws, row, 1, row, COLS);
+  putV(ws, row, 1, `Date: ${fmtDate()}  |  All capacities are nominal rated values at standard conditions`, mkS({ sz: 9, italic: true }, CLR.sectionBg));
+  row += 2;
+
+  const hdrRow = row;
+  const hdrs = ['Sr.\nNo.', 'System', 'Zone', 'Room', 'Equipment\nType', 'Brand', 'Model / Series', 'Capacity\n(TR)', 'CFM', 'Qty', 'Total\nTR'];
+  hdrs.forEach((h, i) => putV(ws, row, i + 1, h, S.tableHdr));
+  row++;
+
+  const lines = buildEquipmentLines(equipSystems, allRooms);
+  const dataStart = row;
+  let sr = 1;
+  let lastSystem = '';
+  let totTR = 0;
+
+  for (const ln of lines) {
+    if (ln.system !== lastSystem) {
+      lastSystem = ln.system;
+      addMerge(ws, row, 1, row, COLS);
+      putV(ws, row, 1, `▶  System: ${ln.system}`, S.purpleHdr);
+      row++;
+    }
+    const isODU     = ['ODU', 'Chiller', 'AHU Condensing Unit', 'Cooling Tower'].includes(ln.role);
+    const rowSty    = isODU ? S.sub : S.calc;
+    const vals: any[] = [sr++, ln.system, ln.zone, ln.room, ln.role, ln.brand, ln.model, r2(ln.tr), r0(ln.cfm), ln.qty, r2(ln.totalTR)];
+    vals.forEach((v, i) => putV(ws, row, i + 1, v, i >= 7 ? S.calcC : rowSty));
+    totTR += ln.totalTR;
+    row++;
+  }
+
+  if (lines.length === 0) {
+    addMerge(ws, row, 1, row, COLS);
+    putV(ws, row, 1, 'No equipment assigned yet. Use the Equipment Selection module to assign equipment to systems and zones.', S.note);
+    row++;
+  }
+
+  addBorders(ws, dataStart, 1, row - 1, COLS);
+
+  // Totals
+  const totCols = ['TOTAL', '', '', '', '', '', '', '', '', '', r2(totTR)];
+  addMerge(ws, row, 1, row, 10);
+  totCols.forEach((v, i) => putV(ws, row, i + 1, v, S.total));
+  addBorders(ws, row, 1, row, COLS);
+  row += 2;
+
+  // Notes
+  addMerge(ws, row, 1, row, COLS);
+  putV(ws, row, 1, 'NOTES', S.secHdr);
+  row++;
+  const notes = [
+    'All capacities are nominal rated values. Derate as required for site elevation and ambient conditions.',
+    'VRF ODU diversity factor applied per system design. Effective ODU TR may differ from rated TR.',
+    'Chiller capacity at standard ARI conditions (44°F CHW / 85°F CW). Verify at actual design conditions.',
+    'Zone-level units (AHU/FCU) serve all rooms within the zone. Individual room TR is not separately verified here — see Zone Summary.',
+  ];
+  notes.forEach((n, i) => {
+    addMerge(ws, row, 1, row, COLS);
+    putV(ws, row, 1, `${i + 1}. ${n}`, S.note);
+    row++;
+  });
+
+  ws['!cols'] = [
+    { wch: 6 }, { wch: 22 }, { wch: 20 }, { wch: 18 }, { wch: 20 },
+    { wch: 14 }, { wch: 22 }, { wch: 10 }, { wch: 10 }, { wch: 6 }, { wch: 10 },
+  ];
+  ws['!autofilter'] = { ref: XLSX.utils.encode_range({ s: { r: hdrRow - 1, c: 0 }, e: { r: row - 1, c: COLS - 1 } }) };
+  (ws as any)['!freeze'] = { xSplit: 0, ySplit: hdrRow };
+  setRef(ws, row + 1, COLS);
+  (ws as any)['!pageSetup'] = { paperSize: 9, orientation: 'landscape', fitToWidth: 1, fitToHeight: 0 };
+  return ws;
+}
+
+// ─── Sheet 5: Load Summary ────────────────────────────────────────────────────
+
+function buildSummarySheet(project: any, refs: RoomSheetRefs[]): XLSX.WorkSheet {
+  const ws: XLSX.WorkSheet = {};
+  const incMon = !!project?.includeMonsoon;
+  // Columns: Sr | System | Zone | Room | Floor | Area | Height | FalseCeiling | FreshAir | Occupancy | Lighting | EquipKW | SumTR | SumCFM | [MonTR | MonCFM] | WinLoad | GovTR | IDUConfig
+  const BASE_COLS = 17;
+  const COLS = incMon ? BASE_COLS + 2 : BASE_COLS;
+  let row = 1;
+
+  addMerge(ws, row, 1, row, COLS);
+  putV(ws, row, 1, `HEAT LOAD SUMMARY — ${safeStr(project?.name, 'PROJECT').toUpperCase()}`, S.titleSm);
+  row++;
+  addMerge(ws, row, 1, row, COLS);
+  putV(ws, row, 1, `Date: ${fmtDate()}  |  Use the System / Zone / Floor filters to group rooms. Governing TR = MAX (Load TR, CFM ÷ 400).`, mkS({ sz: 9, italic: true }, CLR.sectionBg));
+  row += 2;
+
+  const hdrRow = row;
+  const hdrs = [
+    'Sr.\nNo.', 'System', 'Zone', 'Room / Space', 'Floor',
+    'Area\n(Sq.Ft)', 'Ceiling\nHt (Ft)', 'False\nCeiling (Ft)',
+    'Fresh Air\n(CFM)', 'Occupancy\n(Nos.)', 'Lighting\n(W/Sq.Ft)', 'Equip.\nLoad (kW)',
+    'Summer\nTR', 'Summer\nCFM',
+    ...(incMon ? ['Monsoon\nTR', 'Monsoon\nCFM'] : []),
+    'Winter\nHeating\n(BTU/h)', 'Governing\nTR ▶', 'IDU Configuration',
+  ];
+  hdrs.forEach((h, i) => putV(ws, row, i + 1, h, S.tableHdr));
+  row++;
+
+  const dataStart = row;
+  refs.forEach((ref, idx) => {
+    const r = row;
+    // Fixed columns
+    putV(ws, r, 1, idx + 1, S.calcC);
+    putV(ws, r, 2, ref.systemName, S.calc);
+    putV(ws, r, 3, ref.zoneName, S.calc);
+    putV(ws, r, 4, ref.roomName, S.calc);
+    putV(ws, r, 5, ref.floorName, S.calc);
+    // Cross-sheet formula columns
+    putF(ws, r, 6,  shRef(ref.sheetName, ref.areaCell),          'n', S.calcC);
+    putF(ws, r, 7,  shRef(ref.sheetName, ref.heightCell),        'n', S.calcC);
+    putF(ws, r, 8,  shRef(ref.sheetName, ref.falseCeilingCell),  'n', S.calcC);
+    putF(ws, r, 9,  shRef(ref.sheetName, ref.freshAirCell),      'n', S.calcC);
+    putF(ws, r, 10, shRef(ref.sheetName, ref.occupancyCell),     'n', S.calcC);
+    putF(ws, r, 11, shRef(ref.sheetName, ref.lightingCell),      'n', S.calcC);
+    putF(ws, r, 12, shRef(ref.sheetName, ref.equipKwCell),       'n', S.calcC);
+    putF(ws, r, 13, `ROUND(${shRef(ref.sheetName, ref.summerTrCell)},2)`,  'n', S.calcC);
+    putF(ws, r, 14, `ROUND(${shRef(ref.sheetName, ref.summerCfmCell)},0)`, 'n', S.calcC);
+    if (incMon) {
+      putF(ws, r, 15, ref.monsoonTrCell  ? `ROUND(${shRef(ref.sheetName, ref.monsoonTrCell)},2)`  : '0', 'n', S.calcC);
+      putF(ws, r, 16, ref.monsoonCfmCell ? `ROUND(${shRef(ref.sheetName, ref.monsoonCfmCell)},0)` : '0', 'n', S.calcC);
+    }
+    const wCol  = incMon ? 17 : 15;
+    const gCol  = incMon ? 18 : 16;
+    const iCol  = incMon ? 19 : 17;
+    putF(ws, r, wCol, `ROUND(${shRef(ref.sheetName, ref.winterLoadCell)},0)`,   'n', S.calcC);
+    putF(ws, r, gCol, `ROUND(${shRef(ref.sheetName, ref.governingTrCell)},2)`,  'n', S.total);
+    putF(ws, r, iCol, shRef(ref.sheetName, ref.iduConfigCell), 's', S.calc);
+    row++;
+  });
+
+  addBorders(ws, dataStart, 1, row - 1, COLS);
+
+  // Totals row
+  const n = refs.length;
+  const totR = row;
+  putV(ws, totR, 1, 'PROJECT TOTAL', S.total);
+  addMerge(ws, totR, 1, totR, 5);
+  [6, 9, 10, 13, 14, ...(incMon ? [15, 16] : [])].forEach(c => {
+    putF(ws, totR, c, `SUM(${rc(dataStart, c)}:${rc(row - 1, c)})`, 'n', S.total);
+  });
+  const wCol  = incMon ? 17 : 15;
+  const gCol  = incMon ? 18 : 16;
+  putF(ws, totR, wCol, `SUM(${rc(dataStart, wCol)}:${rc(row - 1, wCol)})`, 'n', S.total);
+  putF(ws, totR, gCol, `SUM(${rc(dataStart, gCol)}:${rc(row - 1, gCol)})`, 'n', S.total);
+  addBorders(ws, totR, 1, totR, COLS);
+  row += 2;
+
+  // Assumptions (from project data)
+  addMerge(ws, row, 1, row, COLS);
+  putV(ws, row, 1, 'GENERAL ASSUMPTIONS & BASIS OF DESIGN', S.secHdr);
+  row++;
+  const oDB = asNum(project?.summerDesignTemp, 95);
+  const oRH = asNum(project?.summerDesignHumidity, 50);
+  const iDB = asNum(project?.insideSummerTemp, 75);
+  const iRH = asNum(project?.insideSummerHumidity, 50);
+  const assumptions = [
+    `Outside design condition (Summer): ${oDB}°F DB / ${oRH}% RH`,
+    `Inside design condition: ${iDB}°F DB / ${iRH}% RH`,
+    `Fresh air: As per ASHRAE 62.1 — minimum ACH or 7.5 CFM/person`,
+    `Glass U-value: Single-pane with venetian blind (default U = 0.56 BTU/h·ft²·°F)`,
+    `Floor above considered air-conditioned — no floor heat gain unless specified`,
+    `Equipment load: As per details provided by consultant/customer`,
+    `Design drawing reference: Drawing provided by customer`,
+    `Activity hours: ${safeStr(project?.activityHours, '9 AM to 6 PM')}`,
+    `Altitude: ${asNum(project?.altitude, 0)} m above MSL — all psychrometric values corrected`,
+  ];
+  assumptions.forEach((a, i) => {
+    addMerge(ws, row, 1, row, COLS);
+    putV(ws, row, 1, `${i + 1}. ${a}`, S.calc);
+    row++;
+  });
+
+  ws['!cols'] = [
+    { wch: 6 }, { wch: 22 }, { wch: 20 }, { wch: 22 }, { wch: 10 },
+    { wch: 10 }, { wch: 10 }, { wch: 12 }, { wch: 10 }, { wch: 10 },
+    { wch: 10 }, { wch: 10 }, { wch: 10 }, { wch: 10 },
+    ...(incMon ? [{ wch: 10 }, { wch: 10 }] : []),
+    { wch: 14 }, { wch: 12 }, { wch: 40 },
+  ];
+  ws['!autofilter'] = { ref: XLSX.utils.encode_range({ s: { r: hdrRow - 1, c: 0 }, e: { r: n + hdrRow, c: COLS - 1 } }) };
+  (ws as any)['!freeze'] = { xSplit: 0, ySplit: hdrRow };
+  (ws as any)['!pageSetup'] = { paperSize: 9, orientation: 'landscape', fitToWidth: 1, fitToHeight: 0 };
+  setRef(ws, row + 1, COLS);
+  return ws;
+}
+
+// ─── Sheet 6+: Room Sheet ─────────────────────────────────────────────────────
+
+function buildRoomSheet(
   project: any,
   record: RoomRecord,
-  withHeavyFormatting: boolean,
-  creatorFirstName?: string,
-): { ws: XLSX.WorkSheet; refs: RoomSheetRefs } => {
-  void withHeavyFormatting;
-  const room = record.room;
-  const rows: any[][] = Array.from({ length: 80 }, () => Array(8).fill(''));
-  const psychro = getDisplayPsychro(project);
-  // Local winter psychrometric calculation
-  const winterOutdoorTemp = asNumber(project?.winterDesignTemp, 50);
-  const winterOutdoorHumidity = asNumber(project?.winterDesignHumidity, 80);
-  const winterIndoorTemp = asNumber(project?.insideWinterTemp, 72);
-  const winterIndoorHumidity = asNumber(project?.insideWinterHumidity, 40);
-  const winterOutside = calculatePsychrometrics(winterOutdoorTemp, winterOutdoorHumidity, asNumber(project?.altitude, 0));
-  const winterInside = calculatePsychrometrics(winterIndoorTemp, winterIndoorHumidity, asNumber(project?.altitude, 0));
-  const winterPsychro = {
-    outside: {
-      db: winterOutdoorTemp,
-      rh: winterOutdoorHumidity,
-      wb: 0,
-      th: winterOutside.enthalpy,
-      grlb: toGrainsPerLb(winterOutside.humidityRatio),
-    },
-    inside: {
-      db: winterIndoorTemp,
-      rh: winterIndoorHumidity,
-      wb: 0,
-      th: winterInside.enthalpy,
-      grlb: toGrainsPerLb(winterInside.humidityRatio),
-    },
-    diff: {
-      db: winterOutdoorTemp - winterIndoorTemp,
-      rh: winterOutdoorHumidity - winterIndoorHumidity,
-      th: winterOutside.enthalpy - winterInside.enthalpy,
-      grlb: toGrainsPerLb(winterOutside.humidityRatio) - toGrainsPerLb(winterInside.humidityRatio),
-    },
-  };
-  const wallAreas = sumByOrientation(record.elements, 'Wall');
-  const glassAreas = sumByOrientation(record.elements, 'Glass');
-  const partitionArea = totalAreaByType(record.elements, 'Partition');
-  const roofArea = totalAreaByType(record.elements, 'Roof');
-  const floorArea = totalAreaByType(record.elements, 'Floor') || record.summer.area;
-  const electricalDisplay = `${asNumber(room.equipmentKW, 0) + asNumber(room.othersKW, 0)} kW + ${asNumber(room.lightsWattsPerSqft, 0)} W/sq.ft`;
+  equipSystems: any[],
+): { ws: XLSX.WorkSheet; refs: RoomSheetRefs } {
+  const ws: XLSX.WorkSheet = {};
+  const incMon = !!project?.includeMonsoon && !!record.monsoon;
+  // Columns: A(1)–J(10) — Summer(A-C) | sep(D) | Monsoon(E-G) | Winter(H-J)
+  const COLS = 10;
+  let row = 1;
 
-  rows[0][0] = `HEAT LOAD SHEET - ${String(room?.name || '').toUpperCase()}`;
-  rows[1][0] = 'Project';
-  rows[1][1] = safeValue(project?.name, 'Project');
-  rows[1][3] = 'Location';
-  rows[1][4] = safeValue(project?.location || project?.place);
-  rows[1][6] = 'Date';
-  rows[1][7] = formatDate();
-  rows[3][4] = creatorFirstName ? creatorFirstName : '';
-  rows[3][3] = 'Design Engineer';
-  rows[2][0] = 'System';
-  rows[2][1] = safeValue(record.systemName);
-  rows[2][3] = 'Zone';
-  rows[2][4] = safeValue(record.zoneName);
-  rows[2][6] = 'Floor';
-  rows[2][7] = safeValue(room?.floor);
-  rows[3][0] = 'Area Name';
-  rows[3][1] = safeValue(room?.name);
-  rows[3][3] = 'Estimated By';
-  rows[3][4] = safeValue(project?.engineerName || project?.estimatedBy, 'Design Engineer');
-  rows[3][6] = 'Peak Load Time';
-  rows[3][7] = safeValue(project?.peakLoadTime, 'APRIL, 16:00 HRS');
+  // ── Title ──────────────────────────────────────────────────────────────────
+  addMerge(ws, row, 1, row, COLS);
+  putV(ws, row, 1, `HEAT LOAD CALCULATION — ${safeStr(record.room?.name, 'ROOM').toUpperCase()}`, S.titleSm);
+  row += 2;
 
-  rows[5][0] = 'DESIGN CONDITIONS';
-  rows[6][0] = 'Parameter';
-  rows[6][1] = 'Summer Outside';
-  rows[6][2] = 'Summer Inside';
-  rows[6][3] = 'Summer Diff';
-  rows[6][4] = 'Monsoon Outside';
-  rows[6][5] = 'Monsoon Inside';
-  rows[6][6] = 'Monsoon Diff';
-  rows[6][7] = 'Winter Outside';
-  rows[6][8] = 'Winter Inside';
-  rows[6][9] = 'Winter Diff';
-  rows[7][0] = 'DB';
-  rows[7][1] = psychro.summer.outside.db;
-  rows[7][2] = psychro.summer.inside.db;
-  rows[7][3] = psychro.summer.diff.db;
-  rows[7][4] = project?.includeMonsoon ? psychro.monsoon.outside.db : '';
-  rows[7][5] = project?.includeMonsoon ? psychro.monsoon.inside.db : '';
-  rows[7][6] = project?.includeMonsoon ? psychro.monsoon.diff.db : '';
-  rows[7][7] = winterPsychro.outside.db;
-  rows[7][8] = winterPsychro.inside.db;
-  rows[7][9] = winterPsychro.diff.db;
-  rows[8][0] = '% RH';
-  rows[8][1] = psychro.summer.outside.rh;
-  rows[8][2] = psychro.summer.inside.rh;
-  rows[8][4] = project?.includeMonsoon ? psychro.monsoon.outside.rh : '';
-  rows[8][5] = project?.includeMonsoon ? psychro.monsoon.inside.rh : '';
-  rows[8][7] = winterPsychro.outside.rh;
-  rows[8][8] = winterPsychro.inside.rh;
-  rows[8][9] = winterPsychro.diff?.rh ?? '';
-  // Omit WB row as requested
-  rows[10][0] = 'TH (Enthalpy)';
-  rows[10][1] = psychro.summer.outside.th;
-  rows[10][2] = psychro.summer.inside.th;
-  rows[10][3] = psychro.summer.diff.th;
-  rows[10][4] = project?.includeMonsoon ? psychro.monsoon.outside.th : '';
-  rows[10][5] = project?.includeMonsoon ? psychro.monsoon.inside.th : '';
-  rows[10][6] = project?.includeMonsoon ? psychro.monsoon.diff.th : '';
-  rows[10][7] = Math.round(winterPsychro.outside.th * 100) / 100;
-  rows[10][8] = Math.round(winterPsychro.inside.th * 100) / 100;
-  rows[10][9] = Math.round(winterPsychro.diff.th * 100) / 100;
-  rows[11][0] = 'GR/LB (Humidity Ratio)';
-  rows[11][1] = psychro.summer.outside.grlb;
-  rows[11][2] = psychro.summer.inside.grlb;
-  rows[11][3] = psychro.summer.diff.grlb;
-  rows[11][4] = project?.includeMonsoon ? psychro.monsoon.outside.grlb : '';
-  rows[11][5] = project?.includeMonsoon ? psychro.monsoon.inside.grlb : '';
-  rows[11][6] = project?.includeMonsoon ? psychro.monsoon.diff.grlb : '';
-  rows[11][7] = Math.round(winterPsychro.outside.grlb * 100) / 100;
-  rows[11][8] = Math.round(winterPsychro.inside.grlb * 100) / 100;
-  rows[11][9] = Math.round(winterPsychro.diff.grlb * 100) / 100;
-
-  rows[13][0] = 'ROOM INPUTS ';
-  rows[14][0] = 'Parameter';
-  rows[14][1] = 'Value';
-  rows[14][2] = 'Unit';
-  rows[15][0] = 'Area';
-  rows[15][1] = safeValue(record.summer.area);
-  rows[15][2] = 'Sq.Ft';
-  rows[16][0] = 'Volume';
-  rows[16][1] = safeValue(record.summer.volume);
-  rows[16][2] = 'Cu.Ft';
-  rows[17][0] = 'Total Height';
-  rows[17][1] = safeValue(asNumber(room?.height, 0));
-  rows[17][2] = 'Ft';
-  rows[18][0] = 'False Ceiling Height';
-  rows[18][1] = safeValue(asNumber(room?.falseCeilingHeight, 0));
-  rows[18][2] = 'Ft';
-  rows[19][0] = 'Occupancy';
-  rows[19][1] = safeValue(asNumber(room?.peopleCount, 0));
-  rows[19][2] = 'Nos.';
-  rows[20][0] = 'Fresh Air';
-  rows[20][1] = safeValue(record.summer.ventCfm);
-  rows[20][2] = 'CFM';
-  rows[21][0] = 'Room Electrical Load';
-  rows[21][1] = safeValue(asNumber(room.lightsWattsPerSqft, 0));
-  rows[21][2] = 'W/sq.ft';
-  rows[22][0] = 'Equipment Load';
-  rows[22][1] = safeValue(asNumber(room.equipmentKW, 0) + asNumber(room.othersKW, 0));
-  rows[22][2] = 'KW';
-
-  rows[23][0] = 'SUMMER CALCULATION';
-  rows[24][0] = 'Metric';
-
-  rows[24][1] = 'Value';
-  rows[24][2] = 'Unit';
-  // --- All rows population above this line ---
-
-  // Pad all rows to the maximum column count to prevent Excel corruption
-  const maxCols = Math.max(...rows.map(r => r.length));
-  for (let i = 0; i < rows.length; i++) {
-    while (rows[i].length < maxCols) rows[i].push('');
-  }
-  const wsRoom = XLSX.utils.aoa_to_sheet(rows);
-
-  // --- All setFormulaCell(wsRoom, ...) and worksheet modifications below this line ---
-  // Summer calculation values (rounded)
-  rows[25][0] = 'Envelope Sensible'; rows[25][1] = Math.round(record.summer.envelopeSensible); rows[25][2] = 'BTU/h';
-  rows[26][0] = 'Internal Sensible'; rows[26][1] = Math.round(record.summer.internalSensible); rows[26][2] = 'BTU/h';
-  rows[27][0] = 'Vent Sensible'; rows[27][1] = Math.round(record.summer.ventSensible); rows[27][2] = 'BTU/h';
-  rows[28][0] = 'Vent Latent'; rows[28][1] = Math.round(record.summer.ventLatent); rows[28][2] = 'BTU/h';
-  rows[29][0] = 'Duct Gain'; rows[29][1] = Math.round(record.summer.ductGain); rows[29][2] = 'BTU/h';
-  rows[30][0] = 'Fan Gain'; rows[30][1] = Math.round(record.summer.fanGain); rows[30][2] = 'BTU/h';
-  rows[31][0] = 'ERSH'; rows[31][1] = Math.round(record.summer.ersh); rows[31][2] = 'BTU/h';
-  rows[32][0] = 'ERLH'; rows[32][1] = Math.round(record.summer.erlh); rows[32][2] = 'BTU/h';
-  rows[33][0] = 'Grand Total Heat'; rows[33][1] = Math.round(record.summer.grandTotal); rows[33][2] = 'BTU/h';
-  rows[34][0] = 'Air Conditioning Tonnage'; rows[34][1] = Math.round(record.summer.totalTR * 100) / 100; rows[34][2] = 'TR';
-  rows[35][0] = 'Design Supply CFM'; rows[35][1] = Math.round(record.summer.designSupplyCFM); rows[35][2] = 'CFM';
-
-  // Monsoon calculation values (rounded)
-  if (project?.includeMonsoon && record.monsoon) {
-    rows[23][4] = 'MONSOON APP CALCULATION';
-    rows[24][4] = 'Metric';
-    rows[24][5] = 'Value';
-    rows[24][6] = 'Unit';
-    rows[25][4] = 'Envelope Sensible'; rows[25][5] = Math.round(record.monsoon.envelopeSensible); rows[25][6] = 'BTU/h';
-    rows[26][4] = 'Internal Sensible'; rows[26][5] = Math.round(record.monsoon.internalSensible); rows[26][6] = 'BTU/h';
-    rows[27][4] = 'Vent Sensible'; rows[27][5] = Math.round(record.monsoon.ventSensible); rows[27][6] = 'BTU/h';
-    rows[28][4] = 'Vent Latent'; rows[28][5] = Math.round(record.monsoon.ventLatent); rows[28][6] = 'BTU/h';
-    rows[29][4] = 'Duct Gain'; rows[29][5] = Math.round(record.monsoon.ductGain); rows[29][6] = 'BTU/h';
-    rows[30][4] = 'Fan Gain'; rows[30][5] = Math.round(record.monsoon.fanGain); rows[30][6] = 'BTU/h';
-    rows[31][4] = 'ERSH'; rows[31][5] = Math.round(record.monsoon.ersh); rows[31][6] = 'BTU/h';
-    rows[32][4] = 'ERLH'; rows[32][5] = Math.round(record.monsoon.erlh); rows[32][6] = 'BTU/h';
-    rows[33][4] = 'Grand Total Heat'; rows[33][5] = Math.round(record.monsoon.grandTotal); rows[33][6] = 'BTU/h';
-    rows[34][4] = 'Air Conditioning Tonnage'; rows[34][5] = Math.round(record.monsoon.totalTR * 100) / 100; rows[34][6] = 'TR';
-    rows[35][4] = 'Design Supply CFM'; rows[35][5] = Math.round(record.monsoon.designSupplyCFM); rows[35][6] = 'CFM';
-  }
-
-
-  // Place Winter Calculation Block beside Monsoon App Calculation Table
-  // Fill winter breakdown values (rounded)
-  rows[24][7] = 'WINTER CALCULATION';
-  rows[25][7] = 'Envelope Sensible'; rows[25][8] = Math.round(record.winterEnvelopeSensible ?? 0); rows[25][9] = 'BTU/h';
-  rows[26][7] = 'Internal Sensible'; rows[26][8] = Math.round(record.winterInternalSensible ?? 0); rows[26][9] = 'BTU/h';
-  rows[27][7] = 'Vent Sensible'; rows[27][8] = Math.round(record.winterVentSensible ?? 0); rows[27][9] = 'BTU/h';
-  rows[28][7] = ''; rows[28][8] = ''; rows[28][9] = '';
-  rows[29][7] = ''; rows[29][8] = ''; rows[29][9] = '';
-  rows[30][7] = ''; rows[30][8] = ''; rows[30][9] = '';
-  rows[31][7] = ''; rows[31][8] = ''; rows[31][9] = '';
-  rows[32][7] = ''; rows[32][8] = ''; rows[32][9] = '';
-  rows[33][7] = ''; rows[33][8] = ''; rows[33][9] = '';
-  rows[34][7] = 'Total Winter Heating Load'; rows[34][8] = Math.round(record.winterHeatingLoad); rows[34][9] = 'BTU/h';
-
-  // Add comments/guidance for each section (moved to after main tables if needed)
-
-  if (project?.includeMonsoon) {
-    rows[23][4] = 'MONSOON APP CALCULATION';
-    rows[24][4] = 'Metric';
-    rows[24][5] = 'Value';
-    rows[24][6] = 'Unit';
-    rows[25][4] = 'Envelope Sensible';
-    rows[25][5] = record.monsoon?.envelopeSensible ?? '';
-    rows[25][6] = record.monsoon ? 'BTU/h' : '';
-    rows[26][4] = 'Internal Sensible';
-    rows[26][5] = record.monsoon?.internalSensible ?? '';
-    rows[26][6] = record.monsoon ? 'BTU/h' : '';
-    rows[27][4] = 'Vent Sensible';
-    rows[27][5] = record.monsoon?.ventSensible ?? '';
-    rows[27][6] = record.monsoon ? 'BTU/h' : '';
-    rows[28][4] = 'Vent Latent';
-    rows[28][5] = record.monsoon?.ventLatent ?? '';
-    rows[28][6] = record.monsoon ? 'BTU/h' : '';
-    rows[29][4] = 'Duct Gain';
-    rows[29][5] = record.monsoon?.ductGain ?? '';
-    rows[29][6] = record.monsoon ? 'BTU/h' : '';
-    rows[30][4] = 'Fan Gain';
-    rows[30][5] = record.monsoon?.fanGain ?? '';
-    rows[30][6] = record.monsoon ? 'BTU/h' : '';
-    rows[31][4] = 'ERSH';
-    rows[31][5] = record.monsoon?.ersh ?? '';
-    rows[31][6] = record.monsoon ? 'BTU/h' : '';
-    rows[32][4] = 'ERLH';
-    rows[32][5] = record.monsoon?.erlh ?? '';
-    rows[32][6] = record.monsoon ? 'BTU/h' : '';
-    rows[33][4] = 'Grand Total Heat';
-    rows[33][5] = record.monsoon?.grandTotal ?? '';
-    rows[33][6] = record.monsoon ? 'BTU/h' : '';
-    rows[34][4] = 'Air Conditioning Tonnage';
-    rows[34][5] = record.monsoon?.totalTR ?? '';
-    rows[34][6] = record.monsoon ? 'TR' : '';
-    rows[35][4] = 'Design Supply CFM';
-    rows[35][5] = record.monsoon?.designSupplyCFM ?? '';
-    rows[35][6] = record.monsoon ? 'CFM' : '';
-  }
-
-  // Move Structural Area Summary table after Room Inputs Table (immediately after row 22)
-  let areaRow = 23;
-  // Shift all rows after 22 down to make space for the area summary
-  rows.splice(areaRow, 0, ...Array.from({length: 15}, () => Array(8).fill(''))); // Reserve 15 rows for area summary
-  rows[areaRow][0] = 'STRUCTURAL AREA SUMMARY';
-  rows[areaRow + 1][0] = 'Type';
-  rows[areaRow + 1][1] = 'Orientation';
-  rows[areaRow + 1][2] = 'Area (Sq.Ft)';
-  rows[areaRow + 1][3] = 'U-Value';
-  rows[areaRow + 1][4] = 'Description';
-
-  let row = areaRow + 2;
-  // Walls by orientation
-  const wallElements = record.elements.filter(e => e.type === 'Wall');
-  for (const orientation of ORIENTATIONS) {
-    const elements = wallElements.filter(e => String(e.orientation).toUpperCase() === orientation);
-    if (elements.length > 0) {
-      for (const el of elements) {
-        rows[row][0] = 'Wall';
-        rows[row][1] = orientation;
-        rows[row][2] = asNumber(el.area, 0);
-        rows[row][3] = el.uValue;
-        rows[row][4] = el.description || '';
-        row++;
-      }
-    }
-  }
-  // Glass by orientation
-  const glassElements = record.elements.filter(e => e.type === 'Glass');
-  for (const orientation of ORIENTATIONS) {
-    const elements = glassElements.filter(e => String(e.orientation).toUpperCase() === orientation);
-    if (elements.length > 0) {
-      for (const el of elements) {
-        rows[row][0] = 'Glass';
-        rows[row][1] = orientation;
-        rows[row][2] = asNumber(el.area, 0);
-        rows[row][3] = el.uValue;
-        rows[row][4] = el.description || '';
-        row++;
-      }
-    }
-  }
-  // Partition
-  const partitionElements = record.elements.filter(e => e.type === 'Partition');
-  if (partitionElements.length > 0) {
-    for (const el of partitionElements) {
-      rows[row][0] = 'Partition';
-      rows[row][1] = el.orientation || '';
-      rows[row][2] = asNumber(el.area, 0);
-      rows[row][3] = el.uValue;
-      rows[row][4] = el.description || '';
-      row++;
-    }
-  } else {
-    rows[row][0] = 'Partition';
-    rows[row][2] = partitionArea;
-    row++;
-  }
-  // Roof
-  const roofElements = record.elements.filter(e => e.type === 'Roof');
-  if (roofElements.length > 0) {
-    for (const el of roofElements) {
-      rows[row][0] = 'Roof';
-      rows[row][1] = el.orientation || '';
-      rows[row][2] = asNumber(el.area, 0);
-      rows[row][3] = el.uValue;
-      rows[row][4] = el.description || '';
-      row++;
-    }
-  } else {
-    rows[row][0] = 'Roof';
-    rows[row][2] = roofArea;
-    row++;
-  }
-  // Floor
-  const floorElements = record.elements.filter(e => e.type === 'Floor');
-  if (floorElements.length > 0) {
-    for (const el of floorElements) {
-      rows[row][0] = 'Floor';
-      rows[row][1] = el.orientation || '';
-      rows[row][2] = asNumber(el.area, 0);
-      rows[row][3] = el.uValue;
-      rows[row][4] = el.description || '';
-      row++;
-    }
-  } else {
-    rows[row][0] = 'Floor';
-    rows[row][2] = floorArea;
-    row++;
-  }
-
-  rows[45][0] = 'SELECTED EQUIPMENT';
-  rows[46][0] = 'MODEL';
-  rows[46][1] = 'TR';
-  rows[46][2] = 'CFM';
-  rows[46][3] = 'QTY';
-  rows[46][4] = 'TOTAL TR';
-  rows[46][5] = 'TOTAL CFM';
-  rows[47][0] = String(room?.selectedIdModel || room?.iduModel || '');
-  rows[47][1] = asNumber(room?.selectedIdTR || room?.iduTR, 0);
-  rows[47][2] = asNumber(room?.selectedIdCFM || room?.iduCFM, 0);
-  rows[47][3] = asNumber(room?.selectedIdQty || room?.iduQty, 0);
-  rows[48][0] = '';
-  rows[49][0] = '';
-  rows[50][0] = 'TOTAL';
-  rows[51][0] = 'IDU Configuration';
-
-  const wsRoom2 = XLSX.utils.aoa_to_sheet(rows);
-
-  wsRoom2['!cols'] = [
-    { wch: 24 },
-    { wch: 16 },
-    { wch: 12 },
-    { wch: 16 },
-    { wch: 24 },
-    { wch: 16 },
-    { wch: 12 },
-    { wch: 20 },
+  // ── Project header ─────────────────────────────────────────────────────────
+  const hdrFields: [string, any, string, any, string, any][] = [
+    ['Project', safeStr(record.room?._projectName || project?.name), 'Location', safeStr(project?.location || project?.place), 'Date', fmtDate()],
+    ['System',  record.systemName,   'Zone',         record.zoneName,  'Floor', safeStr(record.room?.floor)],
+    ['Room',    safeStr(record.room?.name), 'Prepared By', safeStr(project?.engineerName || project?.estimatedBy, 'Design Engineer'), 'Peak Load', safeStr(project?.peakLoadTime, 'April — 16:00 hrs')],
   ];
-  wsRoom2['!merges'] = [
-    { s: { r: 0, c: 0 }, e: { r: 0, c: 7 } },
-    { s: { r: 5, c: 0 }, e: { r: 5, c: 6 } },
-    { s: { r: 13, c: 0 }, e: { r: 13, c: 2 } },
-    { s: { r: 23, c: 0 }, e: { r: 23, c: 2 } },
-    ...(project?.includeMonsoon ? [{ s: { r: 23, c: 4 }, e: { r: 23, c: 6 } }] : []),
-    { s: { r: 37, c: 0 }, e: { r: 37, c: 2 } },
-    { s: { r: 45, c: 0 }, e: { r: 45, c: 5 } },
-    { s: { r: 51, c: 1 }, e: { r: 51, c: 5 } },
+  for (const [k1, v1, k2, v2, k3, v3] of hdrFields) {
+    putV(ws, row, 1, k1, S.label); putV(ws, row, 2, v1, S.calc);
+    putV(ws, row, 4, k2, S.label); putV(ws, row, 5, v2, S.calc);
+    putV(ws, row, 8, k3, S.label); putV(ws, row, 9, v3, S.calc);
+    row++;
+  }
+  row++;
+
+  // ── Design Conditions ──────────────────────────────────────────────────────
+  addMerge(ws, row, 1, row, COLS);
+  putV(ws, row, 1, 'DESIGN CONDITIONS', S.secHdr);
+  row++;
+
+  const dcHdrs = ['Parameter', 'Summer\nOutdoor', 'Summer\nIndoor', 'Diff', 'Monsoon\nOutdoor', 'Monsoon\nIndoor', 'Diff', 'Winter\nOutdoor', 'Winter\nIndoor', 'Diff'];
+  dcHdrs.forEach((h, i) => putV(ws, row, i + 1, h, S.tableHdr));
+  row++;
+  const dcStart = row;
+
+  const sumP  = getProjectPsychro(project, 'summer');
+  const monP  = getProjectPsychro(project, 'monsoon');
+  const wODB  = asNum(project?.winterDesignTemp, 50);
+  const wORH  = asNum(project?.winterDesignHumidity, 80);
+  const wIDB  = asNum(project?.insideWinterTemp,  72);
+  const wIRH  = asNum(project?.insideWinterHumidity, 40);
+  const wOut  = calculatePsychrometrics(wODB, wORH, asNum(project?.altitude));
+  const wIn   = calculatePsychrometrics(wIDB, wIRH, asNum(project?.altitude));
+  const wOGR  = r2(toGR(wOut.humidityRatio));
+  const wIGR  = r2(toGR(wIn.humidityRatio));
+
+  type DCRow = [string, any, any, any, any, any, any, any, any, any];
+  const dcRows: DCRow[] = [
+    ['DB (°F)',           sumP.outside.db, sumP.inside.db, sumP.outside.db - sumP.inside.db, monP.outside.db, monP.inside.db, monP.outside.db - monP.inside.db, wODB, wIDB, wODB - wIDB],
+    ['% RH',             sumP.outside.rh, sumP.inside.rh, sumP.outside.rh - sumP.inside.rh, monP.outside.rh, monP.inside.rh, monP.outside.rh - monP.inside.rh, wORH, wIRH, wORH - wIRH],
+    ['Enthalpy (BTU/lb)', sumP.outside.th, sumP.inside.th, r2(sumP.outside.th - sumP.inside.th), monP.outside.th, monP.inside.th, r2(monP.outside.th - monP.inside.th), r2(wOut.enthalpy), r2(wIn.enthalpy), r2(wOut.enthalpy - wIn.enthalpy)],
+    ['GR/LB',            sumP.outside.gr, sumP.inside.gr, r2(sumP.outside.gr - sumP.inside.gr), monP.outside.gr, monP.inside.gr, r2(monP.outside.gr - monP.inside.gr), wOGR, wIGR, r2(wOGR - wIGR)],
+  ];
+  for (const [p, ...vals] of dcRows) {
+    putV(ws, row, 1, p, S.label);
+    vals.forEach((v, i) => putV(ws, row, i + 2, incMon || i < 2 ? v : (i >= 3 && i <= 5) ? '—' : v, S.calcC));
+    row++;
+  }
+  addBorders(ws, dcStart, 1, row - 1, COLS);
+  row++;
+
+  // ── Room Inputs ────────────────────────────────────────────────────────────
+  addMerge(ws, row, 1, row, 3);
+  putV(ws, row, 1, 'ROOM INPUTS', S.secHdr);
+  row++;
+  putV(ws, row, 1, 'Parameter', S.tableHdr);
+  putV(ws, row, 2, 'Value', S.tableHdr);
+  putV(ws, row, 3, 'Unit', S.tableHdr);
+  row++;
+  const inputStart = row;
+
+  // Record cell addresses for cross-sheet refs
+  const areaCell          = rc(row,   2); putV(ws, row, 1, 'Floor Area',                S.label); putV(ws, row, 2, r2(record.summer.area),          S.input); putV(ws, row, 3, 'Sq.Ft', S.calc); row++;
+  const heightCell        = rc(row,   2); putV(ws, row, 1, 'Ceiling Height',             S.label); putV(ws, row, 2, asNum(record.room?.height, 0),   S.input); putV(ws, row, 3, 'Ft',    S.calc); row++;
+  const falseCeilingCell  = rc(row,   2); putV(ws, row, 1, 'False Ceiling Height',       S.label); putV(ws, row, 2, asNum(record.room?.falseCeilingHeight, 0), S.input); putV(ws, row, 3, 'Ft', S.calc); row++;
+  const occupancyCell     = rc(row,   2); putV(ws, row, 1, 'Occupancy',                  S.label); putV(ws, row, 2, asNum(record.room?.peopleCount, 0), S.input); putV(ws, row, 3, 'Persons', S.calc); row++;
+  const freshAirCell      = rc(row,   2); putV(ws, row, 1, 'Ventilation / Fresh Air',    S.label); putV(ws, row, 2, r0(record.summer.ventCfm),       S.input); putV(ws, row, 3, 'CFM',  S.calc); row++;
+  const lightingCell      = rc(row,   2); putV(ws, row, 1, 'Lighting Load',               S.label); putV(ws, row, 2, asNum(record.room?.lightsWattsPerSqft, 0), S.input); putV(ws, row, 3, 'W/Sq.Ft', S.calc); row++;
+  const equipKwCell       = rc(row,   2); putV(ws, row, 1, 'Equipment + Other Load',     S.label); putV(ws, row, 2, r2(asNum(record.room?.equipmentKW, 0) + asNum(record.room?.othersKW, 0)), S.input); putV(ws, row, 3, 'kW', S.calc); row++;
+  putV(ws, row, 1, 'Activity Type', S.label); putV(ws, row, 2, safeStr(record.room?.activityType, 'office'), S.input); row++;
+
+  addBorders(ws, inputStart, 1, row - 1, 3);
+  row++;
+
+  // ── Building Envelope ──────────────────────────────────────────────────────
+  addMerge(ws, row, 1, row, 5);
+  putV(ws, row, 1, 'BUILDING ENVELOPE', S.secHdr);
+  row++;
+  ['Type', 'Orientation', 'Area (Sq.Ft)', 'U-Value\n(BTU/h·ft²·°F)', 'Description'].forEach((h, i) => putV(ws, row, i + 1, h, S.tableHdr));
+  row++;
+  const envStart = row;
+
+  if (record.elements.length === 0) {
+    addMerge(ws, row, 1, row, 5);
+    putV(ws, row, 1, 'No envelope elements defined for this room.', S.note);
+    row++;
+  } else {
+    const typeOrder = ['Wall', 'Glass', 'Roof', 'Floor', 'Partition'];
+    const sorted = [...record.elements].sort((a, b) => typeOrder.indexOf(a.type) - typeOrder.indexOf(b.type));
+    for (const el of sorted) {
+      putV(ws, row, 1, el.type, S.calc);
+      putV(ws, row, 2, safeStr(el.orientation, '—'), S.calcC);
+      putV(ws, row, 3, r2(asNum(el.area, 0)), S.calcC);
+      putV(ws, row, 4, r2(asNum(el.uValue, 0)), S.calcC);
+      putV(ws, row, 5, safeStr(el.description), S.calc);
+      row++;
+    }
+  }
+  addBorders(ws, envStart, 1, row - 1, 5);
+  row++;
+
+  // ── Cooling Load Analysis (Summer | Monsoon | Winter side-by-side) ──────────
+  addMerge(ws, row, 1, row, COLS);
+  putV(ws, row, 1, 'COOLING & HEATING LOAD ANALYSIS', S.tealHdr);
+  row++;
+
+  // Sub-headers
+  addMerge(ws, row, 1, row, 1); putV(ws, row, 1, 'Load Component', S.tableHdr);
+  addMerge(ws, row, 2, row, 3); putV(ws, row, 2, 'SUMMER', S.amberHdr);
+  addMerge(ws, row, 4, row, 4); putV(ws, row, 4, '', S.tableHdr);
+  addMerge(ws, row, 5, row, 7); putV(ws, row, 5, incMon ? 'MONSOON' : 'MONSOON (N/A)', mkS({ sz: 9, bold: true, color: { rgb: CLR.blueFg } }, incMon ? CLR.blueBg : 'AAAAAA', { horizontal: 'center' }));
+  addMerge(ws, row, 8, row, COLS); putV(ws, row, 8, 'WINTER HEATING', S.purpleHdr);
+  row++;
+
+  putV(ws, row, 1, 'Component', S.tableHdr);
+  putV(ws, row, 2, 'Value', S.tableHdr); putV(ws, row, 3, 'Unit', S.tableHdr);
+  putV(ws, row, 4, '', S.tableHdr);
+  putV(ws, row, 5, 'Value', S.tableHdr); putV(ws, row, 6, 'Unit', S.tableHdr); putV(ws, row, 7, '', S.tableHdr);
+  putV(ws, row, 8, 'Component', S.tableHdr);
+  putV(ws, row, 9, 'Value', S.tableHdr); putV(ws, row, 10, 'Unit', S.tableHdr);
+  row++;
+  const calcStart = row;
+
+  type CalcRow = [string, number, number | null, string, number, string];
+  const calcRows: CalcRow[] = [
+    ['Envelope Sensible',       record.summer.envelopeSensible, record.monsoon?.envelopeSensible ?? null, 'Envelope Sensible', record.winter.envelope, 'BTU/h'],
+    ['Internal Sensible',       record.summer.internalSensible, record.monsoon?.internalSensible ?? null, 'Internal Sensible', record.winter.internal, 'BTU/h'],
+    ['Ventilation Sensible',    record.summer.ventSensible,     record.monsoon?.ventSensible ?? null,     'Ventilation Sensible', record.winter.vent, 'BTU/h'],
+    ['Ventilation Latent',      record.summer.ventLatent,       record.monsoon?.ventLatent ?? null,       '', 0, ''],
+    ['Duct Gain',               record.summer.ductGain,         record.monsoon?.ductGain ?? null,         '', 0, ''],
+    ['Fan Gain',                record.summer.fanGain,          record.monsoon?.fanGain ?? null,          '', 0, ''],
+    ['ERSH (Eff. Room Sensible)',record.summer.ersh,             record.monsoon?.ersh ?? null,             '', 0, ''],
+    ['ERLH (Eff. Room Latent)', record.summer.erlh,             record.monsoon?.erlh ?? null,             '', 0, ''],
+    ['Coil Sensible',           record.summer.coilSensible,     record.monsoon?.coilSensible ?? null,     '', 0, ''],
+    ['Coil Latent',             record.summer.coilLatent,       record.monsoon?.coilLatent ?? null,       '', 0, ''],
+    ['Grand Total (BTUh)',       record.summer.grandTotal,       record.monsoon?.grandTotal ?? null,       'Total Heating Load', record.winter.total, 'BTU/h'],
   ];
 
-  setFormulaCell(wsRoom2, 'E48', 'B48*D48');
-  setFormulaCell(wsRoom2, 'F48', 'C48*D48');
-  setFormulaCell(wsRoom2, 'E49', 'B49*D49');
-  setFormulaCell(wsRoom2, 'F49', 'C49*D49');
-  setFormulaCell(wsRoom2, 'E50', 'SUM(E47:E49)');
-  setFormulaCell(wsRoom2, 'F50', 'SUM(F47:F49)');
-  setFormulaCell(wsRoom2, 'B52', 'TEXTJOIN("; ",TRUE,IF(A47<>"",A47&" + "&TEXT(B47,"0.00")&" TR + "&TEXT(C47,"0")&" CFM + Qty "&TEXT(D47,"0"),""),IF(A48<>"",A48&" + "&TEXT(B48,"0.00")&" TR + "&TEXT(C48,"0")&" CFM + Qty "&TEXT(D48,"0"),""),IF(A49<>"",A49&" + "&TEXT(B49,"0.00")&" TR + "&TEXT(C49,"0")&" CFM + Qty "&TEXT(D49,"0"),""))', 'str');
-  setFormulaCell(wsRoom2, 'B53', `MAX(B35,${record.monsoon ? 'F35' : '0'})`);
-
-  setStyle(wsRoom2, 'A1', style.title);
-  // Bold all table headers
-  ['A6', 'A14', 'A24', 'A38', 'A46', 'A7', 'B7', 'C7', 'D7', 'E7', 'F7', 'G7', 'A15', 'B15', 'C15', 'A25', 'B25', 'C25', 'A39', 'B39', 'C39', 'A47', 'B47', 'C47', 'D47', 'E47', 'F47',
-    'A24', 'B24', 'C24', 'E24', 'F24', 'G24', 'H24', 'I24', 'J24', 'A25', 'B25', 'C25', 'E25', 'F25', 'G25', 'H25', 'I25', 'J25',
-    'A38', 'B38', 'C38', 'D38', 'E38',
-    'A46', 'B46', 'C46', 'D46', 'E46', 'F46',
-    'A37', 'B37', 'C37', 'D37', 'E37',
-    'A14', 'B14', 'C14',
-  ].forEach((address) => setStyle(wsRoom2, address, style.header));
-  if (project?.includeMonsoon) {
-    ['E25', 'F25', 'G25'].forEach((address) => setStyle(wsRoom2, address, style.header));
-  }
-  ['B16', 'B17', 'B18', 'B19', 'B20', 'B21'].forEach((address) => setStyle(wsRoom2, address, style.input));
-  ['B26', 'B27', 'B28', 'B29', 'B30', 'B31', 'B32', 'B33', 'B34', 'B35', 'B36', 'B37'].forEach((address) => setStyle(wsRoom2, address, style.calc));
-  if (project?.includeMonsoon) {
-    ['F26', 'F27', 'F28', 'F29', 'F30', 'F31', 'F32', 'F33', 'F34', 'F35'].forEach((address) => setStyle(wsRoom2, address, style.calc));
+  for (const [comp, sv, mv, wcomp, wv, wu] of calcRows) {
+    const isBold = comp.startsWith('Grand') || comp.startsWith('ERSH') || comp.startsWith('ERLH');
+    const sty = isBold ? S.total : S.calc;
+    putV(ws, row, 1, comp, isBold ? S.label : S.calc);
+    putV(ws, row, 2, r0(sv), sty); putV(ws, row, 3, 'BTU/h', sty);
+    putV(ws, row, 4, '');
+    putV(ws, row, 5, incMon && mv !== null ? r0(mv) : '—', sty);
+    putV(ws, row, 6, incMon && mv !== null ? 'BTU/h' : '', sty);
+    putV(ws, row, 7, '');
+    putV(ws, row, 8, wcomp, wcomp ? S.label : S.calc);
+    putV(ws, row, 9, wcomp && wv ? r0(wv) : '', wcomp ? S.total : S.calc);
+    putV(ws, row, 10, wu, S.calc);
+    row++;
   }
 
-  applyBorderRange(wsRoom2, 7, 11, 1, project?.includeMonsoon ? 7 : 4);
-  applyBorderRange(wsRoom2, 15, 22, 1, 3);
-  applyBorderRange(wsRoom2, 25, 36, 1, 3);
-  if (project?.includeMonsoon) {
-    applyBorderRange(wsRoom2, 25, 35, 5, 7);
-  }
-  applyBorderRange(wsRoom2, 39, 43, 1, 3);
-  applyBorderRange(wsRoom2, 47, 50, 1, 6);
+  // Sizing rows
+  const sumTR  = r2(record.summer.totalTR);
+  const monTR  = record.monsoon ? r2(record.monsoon.totalTR) : null;
+  const sumCFM = r0(record.summer.designSupplyCFM);
+  const monCFM = record.monsoon ? r0(record.monsoon.designSupplyCFM) : null;
 
-  if (!project?.includeMonsoon) {
-    wsRoom2['!cols']![4].hidden = true;
-    wsRoom2['!cols']![5].hidden = true;
-    wsRoom2['!cols']![6].hidden = true;
-  }
+  const sumTRcell  = rc(row, 2);
+  const sumCFMcell = rc(row + 1, 2);
+  const monTRcell  = rc(row, 5);
+  const monCFMcell = rc(row + 1, 5);
 
-  wsRoom2['!margins'] = {
-    left: 0.25,
-    right: 0.25,
-    top: 0.5,
-    bottom: 0.5,
-    header: 0.25,
-    footer: 0.25,
-  };
-  (wsRoom2 as any)['!pageSetup'] = {
-    paperSize: 9,
-    orientation: 'portrait',
-    fitToWidth: 1,
-    fitToHeight: 1,
-  };
-  (wsRoom2 as any)['!freeze'] = { xSplit: 0, ySplit: 6 };
+  putV(ws, row, 1, 'Cooling Load (TR)',     S.label);
+  putV(ws, row, 2, sumTR,  S.total); putV(ws, row, 3, 'TR', S.total);
+  putV(ws, row, 4, '');
+  putV(ws, row, 5, incMon && monTR !== null ? monTR : '—', S.total);
+  putV(ws, row, 6, incMon ? 'TR' : '', S.total);
+  row++;
+
+  putV(ws, row, 1, 'Design Supply CFM',    S.label);
+  putV(ws, row, 2, sumCFM, S.total); putV(ws, row, 3, 'CFM', S.total);
+  putV(ws, row, 4, '');
+  putV(ws, row, 5, incMon && monCFM !== null ? monCFM : '—', S.total);
+  putV(ws, row, 6, incMon ? 'CFM' : '', S.total);
+  row++;
+
+  // Governing TR (key result — typed as value, not formula, to guarantee correctness)
+  const govTRcell = rc(row, 2);
+  putV(ws, row, 1, 'Governing TR  [MAX(Load TR, CFM ÷ 400)]', S.label);
+  putV(ws, row, 2, r2(record.governingTR), S.total);
+  putV(ws, row, 3, 'TR', S.total);
+  addMerge(ws, row, 4, row, COLS);
+  putV(ws, row, 4, `Summer: MAX(${sumTR} TR, ${sumCFM}/400 = ${r2(sumCFM / 400)} TR)${incMon && monCFM ? `  |  Monsoon: MAX(${monTR} TR, ${monCFM}/400 = ${r2(monCFM / 400)} TR)` : ''}`, S.note);
+  row++;
+
+  // Winter total ref cell
+  const winterLoadCell = rc(row - (calcRows.length + 3), 9); // points back to "Total Heating Load" row
+  // Recalculate correct winterLoadCell
+  const winterLoadRow = calcStart + calcRows.length - 1; // last calc row (Grand Total) has winter
+  const winterLoadCellFix = rc(winterLoadRow, 9);
+
+  addBorders(ws, calcStart, 1, row - 1, COLS);
+  row++;
+
+  // IDU config summary cell (text — populated from equipment section below)
+  const iduConfigRow = row + 3; // will be on the TOTAL row of equipment section
+  let iduConfigCell  = rc(iduConfigRow, 2);
+
+  // ── Selected Equipment ─────────────────────────────────────────────────────
+  addMerge(ws, row, 1, row, COLS);
+  putV(ws, row, 1, 'SELECTED / ASSIGNED EQUIPMENT', S.secHdr);
+  row++;
+  ['Type', 'Brand', 'Model / Series', 'TR', 'CFM', 'Qty', 'Total TR', 'Total CFM', 'Notes'].forEach((h, i) => putV(ws, row, i + 1, h, S.tableHdr));
+  row++;
+  const eqStart = row;
+
+  const equip = getRoomEquipment(record.room?.id, equipSystems);
+  if (equip.length === 0) {
+    addMerge(ws, row, 1, row, COLS);
+    putV(ws, row, 1, 'No equipment assigned to this room/zone yet.', S.note);
+    row++;
+  } else {
+    let totalEqTR = 0, totalEqCFM = 0;
+    for (const eq of equip) {
+      const totTR  = r2(eq.tr * eq.qty);
+      const totCFM = r0(eq.cfm * eq.qty);
+      putV(ws, row, 1, eq.role,  S.calc);
+      putV(ws, row, 2, eq.brand, S.calc);
+      putV(ws, row, 3, eq.model, S.calc);
+      putV(ws, row, 4, r2(eq.tr),  S.calcC);
+      putV(ws, row, 5, r0(eq.cfm), S.calcC);
+      putV(ws, row, 6, eq.qty,     S.calcC);
+      putV(ws, row, 7, totTR,      S.calcC);
+      putV(ws, row, 8, totCFM,     S.calcC);
+      putV(ws, row, 9, eq.note,   S.note);
+      totalEqTR  += totTR;
+      totalEqCFM += totCFM;
+      row++;
+    }
+    // Total row
+    putV(ws, row, 1, 'TOTAL', S.total);
+    addMerge(ws, row, 1, row, 6);
+    putV(ws, row, 7, r2(totalEqTR),  S.total);
+    putV(ws, row, 8, r0(totalEqCFM), S.total);
+    // Fit check
+    const fitTR  = r2(record.governingTR);
+    const surplus = r2(totalEqTR - record.governingTR);
+    const fitSty = totalEqTR === 0 ? S.calcC : surplus >= -0.1 ? S.ok : S.warn;
+    const fitMsg = totalEqTR === 0 ? 'Not assigned' : surplus >= -0.1 ? `OK ✓ (+${surplus} TR)` : `Undersized ⚠ (${surplus} TR)`;
+    addMerge(ws, row, 9, row, COLS);
+    putV(ws, row, 9, `Required: ${fitTR} TR  |  ${fitMsg}`, fitSty);
+    iduConfigCell = rc(row, 9);
+    row++;
+  }
+  addBorders(ws, eqStart, 1, row - 1, COLS);
+  row++;
+
+  // ── Column widths, print setup ──────────────────────────────────────────────
+  ws['!cols'] = [
+    { wch: 32 }, { wch: 14 }, { wch: 10 }, { wch: 4 },
+    { wch: 14 }, { wch: 14 }, { wch: 4 },
+    { wch: 24 }, { wch: 14 }, { wch: 10 },
+  ];
+  ws['!margins'] = { left: 0.3, right: 0.3, top: 0.5, bottom: 0.5, header: 0.25, footer: 0.25 };
+  (ws as any)['!pageSetup'] = { paperSize: 9, orientation: 'landscape', fitToWidth: 1, fitToHeight: 0 };
+  (ws as any)['!freeze'] = { xSplit: 0, ySplit: 2 };
+  setRef(ws, row + 1, COLS);
 
   return {
-    ws: wsRoom2,
+    ws,
     refs: {
-      sheetName: record.sheetName,
-      zoneName: record.zoneName,
-      systemName: record.systemName,
-      roomName: room?.name || '',
-      floorName: room?.floor || '',
-      areaCell: 'B16',
-      heightCell: 'B18',
-      falseCeilingCell: 'B19',
-      freshAirCell: 'B21',
-      occupancyCell: 'B20',
-      electricalCell: 'B22',
-      summerTrCell: 'B35',
-      summerCfmCell: 'B36',
-      monsoonTrCell: record.monsoon ? 'F35' : undefined,
-      monsoonCfmCell: record.monsoon ? 'F36' : undefined,
-      winterLoadCell: 'B37',
-      governingTrCell: 'B53',
-      iduConfigCell: 'B52',
+      sheetName:        record.sheetName,
+      zoneName:         record.zoneName,
+      systemName:       record.systemName,
+      roomName:         safeStr(record.room?.name),
+      floorName:        safeStr(record.room?.floor),
+      areaCell,
+      heightCell,
+      falseCeilingCell,
+      freshAirCell,
+      occupancyCell,
+      lightingCell,
+      equipKwCell,
+      summerTrCell:     sumTRcell,
+      summerCfmCell:    sumCFMcell,
+      monsoonTrCell:    incMon ? monTRcell : undefined,
+      monsoonCfmCell:   incMon ? monCFMcell : undefined,
+      winterLoadCell:   winterLoadCellFix,
+      governingTrCell:  govTRcell,
+      iduConfigCell,
     },
   };
-};
+}
 
-const buildSummarySheet = (project: any, roomRefs: RoomSheetRefs[], withHeavyFormatting: boolean) => {
-  void withHeavyFormatting;
-  const includeMonsoon = !!project?.includeMonsoon;
-  const rows: any[][] = [];
-
-  rows.push([`HEAT LOAD SUMMARY SHEET - ${String(project?.name || 'PROJECT').toUpperCase()}`, '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', 'DATE', formatDate()]);
-  rows.push(['Filter the table below by System and Zone to review grouped rooms.', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '']);
-  rows.push([]);
-  rows.push([
-    'Sr.No.',
-    'Zone',
-    'Room Name',
-    'Floor',
-    'Area (Sq.Ft)',
-    'Total Height (FT)',
-    'False Ceiling Height (FT)',
-    'Fresh Air (CFM)',
-    'Occupancy (Nos.)',
-    'Electrical Load',
-    'Summer TR',
-    'Summer CFM',
-    ...(includeMonsoon ? ['Monsoon TR', 'Monsoon CFM'] : []),
-    'Winter Load (BTU/h)',
-    'Governing TR',
-    'IDU Configuration',
-  ]);
-
-  roomRefs.forEach((ref, index) => {
-    rows.push([
-      index + 1,
-      ref.zoneName,
-      ref.roomName,
-      ref.floorName,
-      0,
-      0,
-      0,
-      0,
-      0,
-      '',
-      0,
-      0,
-      ...(includeMonsoon ? [0, 0] : []),
-      0,
-      0,
-      '',
-    ]);
-  });
-
-  rows.push([
-    'TOTAL',
-    '',
-    '',
-    '',
-    '',
-    0,
-    '',
-    '',
-    0,
-    0,
-    '',
-    0,
-    0,
-    ...(includeMonsoon ? [0, 0] : []),
-    0,
-    0,
-    '',
-  ]);
-
-  rows.push([]);
-  rows.push(['ASSUMPTIONS']);
-  rows.push(['1. Inside Condition: 25C ± 1C, RH ~55%']);
-  rows.push(['2. Outside Condition: DB 38C, WB 31C']);
-  rows.push(['3. Lighting Load: 0.5 Watts/Sq.ft']);
-  rows.push(['4. Fresh Air: 0.5 ACH or 7.5 CFM per person, whichever is higher']);
-  rows.push(['5. Equipment Load: as per details provided by Consultant/Customer']);
-  rows.push(['6. Drawing Reference: Drawing provided by customer']);
-  rows.push(['7. Exposed Glass: Single pane with venetian blind or roller shade, light color (U Value = 0.56 Btu/Hr/sq.ft/F)']);
-  rows.push(['8. Floor above is air-conditioned']);
-  rows.push([`9. Activity Hours: ${String(project?.activityHours || '9 AM to 1:30 PM')}`]);
-
-  const wsSummary = XLSX.utils.aoa_to_sheet(rows);
-  wsSummary['!cols'] = [
-    { wch: 8 },
-    { wch: 20 },
-    { wch: 20 },
-    { wch: 22 },
-    { wch: 12 },
-    { wch: 14 },
-    { wch: 14 },
-    { wch: 18 },
-    { wch: 14 },
-    { wch: 14 },
-    { wch: 24 },
-    { wch: 12 },
-    { wch: 12 },
-    ...(includeMonsoon ? [{ wch: 12 }, { wch: 12 }] : []),
-    { wch: 16 },
-    { wch: 12 },
-    { wch: 44 },
-  ];
-
-  wsSummary['!merges'] = [
-    { s: { r: 0, c: 0 }, e: { r: 0, c: 15 } },
-    { s: { r: 1, c: 0 }, e: { r: 1, c: 16 } },
-  ];
-
-  roomRefs.forEach((ref, index) => {
-    const row = index + 5;
-    setFormulaCell(wsSummary, `E${row}`, sheetRef(ref.sheetName, ref.areaCell));
-    setFormulaCell(wsSummary, `F${row}`, sheetRef(ref.sheetName, ref.heightCell));
-    setFormulaCell(wsSummary, `G${row}`, sheetRef(ref.sheetName, ref.falseCeilingCell));
-    setFormulaCell(wsSummary, `H${row}`, sheetRef(ref.sheetName, ref.freshAirCell));
-    setFormulaCell(wsSummary, `I${row}`, sheetRef(ref.sheetName, ref.occupancyCell));
-    setFormulaCell(wsSummary, `J${row}`, sheetRef(ref.sheetName, ref.electricalCell), 'str');
-    setFormulaCell(wsSummary, `K${row}`, `ROUND(${sheetRef(ref.sheetName, ref.summerTrCell)},2)`);
-    setFormulaCell(wsSummary, `L${row}`, `ROUND(${sheetRef(ref.sheetName, ref.summerCfmCell)},0)`);
-    const monsoonTrCol = includeMonsoon ? 'M' : null;
-    const monsoonCfmCol = includeMonsoon ? 'N' : null;
-    const winterCol = includeMonsoon ? 'O' : 'M';
-    const governingCol = includeMonsoon ? 'P' : 'N';
-    const iduCol = includeMonsoon ? 'Q' : 'O';
-
-    if (monsoonTrCol && monsoonCfmCol) {
-      setFormulaCell(wsSummary, `${monsoonTrCol}${row}`, ref.monsoonTrCell ? `ROUND(${sheetRef(ref.sheetName, ref.monsoonTrCell)},2)` : '0');
-      setFormulaCell(wsSummary, `${monsoonCfmCol}${row}`, ref.monsoonCfmCell ? `ROUND(${sheetRef(ref.sheetName, ref.monsoonCfmCell)},0)` : '0');
-    }
-    setFormulaCell(wsSummary, `${winterCol}${row}`, `ROUND(${sheetRef(ref.sheetName, ref.winterLoadCell)},0)`);
-    setFormulaCell(wsSummary, `${governingCol}${row}`, `ROUND(${sheetRef(ref.sheetName, ref.governingTrCell)},2)`);
-    setFormulaCell(wsSummary, `${iduCol}${row}`, sheetRef(ref.sheetName, ref.iduConfigCell), 'str');
-  });
-
-  const totalRow = roomRefs.length + 5;
-  setFormulaCell(wsSummary, `F${totalRow}`, `SUM(F5:F${totalRow - 1})`);
-  setFormulaCell(wsSummary, `I${totalRow}`, `SUM(I5:I${totalRow - 1})`);
-  setFormulaCell(wsSummary, `J${totalRow}`, `SUM(J5:J${totalRow - 1})`);
-  setFormulaCell(wsSummary, `L${totalRow}`, `SUM(L5:L${totalRow - 1})`);
-  setFormulaCell(wsSummary, `M${totalRow}`, `SUM(M5:M${totalRow - 1})`);
-  if (includeMonsoon) {
-    setFormulaCell(wsSummary, `N${totalRow}`, `SUM(N5:N${totalRow - 1})`);
-    setFormulaCell(wsSummary, `O${totalRow}`, `SUM(O5:O${totalRow - 1})`);
-    setFormulaCell(wsSummary, `P${totalRow}`, `SUM(P5:P${totalRow - 1})`);
-    setFormulaCell(wsSummary, `Q${totalRow}`, `SUM(Q5:Q${totalRow - 1})`);
-  } else {
-    setFormulaCell(wsSummary, `N${totalRow}`, `SUM(N5:N${totalRow - 1})`);
-    setFormulaCell(wsSummary, `O${totalRow}`, `SUM(O5:O${totalRow - 1})`);
-  }
-
-  const lastCol = includeMonsoon ? 'R' : 'P';
-  wsSummary['!autofilter'] = { ref: `A4:${lastCol}${totalRow}` };
-  (wsSummary as any)['!freeze'] = { xSplit: 0, ySplit: 4 };
-
-  setStyle(wsSummary, 'A1', style.title);
-  setStyle(wsSummary, 'A2', style.calc);
-  const colCount = includeMonsoon ? 18 : 16;
-  for (let c = 1; c <= colCount; c += 1) {
-    setStyle(wsSummary, XLSX.utils.encode_cell({ r: 3, c: c - 1 }), style.header);
-  }
-  applyBorderRange(wsSummary, 4, totalRow, 1, colCount);
-  for (let c = 1; c <= colCount; c += 1) {
-    setStyle(wsSummary, XLSX.utils.encode_cell({ r: totalRow - 1, c: c - 1 }), style.section);
-  }
-  setStyle(wsSummary, `A${totalRow + 2}`, style.section);
-
-  wsSummary['!margins'] = {
-    left: 0.25,
-    right: 0.25,
-    top: 0.5,
-    bottom: 0.5,
-    header: 0.25,
-    footer: 0.25,
-  };
-  (wsSummary as any)['!pageSetup'] = {
-    paperSize: 8,
-    orientation: 'landscape',
-    fitToWidth: 1,
-    fitToHeight: 0,
-  };
-
-  return wsSummary;
-};
+// ─── Main export ──────────────────────────────────────────────────────────────
 
 export const generateExcelReport = (
   project: any,
@@ -1148,38 +1452,65 @@ export const generateExcelReport = (
   zones: any[],
   rooms: Record<string, any[]>,
   envelopeElements: Record<string, EnvelopeElement[]>,
+  equipSystems?: any[],
+  userProfile?: any,
 ) => {
   const wb = XLSX.utils.book_new();
-  const roomRecords = toRoomRecords(project, systems, zones, rooms, envelopeElements);
-  const roomRefs: RoomSheetRefs[] = [];
-  const withHeavyFormatting = true;
+  const eq = equipSystems ?? [];
+  const records = toRoomRecords(project, systems, zones, rooms, envelopeElements);
+  const refs: RoomSheetRefs[] = [];
 
-  roomRecords.forEach((record) => {
-    const { ws, refs } = buildRoomSheet(project, record, withHeavyFormatting);
-    XLSX.utils.book_append_sheet(wb, ws, record.sheetName);
-    roomRefs.push(refs);
-  });
+  // Build room sheets first (their cell refs are needed by Load Summary)
+  const roomSheets: { ws: XLSX.WorkSheet; sheetName: string }[] = [];
+  for (const rec of records) {
+    const { ws, refs: r } = buildRoomSheet(project, rec, eq);
+    roomSheets.push({ ws, sheetName: rec.sheetName });
+    refs.push(r);
+  }
 
-  const summarySheet = buildSummarySheet(project, roomRefs, withHeavyFormatting);
-  XLSX.utils.book_append_sheet(wb, summarySheet, 'Summary Sheet');
+  // Add fixed sheets in order
+  XLSX.utils.book_append_sheet(wb, buildCoverSheet(project, records, eq, userProfile), 'Cover');
+  XLSX.utils.book_append_sheet(wb, buildDesignConditionsSheet(project), 'Design Conditions');
+  XLSX.utils.book_append_sheet(wb, buildZoneSummarySheet(project, records, eq), 'Zone Summary');
+  XLSX.utils.book_append_sheet(wb, buildEquipmentScheduleSheet(project, eq, rooms), 'Equipment Schedule');
+  XLSX.utils.book_append_sheet(wb, buildSummarySheet(project, refs), 'Load Summary');
 
-  const excelBuffer = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
-  const data = new Blob([excelBuffer], {
-    type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-  });
+  // Add room sheets
+  for (const { ws, sheetName } of roomSheets) {
+    XLSX.utils.book_append_sheet(wb, ws, sheetName);
+  }
 
-  const projectName = String(project?.name || 'Project')
-    .trim()
-    .replace(/\s+/g, '_')
-    .replace(/[^A-Za-z0-9_-]/g, '');
+  // Tab colours (supported by Excel 2010+, silently ignored elsewhere)
+  (wb as any).Workbook = {
+    Sheets: [
+      { Hidden: 0 as 0, TabColor: { rgb: '4472C4' } }, // Cover
+      { Hidden: 0 as 0, TabColor: { rgb: '2E75B6' } }, // Design Conditions
+      { Hidden: 0 as 0, TabColor: { rgb: '375623' } }, // Zone Summary
+      { Hidden: 0 as 0, TabColor: { rgb: '7030A0' } }, // Equipment Schedule
+      { Hidden: 0 as 0, TabColor: { rgb: 'C55A11' } }, // Load Summary
+      ...roomSheets.map(() => ({ Hidden: 0 as 0, TabColor: { rgb: '1F4E79' } })),
+    ],
+  };
 
-  const fileName = `VRF_HEAT_LOAD_${projectName}_${formatDateForFileName()}.xlsx`;
-  const url = window.URL.createObjectURL(data);
-  const link = document.createElement('a');
-  link.href = url;
-  link.setAttribute('download', fileName);
-  document.body.appendChild(link);
-  link.click();
-  document.body.removeChild(link);
+  // File name — use actual system type instead of hardcoded VRF
+  const sysLabel = (() => {
+    const types = [...new Set((eq as any[]).map((s: any) => safeStr(s.type)).filter(Boolean))];
+    if (types.length === 0) return 'HVAC';
+    if (types.length === 1) return types[0];
+    return 'MULTI_SYS';
+  })();
+
+  const projSlug = safeStr(project?.name, 'Project').trim().replace(/\s+/g, '_').replace(/[^A-Za-z0-9_-]/g, '');
+  const fileName = `${sysLabel}_HEAT_LOAD_${projSlug}_${fmtDateFile()}.xlsx`;
+
+  const buf  = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
+  const blob = new Blob([buf], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+  const url  = window.URL.createObjectURL(blob);
+  const a    = document.createElement('a');
+  a.href = url;
+  a.setAttribute('download', fileName);
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
   window.URL.revokeObjectURL(url);
-}
+};

@@ -16,8 +16,13 @@ import {
   Wind,
   Droplets,
   BookOpen,
+  Layers,
+  Sun,
+  Moon,
+  Thermometer,
 } from 'lucide-react';
 import { useState } from 'react';
+import { useTheme } from '../hooks/useTheme';
 
 interface AppLayoutProps {
   children: ReactNode;
@@ -39,6 +44,7 @@ export default function AppLayout({
   userRole,
 }: AppLayoutProps) {
   const [sidebarOpen, setSidebarOpen] = useState(true);
+  const { isDark, toggle: toggleTheme } = useTheme();
 
   const handleLogout = async () => {
     try {
@@ -46,63 +52,75 @@ export default function AppLayout({
       onLogout();
     } catch (error) {
       console.error('Logout failed:', error);
-      // Force logout even if signOut fails (e.g., offline / demo mode)
       onLogout();
     }
   };
 
   const menuItems = [
-    { icon: Home, label: 'Dashboard', page: 'dashboard' },
-    { icon: Calculator, label: 'Load Calculator', page: 'calculator' },
-    { icon: Zap, label: 'Cable & MCB Sizing', page: 'cable' },
-    { icon: Wind, label: 'Duct Sizer', page: 'duct' },
-    { icon: Droplets, label: 'Hydronic Pipe Sizer', page: 'pipe' },
-    { icon: Wrench, label: 'Equipment Selection', page: 'equipment' },
-    { icon: FileText, label: 'Material Takeoff', page: 'takeoff' },
-    { icon: FileText, label: 'Reports', page: 'reports' },
-    { icon: Users, label: 'Team', page: 'team' },
-    { icon: BookOpen, label: 'Methodology', page: 'methodology' },
+    { icon: Home,         label: 'Dashboard',          page: 'dashboard' },
+    { icon: Calculator,   label: 'Load Calculator',     page: 'calculator' },
+    { icon: Zap,          label: 'Cable & MCB Sizing',  page: 'cable' },
+    { icon: Wind,         label: 'Duct Sizer',          page: 'duct' },
+    { icon: Droplets,     label: 'Hydronic Pipe Sizer', page: 'pipe' },
+    { icon: Wrench,       label: 'Equipment Selection', page: 'equipment' },
+    { icon: FileText,     label: 'Material Takeoff',    page: 'takeoff' },
+    { icon: Layers,       label: 'U Builder',           page: 'ubuilder' },
+    { icon: FileText,     label: 'Reports',             page: 'reports' },
+    { icon: Users,        label: 'Team',                page: 'team' },
+    { icon: BookOpen,     label: 'Methodology',         page: 'methodology' },
+    { icon: BookOpen,     label: 'User Manual',         page: 'manual' },
   ];
 
-  const visibleMenuItems = menuItems.filter((item) => item.page !== 'team' || userRole === 'Super');
+  const visibleMenuItems = menuItems.filter(
+    (item) => item.page !== 'team' || userRole === 'Super',
+  );
 
   return (
-    <div className="flex h-screen bg-gray-50">
-      {/* Sidebar */}
+    <div className="flex h-screen bg-slate-50 dark:bg-slate-950">
+
+      {/* ── Sidebar ────────────────────────────────────────────── */}
       <aside
         className={`${
           sidebarOpen ? 'w-64' : 'w-16'
-        } bg-gradient-to-b from-blue-900 to-blue-800 text-white shadow-xl transition-all duration-300 flex flex-col`}
+        } bg-gradient-to-b from-slate-900 via-slate-800 to-slate-900 text-white shadow-2xl transition-all duration-300 flex flex-col flex-shrink-0`}
       >
         {/* Logo */}
-        <div className="flex items-center justify-between border-b border-blue-700 p-4">
+        <div className="flex items-center justify-between border-b border-white/10 p-4">
           {sidebarOpen && (
-            <div>
-              <h1 className="text-xl font-bold">HVAC Master</h1>
-              <p className="text-xs text-blue-200">Load Calculator</p>
+            <div className="flex items-center gap-2.5 min-w-0">
+              <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-teal-500 shadow">
+                <Thermometer size={16} className="text-white" />
+              </div>
+              <div>
+                <h1 className="text-[13px] font-bold leading-tight text-white">HVAC Master</h1>
+                <p className="text-[10px] text-slate-400 leading-tight">Load Calculator</p>
+              </div>
             </div>
           )}
           <button
             onClick={() => setSidebarOpen(!sidebarOpen)}
-            className="rounded p-1 hover:bg-blue-700 ml-auto"
+            className="rounded-lg p-1.5 hover:bg-white/10 transition-colors ml-auto"
             aria-label={sidebarOpen ? 'Collapse sidebar' : 'Expand sidebar'}
-            title={sidebarOpen ? 'Collapse sidebar' : 'Expand sidebar'}
           >
-            {sidebarOpen ? <X size={20} /> : <Menu size={20} />}
+            {sidebarOpen ? <X size={18} /> : <Menu size={18} />}
           </button>
         </div>
 
         {/* Active project banner */}
         {activeProject && sidebarOpen && (
-          <div className="mx-3 mt-3 rounded-lg bg-blue-700/60 px-3 py-2">
-            <p className="text-[10px] text-blue-300 uppercase tracking-wider">Active Project</p>
-            <p className="truncate text-sm font-semibold text-white">{activeProject.name}</p>
-            <p className="truncate text-[10px] text-blue-200">{activeProject.systemType}</p>
+          <div className="mx-3 mt-3 rounded-lg border border-teal-500/30 bg-teal-500/10 px-3 py-2">
+            <p className="text-[9px] font-semibold uppercase tracking-widest text-teal-400">
+              Active Project
+            </p>
+            <p className="truncate text-xs font-semibold text-white mt-0.5">{activeProject.name}</p>
+            {activeProject.location && (
+              <p className="truncate text-[10px] text-slate-400">{activeProject.location}</p>
+            )}
           </div>
         )}
 
         {/* Navigation */}
-        <nav className="flex-1 space-y-1 p-3 overflow-y-auto">
+        <nav className="flex-1 space-y-0.5 p-3 overflow-y-auto">
           {visibleMenuItems.map((item, i) => {
             const isActive = currentPage === item.page;
             return (
@@ -110,31 +128,34 @@ export default function AppLayout({
                 key={i}
                 onClick={() => onPageChange?.(item.page)}
                 title={!sidebarOpen ? item.label : undefined}
-                className={`w-full flex items-center gap-3 rounded-lg px-3 py-2 transition-colors text-left text-sm ${
+                className={`w-full flex items-center gap-3 rounded-lg px-3 py-2 transition-all text-left text-sm ${
                   isActive
-                    ? 'bg-white/20 text-white font-semibold'
-                    : 'text-blue-100 hover:bg-blue-700 hover:text-white'
+                    ? 'bg-teal-500/20 text-teal-300 font-semibold border border-teal-500/30'
+                    : 'text-slate-300 hover:bg-white/8 hover:text-white border border-transparent'
                 }`}
               >
-                <item.icon size={18} className="shrink-0" />
-                {sidebarOpen && <span>{item.label}</span>}
+                <item.icon
+                  size={17}
+                  className={`shrink-0 ${isActive ? 'text-teal-400' : 'text-slate-400'}`}
+                />
+                {sidebarOpen && <span className="truncate">{item.label}</span>}
               </button>
             );
           })}
         </nav>
 
         {/* User Profile */}
-        <div className="border-t border-blue-700 p-3">
-          <div className="mb-3 flex items-center gap-3">
-            <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-blue-700">
-              <span className="text-sm font-bold">
-                {currentUser.email?.charAt(0).toUpperCase()}
-              </span>
+        <div className="border-t border-white/10 p-3">
+          <div className="mb-2.5 flex items-center gap-2.5">
+            <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-teal-600 text-xs font-bold">
+              {currentUser.email?.charAt(0).toUpperCase()}
             </div>
             {sidebarOpen && (
               <div className="flex-1 overflow-hidden">
-                <p className="truncate text-sm font-medium">{currentUser.displayName || 'User'}</p>
-                <p className="truncate text-xs text-blue-200">{currentUser.email}</p>
+                <p className="truncate text-xs font-semibold text-white">
+                  {currentUser.displayName || 'User'}
+                </p>
+                <p className="truncate text-[10px] text-slate-400">{currentUser.email}</p>
               </div>
             )}
           </div>
@@ -142,42 +163,58 @@ export default function AppLayout({
             onClick={handleLogout}
             variant="destructive"
             size="sm"
-            className="w-full"
+            className="w-full h-7 text-xs"
           >
-            <LogOut size={16} />
-            {sidebarOpen && <span className="ml-2">Logout</span>}
+            <LogOut size={13} />
+            {sidebarOpen && <span className="ml-1.5">Logout</span>}
           </Button>
         </div>
       </aside>
 
-      {/* Main Content */}
-      <div className="flex flex-1 flex-col overflow-hidden">
+      {/* ── Main Content ────────────────────────────────────────── */}
+      <div className="flex flex-1 flex-col overflow-hidden min-w-0">
+
         {/* Header */}
-        <header className="border-b bg-white shadow-sm">
-          <div className="flex items-center justify-between px-8 py-4">
-            <h2 className="text-2xl font-bold text-gray-900">
+        <header className="flex-shrink-0 border-b border-slate-200 dark:border-slate-700/60 bg-white dark:bg-slate-900 shadow-sm">
+          <div className="flex items-center justify-between px-6 py-3">
+            <h2 className="text-lg font-bold text-slate-800 dark:text-slate-100">
               {menuItems.find(m => m.page === currentPage)?.label ?? 'HVAC Load Master'}
             </h2>
-            <div className="flex items-center gap-4">
+            <div className="flex items-center gap-2">
+              {/* Dark / Light toggle */}
               <button
-                className="rounded-lg p-2 hover:bg-gray-100"
-                aria-label="Open settings"
-                title="Open settings"
+                onClick={toggleTheme}
+                className="flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-medium transition-colors
+                  text-slate-600 dark:text-slate-300
+                  hover:bg-slate-100 dark:hover:bg-slate-800
+                  border border-slate-200 dark:border-slate-700"
+                aria-label="Toggle dark mode"
+                title={isDark ? 'Switch to light mode' : 'Switch to dark mode'}
               >
-                <Settings size={20} className="text-gray-600" />
+                {isDark
+                  ? <><Sun size={14} className="text-amber-400" /><span className="hidden sm:inline">Light</span></>
+                  : <><Moon size={14} className="text-slate-500" /><span className="hidden sm:inline">Dark</span></>
+                }
+              </button>
+              <button
+                className="rounded-lg p-1.5 text-slate-500 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
+                aria-label="Settings"
+                title="Settings"
+              >
+                <Settings size={18} />
               </button>
             </div>
           </div>
         </header>
 
         {/* Content */}
-        <main className="flex-1 overflow-auto bg-gray-50 p-8">
+        <main className="flex-1 overflow-auto bg-slate-50 dark:bg-slate-950 p-6">
           {children}
         </main>
 
         {/* Footer */}
-        <footer className="border-t bg-white px-8 py-2 flex items-center justify-center">
-          <p className="text-xs text-gray-400">
+        <footer className="flex-shrink-0 border-t border-slate-200 dark:border-slate-700/60 bg-white dark:bg-slate-900 px-6 py-1.5 flex items-center justify-center">
+          <p className="text-[11px] text-slate-400 dark:text-slate-500">
             &copy; {new Date().getFullYear()} Creative Concept. All rights reserved.
           </p>
         </footer>

@@ -15,6 +15,12 @@ import {
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
+export type HvacHierarchyData = {
+  systems: any[];                          // /hvacSystems docs
+  zonesBySystem: Record<string, any[]>;    // sysId → HvacZoneDoc[]
+  rooms: Record<string, any[]>;            // hvacZoneId → Room[]
+};
+
 type SeasonKey = 'summer' | 'monsoon' | 'winter';
 
 type SeasonProfile = {
@@ -131,21 +137,44 @@ type DetailedMetrics = {
 
 // ─── Theme ───────────────────────────────────────────────────────────────────
 
-const C = {
-  ink:       [15,  35,  60]  as [number,number,number],
-  subInk:    [75,  90, 110]  as [number,number,number],
-  line:      [190, 200, 215] as [number,number,number],
-  panel:     [240, 244, 250] as [number,number,number],
-  panelDark: [210, 220, 235] as [number,number,number],
-  accent:    [15,  80, 160]  as [number,number,number],
-  accentBg:  [230, 240, 255] as [number,number,number],
-  total:     [220, 235, 255] as [number,number,number],
-  grandBg:   [15,  80, 160]  as [number,number,number],
-  grandFg:   [255, 255, 255] as [number,number,number],
-  summerBg:  [255, 245, 230] as [number,number,number],
-  winterBg:  [230, 245, 255] as [number,number,number],
-  monsoonBg: [230, 255, 245] as [number,number,number],
+type Theme = {
+  ink:       [number,number,number];
+  subInk:    [number,number,number];
+  line:      [number,number,number];
+  panel:     [number,number,number];
+  panelDark: [number,number,number];
+  accent:    [number,number,number];
+  accentBg:  [number,number,number];
+  total:     [number,number,number];
+  grandBg:   [number,number,number];
+  grandFg:   [number,number,number];
+  coverText: [number,number,number];
+  adpBg:     [number,number,number];
+  summerBg:  [number,number,number];
+  winterBg:  [number,number,number];
+  monsoonBg: [number,number,number];
 };
+
+const makeTheme = (eco: boolean): Theme => ({
+  ink:       [15,  35,  60],
+  subInk:    [75,  90, 110],
+  line:      eco ? [185, 185, 185] : [190, 200, 215],
+  panel:     eco ? [248, 248, 248] : [240, 244, 250],
+  panelDark: eco ? [228, 228, 228] : [210, 220, 235],
+  accent:    eco ? [55,  55,  55]  : [15,  80, 160],
+  accentBg:  eco ? [238, 238, 238] : [230, 240, 255],
+  total:     eco ? [228, 228, 228] : [220, 235, 255],
+  grandBg:   eco ? [55,  55,  55]  : [15,  80, 160],
+  grandFg:   [255, 255, 255],
+  coverText: eco ? [200, 200, 200] : [200, 220, 255],
+  adpBg:     eco ? [242, 242, 242] : [255, 238, 210],
+  summerBg:  eco ? [252, 252, 252] : [255, 245, 230],
+  winterBg:  eco ? [252, 252, 252] : [230, 245, 255],
+  monsoonBg: eco ? [252, 252, 252] : [230, 255, 245],
+});
+
+// Default (colour) theme — used by helper functions that don't receive a theme param
+const DEFAULT_THEME = makeTheme(false);
 
 const PAGE = { left: 12, right: 12, top: 20, bottom: 16 };
 
@@ -167,9 +196,8 @@ const dash = (v: number) => v > 0 ? n0(v) : '-';
 
 // ─── Header / Footer ─────────────────────────────────────────────────────────
 
-const drawHeader = (doc: jsPDF, project: any, pageNo: number, totalPages: number) => {
+const drawHeader = (doc: jsPDF, project: any, pageNo: number, totalPages: number, C: Theme = DEFAULT_THEME) => {
   const w = doc.internal.pageSize.getWidth();
-  // Blue top bar
   doc.setFillColor(...C.accent);
   doc.rect(0, 0, w, 10, 'F');
   doc.setFont('helvetica', 'bold');
@@ -181,7 +209,7 @@ const drawHeader = (doc: jsPDF, project: any, pageNo: number, totalPages: number
   doc.text(`Page ${pageNo} of ${totalPages}`, w - PAGE.right, 6.5, { align: 'right' });
 };
 
-const drawFooter = (doc: jsPDF) => {
+const drawFooter = (doc: jsPDF, C: Theme = DEFAULT_THEME) => {
   const w = doc.internal.pageSize.getWidth();
   const h = doc.internal.pageSize.getHeight();
   doc.setDrawColor(...C.line);
@@ -197,7 +225,7 @@ const drawFooter = (doc: jsPDF) => {
   doc.text(new Date().toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' }), w - PAGE.right, h - PAGE.bottom + 6, { align: 'right' });
 };
 
-const sectionBanner = (doc: jsPDF, text: string, y: number) => {
+const sectionBanner = (doc: jsPDF, text: string, y: number, C: Theme = DEFAULT_THEME) => {
   const w = doc.internal.pageSize.getWidth();
   doc.setFillColor(...C.accent);
   doc.rect(PAGE.left, y - 4, w - PAGE.left - PAGE.right, 7, 'F');
@@ -208,7 +236,7 @@ const sectionBanner = (doc: jsPDF, text: string, y: number) => {
   return y + 7;
 };
 
-const subBanner = (doc: jsPDF, text: string, y: number) => {
+const subBanner = (doc: jsPDF, text: string, y: number, C: Theme = DEFAULT_THEME) => {
   const w = doc.internal.pageSize.getWidth();
   doc.setFillColor(...C.panelDark);
   doc.rect(PAGE.left, y - 3.5, w - PAGE.left - PAGE.right, 6.5, 'F');
@@ -247,39 +275,170 @@ const getSeasonProfiles = (project: any): SeasonProfile[] => {
     });
   }
 
-  profiles.push({
-    key: 'winter',
-    label: 'Winter',
-    outdoorTemp:     asNum(project?.winterDesignTemp     ?? project?.data?.winterDesignTemp,     40),
-    outdoorHumidity: asNum(project?.winterDesignHumidity ?? project?.data?.winterDesignHumidity, 30),
-    indoorTemp:      asNum(project?.insideWinterTemp     ?? project?.data?.insideWinterTemp,     70),
-    indoorHumidity:  asNum(project?.insideWinterHumidity ?? project?.data?.insideWinterHumidity, 40),
-  });
+  const includeWinter = !!(project?.includeWinter ?? project?.data?.includeWinter);
+  if (includeWinter) {
+    profiles.push({
+      key: 'winter',
+      label: 'Winter',
+      outdoorTemp:     asNum(project?.winterDesignTemp     ?? project?.data?.winterDesignTemp,     40),
+      outdoorHumidity: asNum(project?.winterDesignHumidity ?? project?.data?.winterDesignHumidity, 30),
+      indoorTemp:      asNum(project?.insideWinterTemp     ?? project?.data?.insideWinterTemp,     70),
+      indoorHumidity:  asNum(project?.insideWinterHumidity ?? project?.data?.insideWinterHumidity, 40),
+    });
+  }
 
   return profiles;
 };
 
 const buildEntityRecords = (project: any, systems: any[], zones: any[], rooms: Record<string, any[]>): EntityRecord[] => {
-  if (project?.systemType === 'VRF') {
-    return systems.map((sys: any) => ({
-      id: sys.id, type: 'System', name: sys.name || `System ${sys.id}`,
-      indoorTemp: sys.indoorTemp, indoorHumidity: sys.indoorHumidity,
-      outdoorTemp: sys.outdoorTemp, outdoorHumidity: sys.outdoorHumidity,
-      winterIndoorTemp: sys.winterIndoorTemp, winterIndoorHumidity: sys.winterIndoorHumidity,
-      rooms: rooms[sys.id] || [],
-    }));
+  // Use zones when available — all project types now use flat zone architecture.
+  // Fallback to systems only for legacy VRF projects that have systems but no separate zones.
+  if (zones.length > 0) {
+    return zones.map((zone: any) => {
+      const parent = systems.find((s: any) => s.id === (zone.systemId ?? zone.id));
+      return {
+        id: zone.id, type: 'Zone' as const, name: zone.name || `Zone ${zone.id}`,
+        parentSystem: parent?.name,
+        indoorTemp: zone.indoorTemp, indoorHumidity: zone.indoorHumidity,
+        outdoorTemp: zone.outdoorTemp, outdoorHumidity: zone.outdoorHumidity,
+        winterIndoorTemp: zone.winterIndoorTemp, winterIndoorHumidity: zone.winterIndoorHumidity,
+        rooms: rooms[zone.id] || [],
+      };
+    });
   }
-  return zones.map((zone: any) => {
-    const parent = systems.find((s: any) => s.id === zone.systemId);
-    return {
-      id: zone.id, type: 'Zone', name: zone.name || `Zone ${zone.id}`,
-      parentSystem: parent?.name,
-      indoorTemp: zone.indoorTemp, indoorHumidity: zone.indoorHumidity,
-      outdoorTemp: zone.outdoorTemp, outdoorHumidity: zone.outdoorHumidity,
-      winterIndoorTemp: zone.winterIndoorTemp, winterIndoorHumidity: zone.winterIndoorHumidity,
-      rooms: rooms[zone.id] || [],
-    };
-  });
+  // Legacy fallback: VRF systems used as zone grouping before flat-room migration
+  return systems.map((sys: any) => ({
+    id: sys.id, type: 'System' as const, name: sys.name || `System ${sys.id}`,
+    indoorTemp: sys.indoorTemp, indoorHumidity: sys.indoorHumidity,
+    outdoorTemp: sys.outdoorTemp, outdoorHumidity: sys.outdoorHumidity,
+    winterIndoorTemp: sys.winterIndoorTemp, winterIndoorHumidity: sys.winterIndoorHumidity,
+    rooms: rooms[sys.id] || [],
+  }));
+};
+
+// fallbackRoomIds: room IDs belonging to this entity — used to match equipment zones by room
+// membership when zone IDs differ (e.g. equipment zones use grp-{ts} while Firestore zone
+// docs have their own doc IDs).
+const getInstalledTrCfm = (entityId: string, eqSystems: any[], fallbackRoomIds?: string[]): { tr: number; cfm: number } => {
+  const extractZone = (eZone: any): { tr: number; cfm: number } | null => {
+    if (eZone.selection) {
+      const sel = eZone.selection;
+      const qty = sel.quantity ?? 1;
+      return { tr: (sel.trCapacity ?? 0) * qty, cfm: (sel.cfmRated ?? 0) * qty };
+    }
+    if (eZone.unitSelections?.length) {
+      const totalTr  = (eZone.unitSelections as any[]).reduce((s: number, u: any) => s + (u.trCapacity ?? 0) * (u.quantity ?? 1), 0);
+      const totalCfm = (eZone.unitSelections as any[]).reduce((s: number, u: any) => s + (u.cfmRated  ?? 0) * (u.quantity ?? 1), 0);
+      return { tr: totalTr, cfm: totalCfm };
+    }
+    return null;
+  };
+  for (const sys of eqSystems) {
+    const eqZones = (sys.zones ?? []) as any[];
+    // Primary: match by zone ID
+    let eZone = eqZones.find((z: any) => z.id === entityId);
+    // Fallback: match by room membership (equipment zones use grp-{ts} IDs, not Firestore zone doc IDs)
+    if (!eZone && fallbackRoomIds?.length) {
+      eZone = eqZones.find((z: any) =>
+        (z.roomIds as string[] ?? []).some((rid: string) => fallbackRoomIds.includes(rid))
+      );
+    }
+    if (eZone) {
+      const result = extractZone(eZone);
+      if (result) return result;
+    }
+    // Per-room iduSelections (VRF individual IDUs — rooms not grouped into an equipment zone)
+    if (fallbackRoomIds?.length && sys.iduSelections) {
+      const iduSels = sys.iduSelections as Record<string, any>;
+      let totalTr = 0, totalCfm = 0;
+      for (const [roomId, val] of Object.entries(iduSels)) {
+        if (!fallbackRoomIds.includes(roomId)) continue;
+        const units: any[] = Array.isArray(val) ? val : (val ? [val] : []);
+        for (const u of units) {
+          totalTr  += (u.trCapacity ?? 0) * (u.quantity ?? 1);
+          totalCfm += (u.cfmRated  ?? 0) * (u.quantity ?? 1);
+        }
+      }
+      if (totalTr > 0) return { tr: totalTr, cfm: totalCfm };
+    }
+    // Legacy: entity ID matches system ID directly
+    if (sys.id === entityId) {
+      if (sys.unitSelection) {
+        const u = sys.unitSelection;
+        return { tr: (u.trCapacity ?? 0) * (u.quantity ?? 1), cfm: (u.cfmRated ?? 0) * (u.quantity ?? 1) };
+      }
+      if (sys.oduSelection) {
+        const odu = sys.oduSelection;
+        return { tr: odu.effectiveTR ?? ((odu.trCapacity ?? 0) * (odu.modules ?? 1)), cfm: 0 };
+      }
+    }
+  }
+  return { tr: 0, cfm: 0 };
+};
+
+// Per-room installed TR/CFM: checks iduSelections first, then the zone-group that contains the room
+const getRoomInstalledTrCfm = (roomId: string, eqSystems: any[]): { tr: number; cfm: number } => {
+  for (const sys of eqSystems) {
+    if (sys.iduSelections) {
+      const val = (sys.iduSelections as Record<string, any>)[roomId];
+      if (val) {
+        const units: any[] = Array.isArray(val) ? val : [val];
+        const tr  = units.reduce((s: number, u: any) => s + (u.trCapacity ?? 0) * (u.quantity ?? 1), 0);
+        const cfm = units.reduce((s: number, u: any) => s + (u.cfmRated  ?? 0) * (u.quantity ?? 1), 0);
+        if (tr > 0) return { tr, cfm };
+      }
+    }
+    for (const z of (sys.zones ?? []) as any[]) {
+      if (!(z.roomIds as string[] ?? []).includes(roomId)) continue;
+      if (z.selection) {
+        const sel = z.selection;
+        return { tr: (sel.trCapacity ?? 0) * (sel.quantity ?? 1), cfm: (sel.cfmRated ?? 0) * (sel.quantity ?? 1) };
+      }
+      if (z.unitSelections?.length) {
+        const tr  = (z.unitSelections as any[]).reduce((s: number, u: any) => s + (u.trCapacity ?? 0) * (u.quantity ?? 1), 0);
+        const cfm = (z.unitSelections as any[]).reduce((s: number, u: any) => s + (u.cfmRated  ?? 0) * (u.quantity ?? 1), 0);
+        return { tr, cfm };
+      }
+    }
+    if (sys.type === 'Split' && sys.roomSelections) {
+      const val = (sys.roomSelections as Record<string, any>)[roomId];
+      if (val) {
+        const units: any[] = Array.isArray(val) ? val : [val];
+        const tr  = units.reduce((s: number, u: any) => s + (u.trCapacity ?? 0) * (u.quantity ?? 1), 0);
+        const cfm = units.reduce((s: number, u: any) => s + (u.cfmRated  ?? 0) * (u.quantity ?? 1), 0);
+        if (tr > 0) return { tr, cfm };
+      }
+    }
+  }
+  return { tr: 0, cfm: 0 };
+};
+
+// Sum of IDU/FCU TR and CFM across all equipment systems (for Executive Summary).
+// Mirrors the Section 5 rendering logic exactly: zone-level selections first,
+// sys.unitSelection (ODU/plant) and sys.chillerUnits (plant) are intentionally excluded.
+// Caller is expected to pass only active (room-referenced) systems.
+const computeTotalInstalledIDU = (eqSystems: any[]): { tr: number; cfm: number } => {
+  let tr = 0, cfm = 0;
+  for (const sys of eqSystems) {
+    // Mirror the authoritative formula from EquipmentSelection.tsx lines 2815-2821:
+    // sum ALL iduSelections + sum ALL zone.selection — data model guarantees no overlap.
+    if (sys.iduSelections) {
+      for (const val of Object.values(sys.iduSelections as Record<string, any>)) {
+        const units: any[] = Array.isArray(val) ? val : (val ? [val] : []);
+        for (const u of units) {
+          tr  += (u.trCapacity ?? 0) * (u.quantity ?? 1);
+          cfm += (u.cfmRated  ?? 0) * (u.quantity ?? 1);
+        }
+      }
+    }
+    for (const z of (sys.zones ?? (sys as any).ahuGroups ?? []) as any[]) {
+      if (z.selection) {
+        tr  += (z.selection.trCapacity ?? 0) * (z.selection.quantity ?? 1);
+        cfm += (z.selection.cfmRated  ?? 0) * (z.selection.quantity ?? 1);
+      }
+    }
+  }
+  return { tr, cfm };
 };
 
 const resolveEntityDC = (entity: EntityRecord, season: SeasonProfile, project: any): DC => {
@@ -333,8 +492,7 @@ const computeDetailed = (room: any, elements: any[], dc: DC, project: any): Deta
 
   const totalAch     = Math.max(getRecommendedAch(room?.achProfile ?? room?.activityType), asNum(room?.facph, 0));
   const totalSupplyCfm = (calculateRoomVolume(room) * totalAch) / 60;
-  const designCfm    = Math.max(coil.dehumidifiedCFM, totalSupplyCfm);
-  // 400 CFM/Ton: ASHRAE minimum for adequate dehumidification (accounts for sensible + latent)
+  const designCfm    = Math.max(coil.minAdpSensibleCFM, totalSupplyCfm);
   const cfmTr        = designCfm / 400;
   const governingTr  = Math.max(loadTr, cfmTr);
   const requiredTr   = governingTr * (1 + oSafetyPct / 100);
@@ -436,16 +594,34 @@ export const generatePDFReport = (
   zones: any[],
   rooms: Record<string, any[]>,
   envelopeElements: Record<string, any[]>,
+  equipSystems: any[] = [],
+  hvacHierarchy?: HvacHierarchyData,
+  eco = false,
 ) => {
+  // Select colour palette: corporate blue (default) or eco/print-friendly greyscale
+  const C = makeTheme(eco);
+  // When new hierarchy data is provided, override the legacy arrays.
+  const effectiveSystems = hvacHierarchy ? hvacHierarchy.systems : systems;
+  const effectiveZones   = hvacHierarchy
+    ? Object.values(hvacHierarchy.zonesBySystem).flat()
+    : zones;
+  const effectiveRooms   = hvacHierarchy ? hvacHierarchy.rooms : rooms;
+  // For Section 5, use hvacSystems as equipment systems when hierarchy is provided
+  // (they carry the same equipment selection fields, migrated from /equipmentSystems)
+  const effectiveEquipSystems = hvacHierarchy && equipSystems.length === 0
+    ? hvacHierarchy.systems
+    : equipSystems;
+
   const doc      = new jsPDF({ unit: 'mm', format: 'a4' });
   const pageW    = doc.internal.pageSize.getWidth();
   const pageH    = doc.internal.pageSize.getHeight();
   const seasons  = getSeasonProfiles(project);
-  const entities = buildEntityRecords(project, systems, zones, rooms);
+  const entities = buildEntityRecords(project, effectiveSystems, effectiveZones, effectiveRooms);
   const includeMonsoon = seasons.some((s) => s.key === 'monsoon');
+  const includeWinter  = seasons.some((s) => s.key === 'winter');
   const summer  = seasons.find((s) => s.key === 'summer')!;
   const monsoon = seasons.find((s) => s.key === 'monsoon');
-  const winter  = seasons.find((s) => s.key === 'winter')!;
+  const winter  = seasons.find((s) => s.key === 'winter');
 
   const alt  = asNum(project?.altitude  ?? project?.data?.altitude,  0);
   const lat  = asNum(project?.latitude  ?? project?.data?.latitude,  0);
@@ -465,7 +641,7 @@ export const generatePDFReport = (
 
   doc.setFont('helvetica', 'normal');
   doc.setFontSize(10);
-  doc.setTextColor(200, 220, 255);
+  doc.setTextColor(...C.coverText);
   doc.text('Technical Submission Document for Design Approval', PAGE.left, 40);
   doc.text('Calculated per ASHRAE Fundamentals Handbook 2017 (IP Units)', PAGE.left, 47);
 
@@ -486,19 +662,19 @@ export const generatePDFReport = (
     styles: { fontSize: 9.5, cellPadding: 3.5, textColor: C.ink },
     columnStyles: {
       0: { fontStyle: 'bold', fillColor: C.panel, cellWidth: 48 },
-      1: { cellWidth: 125 },
+      1: { cellWidth: 138 },
     },
     margin: { left: PAGE.left, right: PAGE.right },
   });
 
-  drawFooter(doc);
+  drawFooter(doc, C);
 
   // ═══ PAGE 2: DESIGN CONDITIONS + EXECUTIVE SUMMARY ════════════════════════
 
   let y = startBody(doc, project);
 
   // --- Section 1: Design Conditions ---
-  y = sectionBanner(doc, '1.  PROJECT DESIGN CONDITIONS', y);
+  y = sectionBanner(doc, '1.  PROJECT DESIGN CONDITIONS', y, C);
   y += 2;
 
   // Site info row
@@ -556,26 +732,24 @@ export const generatePDFReport = (
   y = (doc as any).lastAutoTable.finalY + 8;
 
   // --- Section 2: Executive Summary ---
-  y = sectionBanner(doc, '2.  PROJECT EXECUTIVE SUMMARY', y);
+  y = sectionBanner(doc, '2.  PROJECT EXECUTIVE SUMMARY', y, C);
   y += 2;
 
   // Compute project totals per season
   const projectSeasonTotals = seasons.map((season) => {
-    let cooling = 0; let cfm = 0; let heating = 0; let govTr = 0;
+    let cooling = 0; let cfm = 0; let heating = 0;
     entities.forEach((entity) => {
       const dc = resolveEntityDC(entity, season, project);
       entity.rooms.forEach((room) => {
         const m = computeDetailed(room, envelopeElements[room.id] || [], dc, project);
         cooling  += m.grandTotal;
         cfm      += m.designCfm;
-        heating  += m.designHeatingLoad;   // use safety+pickup adjusted load
-        govTr    += m.governingTr;
+        heating  += m.designHeatingLoad;
       });
     });
     const loadTr = cooling / 12000;
     const cfmTr  = cfm / 400;
-    // Use sum of per-room governingTr (not re-computed from aggregates) for correct mixed-room sizing
-    return { season: season.label, key: season.key, loadTr, cfm, cfmTr, heating, governingTr: govTr };
+    return { season: season.label, key: season.key, loadTr, cfm, cfmTr, heating, governingTr: Math.max(loadTr, cfmTr) };
   });
 
   const coolingSeasonsOnly = projectSeasonTotals.filter(s => s.key !== 'winter');
@@ -585,15 +759,25 @@ export const generatePDFReport = (
   const recCFM = peakSeason.cfm;
   const allRooms = entities.flatMap((e) => e.rooms);
 
-  // Stats panel
+  // Stats panel — filter equipment systems to those that have at least one live room pointing to them
+  const flatRoomDocs = Object.values(effectiveRooms).flat();
+  const activeEquipSystemIds = new Set<string>(
+    flatRoomDocs.flatMap((r: any) => [r.systemId, r.zoneId, r.hvacSystemId].filter(Boolean))
+  );
+  const activeEquipSystems = effectiveEquipSystems.filter((s: any) => activeEquipSystemIds.has(s.id));
+  const totalIDU = computeTotalInstalledIDU(activeEquipSystems);
+  const totalIDUStr = totalIDU.tr > 0
+    ? `${n2(totalIDU.tr)} TR  ·  ${n0(totalIDU.cfm)} CFM`
+    : '—  (no equipment selected)';
   autoTable(doc, {
     startY: y,
     body: [
-      ['Total Systems',             n0(systems.length)],
-      ['Total Zones',               n0(zones.length)],
+      ['Total Systems',             n0(Math.max(effectiveSystems.length, activeEquipSystems.length))],
+      ['Total Zones',               n0(effectiveZones.length)],
       ['Total Rooms',               n0(allRooms.length)],
       ['Peak Governing Season',     `${peakSeason.season}  (${n2(peakSeason.governingTr)} TR  ·  ${n0(peakSeason.cfm)} CFM)`],
       ['Recommended Submission Basis', `${n2(recTR)} TR  and  ${n0(recCFM)} CFM`],
+      ['Total Installed IDU Capacity', totalIDUStr],
     ],
     theme: 'grid',
     styles:       { fontSize: 9, cellPadding: 2.8, textColor: C.ink },
@@ -601,6 +785,11 @@ export const generatePDFReport = (
     willDrawCell: (data: any) => {
       if (data.section === 'body' && data.row.index === 4) {
         data.cell.styles.fillColor = C.total;
+        data.cell.styles.fontStyle = 'bold';
+      }
+      if (data.section === 'body' && data.row.index === 5) {
+        data.cell.styles.fillColor = C.grandBg;
+        data.cell.styles.textColor = C.grandFg;
         data.cell.styles.fontStyle = 'bold';
       }
     },
@@ -641,45 +830,125 @@ export const generatePDFReport = (
   // ═══ PAGE 3: SYSTEM/ZONE SUMMARY SCHEDULE ═════════════════════════════════
 
   y = startBody(doc, project);
-  y = sectionBanner(doc, '3.  SYSTEM / ZONE SUMMARY SCHEDULE', y);
+  y = sectionBanner(doc, '3.  SYSTEM / ZONE SUMMARY SCHEDULE', y, C);
   y += 2;
 
   const summaryHead = includeMonsoon
-    ? ['Type', 'Parent System', 'Entity Name', 'Rooms', 'Summer TR', 'Monsoon TR', 'Design CFM', 'Winter Heat BTU/h', 'Governing TR']
-    : ['Type', 'Parent System', 'Entity Name', 'Rooms', 'Summer TR', 'Design CFM', 'Winter Heat BTU/h', 'Governing TR'];
+    ? ['Type', 'Parent System', 'Entity Name', 'Rooms', 'Summer TR', 'Monsoon TR', 'Design CFM', 'Winter BTU/h', 'Gov. TR', 'Inst. TR', 'Inst. CFM']
+    : ['Type', 'Parent System', 'Entity Name', 'Rooms', 'Summer TR', 'Design CFM', 'Winter BTU/h', 'Gov. TR', 'Inst. TR', 'Inst. CFM'];
 
-  const summaryBody = entities.map((entity) => {
-    const sumDc  = resolveEntityDC(entity, summer,  project);
-    const monDc  = monsoon ? resolveEntityDC(entity, monsoon, project) : null;
-    const winDc  = resolveEntityDC(entity, winter,  project);
-    let sumTr = 0, sumCfm = 0, monTr = 0, monCfm = 0, winHeat = 0;
+  const colCount = summaryHead.length;
+  const instTrColIdx  = includeMonsoon ? 9  : 8;
+  const instCfmColIdx = includeMonsoon ? 10 : 9;
+  const govTrIdx      = includeMonsoon ? 8  : 7;
+
+  // Helper: build one zone row for the summary table
+  const buildZoneRow = (entity: EntityRecord, parentName: string, sysType?: string): any[] => {
+    const effProject = sysType ? { ...project, systemType: sysType } : project;
+    const sumDc = resolveEntityDC(entity, summer,  effProject);
+    const monDc = monsoon ? resolveEntityDC(entity, monsoon, effProject) : null;
+    const winDc = winter ? resolveEntityDC(entity, winter, effProject) : null;
+    let sumBTUH = 0, sumCfm = 0, monBTUH = 0, monCfm = 0, winHeat = 0;
     entity.rooms.forEach((room) => {
-      const sm = computeDetailed(room, envelopeElements[room.id] || [], sumDc, project);
-      sumTr  += sm.governingTr; sumCfm += sm.designCfm;
+      const sm = computeDetailed(room, envelopeElements[room.id] || [], sumDc, effProject);
+      sumBTUH += sm.grandTotal; sumCfm += sm.designCfm;
       if (monDc) {
-        const mm = computeDetailed(room, envelopeElements[room.id] || [], monDc, project);
-        monTr += mm.governingTr; monCfm += mm.designCfm;
+        const mm = computeDetailed(room, envelopeElements[room.id] || [], monDc, effProject);
+        monBTUH += mm.grandTotal; monCfm += mm.designCfm;
       }
-      winHeat += computeDetailed(room, envelopeElements[room.id] || [], winDc, project).designHeatingLoad;
+      if (winDc) winHeat += computeDetailed(room, envelopeElements[room.id] || [], winDc, effProject).designHeatingLoad;
     });
-    const govTr = Math.max(sumTr, monTr);
-    const govCfm = Math.max(sumCfm, monCfm);
-    const row = [entity.type, entity.parentSystem || '—', entity.name, n0(entity.rooms.length), n2(sumTr)];
-    if (includeMonsoon) row.push(n2(monTr));
+    const sumTr    = sumBTUH / 12000;
+    const monTr    = monBTUH / 12000;
+    const sumGovTR = Math.max(sumTr, sumCfm / 400);
+    const monGovTR = monsoon ? Math.max(monTr, monCfm / 400) : 0;
+    const govTr    = includeMonsoon ? Math.max(sumGovTR, monGovTR) : sumGovTR;
+    const govCfm   = Math.max(sumCfm, monCfm);
+    const inst = getInstalledTrCfm(entity.id, effectiveEquipSystems, entity.rooms.map(r => r.id));
+    const row: any[] = [entity.type, parentName, entity.name, n0(entity.rooms.length), n2(sumGovTR)];
+    if (includeMonsoon) row.push(n2(monGovTR));
     row.push(n0(govCfm), n0(winHeat), n2(govTr));
+    row.push(inst.tr > 0 ? n2(inst.tr) : '—', inst.cfm > 0 ? n0(inst.cfm) : '—');
     return row;
-  });
+  };
+
+  // Build summary body — grouped by system when using new hierarchy
+  const summaryBody: any[][] = [];
+  if (hvacHierarchy) {
+    for (const sys of hvacHierarchy.systems) {
+      const sysZones = hvacHierarchy.zonesBySystem[sys.id] ?? [];
+      // System header row spanning all columns
+      summaryBody.push([{
+        content: `${sys.name ?? sys.id}   ·   ${sys.type ?? '—'}`,
+        colSpan: colCount,
+        styles: { fontStyle: 'bold' as const, fillColor: C.panelDark, textColor: C.ink, fontSize: 7.5 },
+      }]);
+      if (sysZones.length === 0) {
+        summaryBody.push([{
+          content: 'No zones defined',
+          colSpan: colCount,
+          styles: { fontStyle: 'italic' as const, textColor: C.subInk },
+        }]);
+        continue;
+      }
+      for (const zone of sysZones) {
+        const entity = entities.find(e => e.id === zone.id);
+        if (!entity || entity.rooms.length === 0) {
+          const emptyRow: any[] = ['Zone', sys.name || '—', `  ${zone.name || zone.id}`, '0', '—'];
+          if (includeMonsoon) emptyRow.push('—');
+          emptyRow.push('—', '—', '—', '—', '—');
+          summaryBody.push(emptyRow);
+        } else {
+          const row = buildZoneRow(entity, sys.name || '—', sys.type);
+          row[2] = `  ${row[2]}`; // indent zone name
+          summaryBody.push(row);
+        }
+      }
+    }
+  } else {
+    entities.forEach(entity => {
+      // Resolve parent system from equipment systems (rooms carry systemId pointing to /equipmentSystems)
+      const roomSystemId = entity.rooms[0]?.systemId as string | undefined;
+      const eqParent = roomSystemId ? effectiveEquipSystems.find((s: any) => s.id === roomSystemId) : null;
+      const parentName = eqParent?.name ?? entity.parentSystem ?? '—';
+      summaryBody.push(buildZoneRow(entity, parentName));
+    });
+  }
+
+  const sumColStyles: Record<number, any> = {
+    0: { fontStyle: 'bold', cellWidth: 12 },
+    2: { fontStyle: 'bold', cellWidth: includeMonsoon ? 24 : 28 },
+  };
+  sumColStyles[instTrColIdx]  = { halign: 'right', cellWidth: 15, fontStyle: 'bold' };
+  sumColStyles[instCfmColIdx] = { halign: 'right', cellWidth: 15, fontStyle: 'bold' };
 
   autoTable(doc, {
     startY: y,
     head: [summaryHead],
     body: summaryBody,
     theme: 'grid',
-    styles:     { fontSize: 7.5, cellPadding: 2, textColor: C.ink },
+    styles:     { fontSize: 7, cellPadding: 1.5, textColor: C.ink },
     headStyles: { fillColor: C.panelDark, textColor: C.ink, fontStyle: 'bold' },
-    columnStyles: {
-      0: { fontStyle: 'bold', cellWidth: 14 },
-      2: { fontStyle: 'bold', cellWidth: includeMonsoon ? 28 : 35 },
+    columnStyles: sumColStyles,
+    willDrawCell: (data: any) => {
+      if (data.section === 'body') {
+        // Skip styling for colspan (system header) rows
+        if (data.row.cells[0]?.raw && String(data.row.cells[0].raw).length > 0 &&
+            Object.keys(data.row.cells).length === 1) return;
+        const col = data.column.index;
+        if (col === instTrColIdx || col === instCfmColIdx) {
+          const cellVal = String(data.cell.raw ?? '');
+          const govTrVal = parseFloat(String(data.row.cells[govTrIdx]?.raw ?? '0'));
+          if (col === instTrColIdx && cellVal !== '—') {
+            const instTrVal = parseFloat(cellVal);
+            if (instTrVal < govTrVal) {
+              data.cell.styles.textColor = [180, 50, 50] as [number, number, number];
+            } else {
+              data.cell.styles.textColor = [20, 120, 60] as [number, number, number];
+            }
+          }
+        }
+      }
     },
     margin: { left: PAGE.left, right: PAGE.right },
   });
@@ -688,7 +957,7 @@ export const generatePDFReport = (
 
   for (const entity of entities) {
     y = startBody(doc, project);
-    y = sectionBanner(doc, `4.  ${entity.type.toUpperCase()} DETAIL  —  ${String(entity.name || '').toUpperCase()}`, y);
+    y = sectionBanner(doc, `4.  ${entity.type.toUpperCase()} DETAIL  —  ${String(entity.name || '').toUpperCase()}`, y, C);
     y += 2;
 
     // Entity info
@@ -708,40 +977,83 @@ export const generatePDFReport = (
     y = (doc as any).lastAutoTable.finalY + 5;
 
     // Entity room schedule table
-    y = subBanner(doc, 'Room Schedule', y);
+    y = subBanner(doc, 'Room Schedule', y, C);
     y += 1;
 
     const rscHead = includeMonsoon
-      ? ['Room', 'Floor', 'Area ft²', 'Summer TR', 'Monsoon TR', 'Design CFM', 'Winter BTU/h', 'Gov TR']
-      : ['Room', 'Floor', 'Area ft²', 'Summer TR', 'Design CFM', 'Winter BTU/h', 'Gov TR'];
+      ? ['Room', 'Floor', 'Area ft²', 'Summer TR', 'Monsoon TR', 'Design CFM', 'Winter BTU/h', 'Gov TR', 'Inst. TR', 'Inst. CFM']
+      : ['Room', 'Floor', 'Area ft²', 'Summer TR', 'Design CFM', 'Winter BTU/h', 'Gov TR', 'Inst. TR', 'Inst. CFM'];
 
     const sumDcE = resolveEntityDC(entity, summer, project);
     const monDcE = monsoon ? resolveEntityDC(entity, monsoon, project) : null;
-    const winDcE = resolveEntityDC(entity, winter, project);
+    const winDcE = winter ? resolveEntityDC(entity, winter, project) : null;
 
-    const rscBody = entity.rooms.map((room: any) => {
+    let totArea = 0, totSumBTUH = 0, totMonBTUH = 0, totSumCFM = 0, totMonCFM = 0, totWinHeat = 0;
+
+    const rscBody: any[][] = entity.rooms.map((room: any) => {
       const sm = computeDetailed(room, envelopeElements[room.id] || [], sumDcE, project);
       const mm = monDcE ? computeDetailed(room, envelopeElements[room.id] || [], monDcE, project) : null;
-      const wm = computeDetailed(room, envelopeElements[room.id] || [], winDcE, project);
-      const row = [
-        room.name || '—',
-        room.floor || '—',
-        n0(sm.area),
-        n2(sm.governingTr),
-      ];
+      const wm = winDcE ? computeDetailed(room, envelopeElements[room.id] || [], winDcE, project) : null;
+      const govTR = Math.max(sm.governingTr, mm?.governingTr ?? 0);
+      const cfm   = Math.max(sm.designCfm,   mm?.designCfm   ?? 0);
+      totArea     += sm.area;
+      totSumBTUH  += sm.grandTotal;
+      totMonBTUH  += mm?.grandTotal ?? 0;
+      totSumCFM   += sm.designCfm;
+      totMonCFM   += mm?.designCfm ?? 0;
+      totWinHeat  += wm?.designHeatingLoad ?? 0;
+      const rInst = getRoomInstalledTrCfm(room.id, effectiveEquipSystems);
+      const row: any[] = [room.name || '—', room.floor || '—', n0(sm.area), n2(sm.governingTr)];
       if (includeMonsoon) row.push(n2(mm?.governingTr ?? 0));
-      row.push(n0(Math.max(sm.designCfm, mm?.designCfm ?? 0)), n0(wm.designHeatingLoad), n2(Math.max(sm.governingTr, mm?.governingTr ?? 0)));
+      row.push(
+        n0(cfm),
+        includeWinter ? n0(wm?.designHeatingLoad ?? 0) : '—',
+        n2(govTR),
+        rInst.tr  > 0 ? n2(rInst.tr)  : '—',
+        rInst.cfm > 0 ? n0(rInst.cfm) : '—',
+      );
       return row;
     });
+
+    const totSumTR  = Math.max(totSumBTUH / 12000, totSumCFM / 400);
+    const totMonTR  = includeMonsoon ? Math.max(totMonBTUH / 12000, totMonCFM / 400) : 0;
+    const totGovTR  = includeMonsoon ? Math.max(totSumTR, totMonTR) : totSumTR;
+    const totCFM    = Math.max(totSumCFM, totMonCFM);
+
+    // Totals row — installed TR/CFM from equipment selection merged at zone level
+    const instE = getInstalledTrCfm(entity.id, effectiveEquipSystems, entity.rooms.map((r: any) => r.id));
+    const instTRStr  = instE.tr  > 0 ? n2(instE.tr)  : '—';
+    const instCFMStr = instE.cfm > 0 ? n0(instE.cfm) : '—';
+    const totRow: any[] = [
+      { content: 'ZONE TOTAL', styles: { fontStyle: 'bold' as const, fillColor: C.total } },
+      { content: '—',          styles: { fillColor: C.total } },
+      { content: n0(totArea),  styles: { fontStyle: 'bold' as const, fillColor: C.total } },
+      { content: n2(totSumTR), styles: { fontStyle: 'bold' as const, fillColor: C.total } },
+    ];
+    if (includeMonsoon) totRow.push({ content: n2(totMonTR), styles: { fontStyle: 'bold' as const, fillColor: C.total } });
+    totRow.push(
+      { content: n0(totCFM),     styles: { fontStyle: 'bold' as const, fillColor: C.total } },
+      { content: n0(totWinHeat), styles: { fontStyle: 'bold' as const, fillColor: C.total } },
+      { content: n2(totGovTR),   styles: { fontStyle: 'bold' as const, fillColor: C.total } },
+      { content: instTRStr,  styles: { fontStyle: 'bold' as const, fillColor: C.grandBg, textColor: C.grandFg, halign: 'right' as const } },
+      { content: instCFMStr, styles: { fontStyle: 'bold' as const, fillColor: C.grandBg, textColor: C.grandFg, halign: 'right' as const } },
+    );
+    rscBody.push(totRow);
+
+    const rscColStyles: Record<number, any> = { 0: { fontStyle: 'bold', cellWidth: 30 } };
+    const rInstTRIdx  = includeMonsoon ? 8 : 7;
+    const rInstCFMIdx = includeMonsoon ? 9 : 8;
+    rscColStyles[rInstTRIdx]  = { halign: 'right', cellWidth: 15 };
+    rscColStyles[rInstCFMIdx] = { halign: 'right', cellWidth: 15 };
 
     autoTable(doc, {
       startY: y,
       head: [rscHead],
       body: rscBody,
       theme: 'grid',
-      styles:     { fontSize: 7.5, cellPadding: 1.8, textColor: C.ink },
+      styles:     { fontSize: 7, cellPadding: 1.5, textColor: C.ink },
       headStyles: { fillColor: C.panelDark, textColor: C.ink, fontStyle: 'bold' },
-      columnStyles: { 0: { fontStyle: 'bold', cellWidth: 32 } },
+      columnStyles: rscColStyles,
       margin: { left: PAGE.left, right: PAGE.right },
     });
     y = (doc as any).lastAutoTable.finalY + 6;
@@ -785,7 +1097,7 @@ export const generatePDFReport = (
           styles: { fontSize: 7.5, cellPadding: 1.8, textColor: C.ink },
           columnStyles: {
             0: { fontStyle: 'bold', fillColor: C.panel, cellWidth: 44 },
-            1: { cellWidth: 52 },
+            1: { cellWidth: 56 },
             2: { fontStyle: 'bold', fillColor: C.panel, cellWidth: 42 },
             3: { cellWidth: 44 },
           },
@@ -796,7 +1108,7 @@ export const generatePDFReport = (
         // ── Envelope elements table ──
         if (elems.length > 0) {
           y = ensureSpace(doc, y, 30, project);
-          y = subBanner(doc, `Envelope Elements  (${seasonLabel})`, y);
+          y = subBanner(doc, `Envelope Elements  (${seasonLabel})`, y, C);
           y += 1;
 
           const envRows = elems.map((el: any) => {
@@ -839,7 +1151,7 @@ export const generatePDFReport = (
 
         // ── Load breakdown table ──
         y = ensureSpace(doc, y, 120, project);
-        y = subBanner(doc, `Cooling Load Breakdown  (${seasonLabel})`, y);
+        y = subBanner(doc, `Cooling Load Breakdown  (${seasonLabel})`, y, C);
         y += 1;
 
         const loadRows: any[] = [
@@ -891,8 +1203,8 @@ export const generatePDFReport = (
           headStyles: { fillColor: C.panelDark, textColor: C.ink, fontStyle: 'bold' },
           columnStyles: {
             0: { cellWidth: 90 },
-            1: { halign: 'right', cellWidth: 40 },
-            2: { halign: 'right', cellWidth: 40 },
+            1: { halign: 'right', cellWidth: 48 },
+            2: { halign: 'right', cellWidth: 48 },
           },
           margin: { left: PAGE.left, right: PAGE.right },
         });
@@ -934,7 +1246,7 @@ export const generatePDFReport = (
 
         // ── Moisture, Coil & Psychrometric Analysis ──
         y = ensureSpace(doc, y, 55, project);
-        y = subBanner(doc, `Moisture, Coil & Psychrometric Analysis  (${seasonLabel})`, y);
+        y = subBanner(doc, `Moisture, Coil & Psychrometric Analysis  (${seasonLabel})`, y, C);
         y += 1;
 
         const LHV_PDF  = 1061; // ASHRAE hfg at coil conditions (matches 0.68 constant derivation)
@@ -979,7 +1291,7 @@ export const generatePDFReport = (
           },
           willDrawCell: (data: any) => {
             if (!isWinter && data.section === 'body' && data.row.index === 5 && needRH) {
-              data.cell.styles.fillColor = [255, 238, 210];
+              data.cell.styles.fillColor = C.adpBg;
               data.cell.styles.fontStyle = 'bold';
             }
           },
@@ -1265,6 +1577,7 @@ export const generatePDFReport = (
       }
 
       // ── Winter Heating + Humidification detail ───────────────────────────
+      if (winter) {
       y = ensureSpace(doc, y, 80, project);
       const winDcRoom = resolveEntityDC(entity, winter, project);
       const wm = computeDetailed(room, envelopeElements[room.id] || [], winDcRoom, project);
@@ -1377,6 +1690,7 @@ export const generatePDFReport = (
         margin: { left: PAGE.left, right: PAGE.right },
       });
       y = (doc as any).lastAutoTable.finalY + 8;
+      } // end if (winter)
     }
   }
 
@@ -1385,10 +1699,189 @@ export const generatePDFReport = (
   const totalPages = doc.getNumberOfPages();
   for (let p = 2; p <= totalPages; p++) {
     doc.setPage(p);
-    drawHeader(doc, project, p - 1, totalPages - 1);
-    drawFooter(doc);
+    drawHeader(doc, project, p - 1, totalPages - 1, C);
+    drawFooter(doc, C);
   }
 
   const fileName = `${String(project?.name || 'HVAC_Report').replace(/[^a-zA-Z0-9_]/g, '_')}_Load_Report.pdf`;
+  doc.save(fileName);
+};
+
+// ─── EQUIPMENT SCHEDULE PDF (standalone) ─────────────────────────────────────
+
+const renderEquipmentScheduleBody = (
+  doc: jsPDF,
+  equipSystems: any[],
+  flatRooms: any[],
+  project: any,
+  C: Theme,
+) => {
+  const eqHead = ['Zone / Room', 'Equipment', 'Brand', 'Model / Series', 'Sub-type', 'TR (Rated)', 'CFM (Rated)', 'Qty'];
+  let y = PAGE.top + 4;
+
+  for (const sys of equipSystems) {
+    const sysType  = String(sys.type  || '—');
+    const sysName  = String(sys.name  || `System ${sys.id}`);
+    const sysBrand = String(sys.brand || '—');
+    const eqBody: any[][] = [];
+
+    if (sysType === 'VRF' && sys.oduSelection) {
+      const odu = sys.oduSelection;
+      const instTR = odu.effectiveTR ?? ((odu.trCapacity ?? 0) * (odu.modules ?? 1));
+      eqBody.push([sysName, 'ODU', String(odu.brand || sysBrand),
+        `${String(odu.modelSeries || '')} ${String(odu.modelId || '')}`.trim() || '—',
+        String(odu.compressorType || '—'), n2(instTR), '—', odu.modules ? `×${odu.modules} mod` : '1']);
+    }
+    if (sysType === 'Chiller') {
+      const units: any[] = sys.chillerUnits?.length ? sys.chillerUnits : (sys.unitSelection ? [{ ...sys.unitSelection, quantity: sys.unitSelection.quantity ?? 1 }] : []);
+      units.forEach((u: any) => eqBody.push([sysName, 'Chiller', String(u.brand || sysBrand),
+        `${String(u.modelSeries || '')} ${String(u.modelId || '')}`.trim() || '—', '—', n2(u.trCapacity ?? 0), '—', String(u.quantity ?? 1)]));
+      if (sys.ctSelection) {
+        const ct = sys.ctSelection;
+        eqBody.push([sysName, 'Cooling Tower', String(ct.brand || sysBrand),
+          `${String(ct.modelSeries || '')} ${String(ct.modelId || '')}`.trim() || '—', '—', n2(ct.trCapacity ?? 0), n0(ct.cfmRated ?? 0), String(ct.quantity ?? 1)]);
+      }
+    }
+    if (sysType === 'AHU' && sys.unitSelection) {
+      const u = sys.unitSelection;
+      eqBody.push([sysName, 'DX Condensing Unit', String(u.brand || sysBrand),
+        `${String(u.modelSeries || '')} ${String(u.modelId || '')}`.trim() || '—', String(u.subType || '—'), n2(u.trCapacity ?? 0), '—', String(u.quantity ?? 1)]);
+    }
+    if ((sysType === 'Package' || sysType === 'DuctableSplit') && sys.unitSelection) {
+      const u = sys.unitSelection;
+      eqBody.push([sysName, sysType, String(u.brand || sysBrand),
+        `${String(u.modelSeries || '')} ${String(u.modelId || '')}`.trim() || '—', String(u.subType || '—'), n2(u.trCapacity ?? 0), n0(u.cfmRated ?? 0), String(u.quantity ?? 1)]);
+    }
+
+    // Zone-level IDUs
+    (sys.zones ?? [] as any[]).forEach((zone: any) => {
+      const zoneName = String(zone.name || `Zone ${zone.id}`);
+      const unitSels = (zone.unitSelections ?? []) as any[];
+      if (unitSels.length > 0) {
+        unitSels.forEach((u: any) => {
+          const lbl = sysType === 'Chiller' ? 'FCU' : sysType === 'AHU' ? 'AHU-DX' : 'IDU';
+          eqBody.push([zoneName, lbl, String(u.brand || sysBrand), `${String(u.modelSeries || '')} ${String(u.modelId || '')}`.trim() || '—', String(u.subType || '—'), n2(u.trCapacity ?? 0), n0(u.cfmRated ?? 0), String(u.quantity ?? 1)]);
+        });
+      } else if (zone.selection) {
+        const sel = zone.selection;
+        const lbl = sysType === 'Chiller' ? 'FCU / AHU' : sysType === 'AHU' ? 'AHU-DX' : 'IDU';
+        eqBody.push([zoneName, lbl, String(sel.brand || sysBrand), `${String(sel.modelSeries || '')} ${String(sel.modelId || '')}`.trim() || '—', String(sel.subType || '—'), n2(sel.trCapacity ?? 0), n0(sel.cfmRated ?? 0), String(sel.quantity ?? 1)]);
+      }
+    });
+
+    // Per-room iduSelections
+    if (sys.iduSelections && (sysType === 'VRF' || sysType === 'AHU' || sysType === 'Chiller')) {
+      const zoneCovered = new Set<string>();
+      (sys.zones ?? []).forEach((z: any) => {
+        if (z.selection || z.unitSelections?.length) (z.roomIds as string[] ?? []).forEach((rid: string) => zoneCovered.add(rid));
+      });
+      Object.entries(sys.iduSelections as Record<string, any>).forEach(([roomId, val]) => {
+        if (zoneCovered.has(roomId)) return;
+        const units: any[] = Array.isArray(val) ? val : (val ? [val] : []);
+        units.forEach((u: any) => {
+          if (!u || (u.trCapacity ?? 0) === 0) return;
+          const roomObj = flatRooms.find((r: any) => r.id === roomId);
+          const lbl = sysType === 'Chiller' ? 'FCU' : sysType === 'AHU' ? 'AHU-DX' : 'IDU';
+          eqBody.push([String(roomObj?.name ?? roomObj?.roomName ?? roomId), lbl, String(u.brand || sysBrand), `${String(u.modelSeries || '')} ${String(u.modelId || '')}`.trim() || '—', String(u.subType || '—'), n2(u.trCapacity ?? 0), n0(u.cfmRated ?? 0), String(u.quantity ?? 1)]);
+        });
+      });
+    }
+    if (sysType === 'Split' && sys.roomSelections) {
+      Object.entries(sys.roomSelections as Record<string, any>).forEach(([rId, idus]: [string, any]) => {
+        (idus as any[]).forEach((u: any) => eqBody.push([String(rId), 'Split IDU', String(u.brand || sysBrand), `${String(u.modelSeries || '')} ${String(u.modelId || '')}`.trim() || '—', String(u.subType || '—'), n2(u.trCapacity ?? 0), n0(u.cfmRated ?? 0), String(u.quantity ?? 1)]));
+      });
+    }
+    if (eqBody.length === 0) {
+      eqBody.push([{ content: 'No equipment selected for this system.', colSpan: 8, styles: { fontStyle: 'italic' as const, textColor: C.subInk } }]);
+    }
+
+    y = ensureSpace(doc, y, 16 + eqBody.length * 7, project);
+    const w = doc.internal.pageSize.getWidth();
+    doc.setFillColor(...C.panelDark);
+    doc.rect(PAGE.left, y - 3, w - PAGE.left - PAGE.right, 7, 'F');
+    doc.setFont('helvetica', 'bold'); doc.setFontSize(8); doc.setTextColor(...C.ink);
+    doc.text(sysName, PAGE.left + 3, y + 1.2);
+    doc.setFont('helvetica', 'normal'); doc.setFontSize(7.5); doc.setTextColor(...C.subInk);
+    doc.text(`System Type: ${sysType}  ·  Brand: ${sysBrand}`, w - PAGE.right - 3, y + 1.2, { align: 'right' });
+    y += 7;
+
+    autoTable(doc, {
+      startY: y, head: [eqHead], body: eqBody, theme: 'grid',
+      styles:     { fontSize: 7.5, cellPadding: 2, textColor: C.ink },
+      headStyles: { fillColor: C.accent, textColor: [255, 255, 255] as [number, number, number], fontStyle: 'bold', fontSize: 7 },
+      columnStyles: {
+        0: { cellWidth: 30, fontStyle: 'bold' }, 1: { cellWidth: 24 }, 2: { cellWidth: 18 },
+        3: { cellWidth: 44 }, 4: { cellWidth: 22 },
+        5: { cellWidth: 16, halign: 'right' as const, fontStyle: 'bold' },
+        6: { cellWidth: 16, halign: 'right' as const },
+        7: { cellWidth: 12, halign: 'center' as const },
+      },
+      margin: { left: PAGE.left, right: PAGE.right },
+    });
+    y = (doc as any).lastAutoTable.finalY + 6;
+  }
+};
+
+export const generateEquipmentSchedulePDF = (
+  project: any,
+  equipSystems: any[],
+  rooms: Record<string, any[]>,
+  hvacHierarchy?: HvacHierarchyData,
+  eco = false,
+) => {
+  const C = makeTheme(eco);
+  const effectiveEquipSystems = hvacHierarchy && equipSystems.length === 0
+    ? hvacHierarchy.systems : equipSystems;
+  if (effectiveEquipSystems.length === 0) return;
+
+  const flatRooms = Object.values(hvacHierarchy ? hvacHierarchy.rooms : rooms).flat();
+
+  const doc = new jsPDF({ unit: 'mm', format: 'a4' });
+  const pageW = doc.internal.pageSize.getWidth();
+
+  // ── Cover strip ──────────────────────────────────────────────────────────
+  doc.setFillColor(...C.accent);
+  doc.rect(0, 0, pageW, 42, 'F');
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(20);
+  doc.setTextColor(...C.grandFg);
+  doc.text('INSTALLED EQUIPMENT', PAGE.left, 18);
+  doc.text('SCHEDULE', PAGE.left, 30);
+  doc.setFont('helvetica', 'normal');
+  doc.setFontSize(9);
+  doc.setTextColor(...C.coverText);
+  doc.text(`${String(project?.name || 'Project')}  ·  ${new Date().toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' })}`, PAGE.left, 38);
+
+  // ── Project info table ────────────────────────────────────────────────────
+  let y = 52;
+  autoTable(doc, {
+    startY: y,
+    body: [
+      ['Project Name', String(project?.name || '—')],
+      ['Location',     String(project?.location || project?.place || '—')],
+      ['System Type',  String(project?.systemType || '—')],
+    ],
+    theme: 'grid',
+    styles:       { fontSize: 8.5, cellPadding: 2.2, textColor: C.ink },
+    columnStyles: { 0: { fontStyle: 'bold', fillColor: C.panel, cellWidth: 48 } },
+    margin: { left: PAGE.left, right: PAGE.right },
+  });
+  y = (doc as any).lastAutoTable.finalY + 8;
+
+  // ── Section banner ────────────────────────────────────────────────────────
+  y = sectionBanner(doc, 'INSTALLED EQUIPMENT SCHEDULE', y, C);
+  y += 4;
+
+  renderEquipmentScheduleBody(doc, effectiveEquipSystems, flatRooms, project, C);
+
+  // ── Headers / footers ────────────────────────────────────────────────────
+  const totalPages = doc.getNumberOfPages();
+  for (let p = 1; p <= totalPages; p++) {
+    doc.setPage(p);
+    if (p > 1) drawHeader(doc, project, p - 1, totalPages - 1, C);
+    drawFooter(doc, C);
+  }
+
+  const fileName = `${String(project?.name || 'Equipment').replace(/[^a-zA-Z0-9_]/g, '_')}_Equipment_Schedule.pdf`;
   doc.save(fileName);
 };

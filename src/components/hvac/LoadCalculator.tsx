@@ -18,7 +18,7 @@ import { Button } from '../ui/button';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../ui/select';
 import { Separator } from '../ui/separator';
 import { db } from '../../lib/firebase';
-import { collection, addDoc, getDocs, doc, deleteDoc, updateDoc, deleteField } from 'firebase/firestore';
+import { collection, addDoc, getDocs, onSnapshot, doc, deleteDoc, updateDoc, setDoc, deleteField } from 'firebase/firestore';
 import { toast } from 'sonner';
 import {
   getCLTD,
@@ -86,20 +86,42 @@ interface HVACSystem {
 }
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '../ui/tooltip';
 import PsychrometricChart from './PsychrometricChart';
-import { generatePDFReport } from '../../services/reportService';
+import { generatePDFReport, generateEquipmentSchedulePDF } from '../../services/reportService';
 import { generateExcelReport } from '../../services/excelService';
+import { envelopeCache } from '../../lib/envelopeCache';
 import ZoneList from './ZoneList';
 
 export type LoadCalculatorHandle = {
   saveAllDirty: () => Promise<void>;
 };
 
-const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProfile: any; onNavigate?: (id: string) => void; onUnsavedChangesChange?: (has: boolean) => void }>(
-  function LoadCalculator({ project, userProfile, onNavigate, onUnsavedChangesChange }, ref) {
+// Merges Firestore zone docs (authoritative for name/conditions) with room-derived zones.
+// Firestore zones win on name and condition overrides; room-derived data wins on systemId/runtime fields.
+// Empty zones from Firestore (no rooms yet) are always included.
+function mergeZones(fsZones: Zone[], roomZones: Zone[]): Zone[] {
+  const fsMap = new Map(fsZones.map(z => [z.id, z]));
+  const roomMap = new Map(roomZones.map(z => [z.id, z]));
+  const merged: Zone[] = [];
+  // All FS zones, enriched with room-derived runtime fields (systemId etc.)
+  for (const fz of fsZones) {
+    const rz = roomMap.get(fz.id);
+    merged.push({ ...rz, ...fz, ...(rz?.systemId ? { systemId: rz.systemId } : {}) });
+  }
+  // Any room-derived zones not in Firestore (legacy rooms without a zone doc)
+  for (const rz of roomZones) {
+    if (!fsMap.has(rz.id)) merged.push(rz);
+  }
+  return merged;
+}
+
+const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProfile: any; onNavigate?: (id: string) => void; onUnsavedChangesChange?: (has: boolean) => void; reloadKey?: number }>(
+  function LoadCalculator({ project, userProfile, onNavigate, onUnsavedChangesChange, reloadKey }, ref) {
   const analysisBackfillDoneRef = useRef<Set<string>>(new Set());
   const oaFacphMigrationDoneRef = useRef<Set<string>>(new Set());
+  const loadedEnvelopeRoomsRef = useRef<Set<string>>(new Set());
   const backfillRunningRef = useRef(false);
   const migrationRunningRef = useRef(false);
+  const hasAutoExpandedZoneRef = useRef(false);
   const legacyDefaultOaFacph = Number(project?.legacyDefaultOaFacph ?? project?.data?.legacyDefaultOaFacph ?? 1.5);
 
   const normalizeRoom = (r: any): Room => {
@@ -109,8 +131,8 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
 
     return {
       id: r.id,
-      name: r.name ?? '',
-      floor: r.floor ?? 'Ground',
+      name: r.name ?? r.data?.name ?? '',
+      floor: r.floor ?? r.data?.floor ?? 'Ground',
       length: r.length ?? r.data?.length ?? 0,
       width: r.width ?? r.data?.width ?? 0,
       height: r.height ?? r.data?.height ?? 0,
@@ -119,23 +141,36 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
       facph: Number.isFinite(normalizedFacph) ? normalizedFacph : legacyDefaultOaFacph,
       peopleCount: r.peopleCount ?? r.data?.peopleCount ?? 0,
       activityType: r.activityType ?? r.data?.activityType ?? 'office',
+      achProfile: r.achProfile ?? r.data?.achProfile ?? r.activityType ?? r.data?.activityType ?? 'office',
+      spaceType: r.spaceType ?? r.data?.spaceType ?? 'office_general',
       lightsWattsPerSqft: r.lightsWattsPerSqft ?? r.data?.lightsWattsPerSqft ?? 0,
       equipmentKW: r.equipmentKW ?? r.data?.equipmentKW ?? 0,
       othersKW: r.othersKW ?? r.data?.othersKW ?? 0,
       sensibleSafetyFactor: r.sensibleSafetyFactor ?? r.data?.sensibleSafetyFactor ?? 10,
       latentSafetyFactor: r.latentSafetyFactor ?? r.data?.latentSafetyFactor ?? 5,
       grandTotalSafetyFactor: r.grandTotalSafetyFactor ?? r.data?.grandTotalSafetyFactor ?? 3,
+      sensibleSafetyPercent: r.sensibleSafetyPercent ?? r.data?.sensibleSafetyPercent,
+      latentSafetyPercent: r.latentSafetyPercent ?? r.data?.latentSafetyPercent,
+      overallSafetyPercent: r.overallSafetyPercent ?? r.data?.overallSafetyPercent,
+      heatingSafetyPercent: r.heatingSafetyPercent ?? r.data?.heatingSafetyPercent,
+      heatingPickupPercent: r.heatingPickupPercent ?? r.data?.heatingPickupPercent,
+      includeHumidifier: r.includeHumidifier ?? r.data?.includeHumidifier ?? false,
       ductGainPct: r.ductGainPct ?? r.data?.ductGainPct ?? 2,
       fanGainPct: r.fanGainPct ?? r.data?.fanGainPct ?? 3,
       _oaFacphMigrated: r._oaFacphMigrated ?? r.data?._oaFacphMigrated ?? false,
       _oaFacphMigrationSource: r._oaFacphMigrationSource ?? r.data?._oaFacphMigrationSource,
       _oaFacphMigratedAt: r._oaFacphMigratedAt ?? r.data?._oaFacphMigratedAt,
       _oaFacphWasMissingOnLoad: facphMissing,
+      zoneId: r.zoneId,
+      zoneName: r.zoneName,
+      systemId: r.systemId,
+      systemName: r.systemName,
     };
   };
 
   const [systems, setSystems] = useState<HVACSystem[]>([]);
   const [zones, setZones] = useState<Zone[]>([]);
+  const [equipSystems, setEquipSystems] = useState<any[]>([]);
   const [rooms, setRooms] = useState<Record<string, Room[]>>({});
   const [envelopeElements, setEnvelopeElements] = useState<Record<string, EnvelopeElement[]>>({});
   const [expandedZone, setExpandedZone] = useState<string | null>(null);
@@ -179,8 +214,6 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
   const [projectPsychroOpen, setProjectPsychroOpen] = useState(false);
 
 
-  const isVRF = project.systemType === 'VRF';
-  const isHybrid = project.systemType === 'Hybrid';
   const userRole = userProfile?.role;
   // Allow editing in offline/internal flows where role may be absent from profile payload.
   const canEdit = !userRole || ['Super', 'Admin A', 'Admin B', 'Design Team'].includes(userRole);
@@ -223,13 +256,8 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
     winterDesignTemp, winterDesignHumidity, insideWinterTemp, insideWinterHumidity,
   ]);
 
-  const getRoomRef = (zoneId: string, roomId: string, systemId?: string) => {
-    if (isVRF && systemId) {
-      return doc(db, 'projects', project.id, 'systems', systemId, 'rooms', roomId);
-    }
-    return systemId
-      ? doc(db, 'projects', project.id, 'systems', systemId, 'zones', zoneId, 'rooms', roomId)
-      : doc(db, 'projects', project.id, 'zones', zoneId, 'rooms', roomId);
+  const getRoomRef = (_zoneId: string, roomId: string, _systemId?: string) => {
+    return doc(db, 'projects', project.id, 'rooms', roomId);
   };
 
   const getDesignConditionsForZone = (zoneId: string, systemId?: string) => {
@@ -479,10 +507,35 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
     const presetTotalACH = getRecommendedAch(roomSource.achProfile ?? roomSource.activityType);
     const totalSupplyACH = Math.max(presetTotalACH, rd.facph);
     const totalSupplyCFM = (calculateRoomVolume(rd) * totalSupplyACH) / 60;
-    const designSupplyCFM = Math.max(coil.dehumidifiedCFM, totalSupplyCFM);
+    const designSupplyCFM = Math.max(coil.minAdpSensibleCFM, totalSupplyCFM);
     const cfmTR = designSupplyCFM / 400;
     const governingTR = Math.max(grandTotalTR, cfmTR);
     const requiredTR = governingTR * (1 + overallSafetyPct / 100);
+
+    // Monsoon snapshot — always computed so EquipmentSelection can compare seasons
+    const monsoonDc = { ...dc, outdoorTemp: monsoonDesignTemp, outdoorHumidity: monsoonDesignHumidity };
+    const monsoonEnvelope = calculateEnvelopeGain(elements, monsoonDc);
+    const monsoonVent = calculateVentilationLoad(rd, monsoonDc);
+    const monsoonErSensible = monsoonEnvelope.sensible + internal.sensible + monsoonVent.sensible * bf;
+    const monsoonErLatent = internal.latent + monsoonVent.latent * bf;
+    const monsoonParasitic = calculateParasiticGains(monsoonErSensible, monsoonErSensible, ductPct, fanPct);
+    const monsoonErshRaw = monsoonErSensible + monsoonParasitic.ductGain + monsoonParasitic.fanGain;
+    const monsoonCoilSen = monsoonErshRaw * (1 + sensibleSafetyPct / 100) + monsoonVent.sensible * (1 - bf);
+    const monsoonCoilLat = monsoonErLatent * (1 + latentSafetyPct / 100) + monsoonVent.latent * (1 - bf);
+    const monsoonGrandTotal = monsoonCoilSen + monsoonCoilLat;
+    const monsoonGrandTotalTR = monsoonGrandTotal / 12000;
+    const monsoonCoilParams = calculateCoilParameters(
+      monsoonCoilSen, monsoonCoilLat,
+      dc.indoorTemp, dc.indoorHumidity, dc.altitude || 0,
+      bf, 35, 65, getMinAdp(project?.systemType),
+    );
+    const monsoonDesignCFM = Math.max(monsoonCoilParams.minAdpSensibleCFM, totalSupplyCFM);
+    const monsoonCfmTR = monsoonDesignCFM / 400;
+    const monsoonGoverningTR = Math.max(monsoonGrandTotalTR, monsoonCfmTR);
+    const monsoonRequiredTR = monsoonGoverningTR * (1 + overallSafetyPct / 100);
+    const overallGoverningTR = includeMonsoon ? Math.max(governingTR, monsoonGoverningTR) : governingTR;
+    const overallRequiredTR  = includeMonsoon ? Math.max(requiredTR, monsoonRequiredTR) : requiredTR;
+    const overallDesignCFM   = includeMonsoon ? Math.max(designSupplyCFM, monsoonDesignCFM) : designSupplyCFM;
 
     const outdoorPsych = calculatePsychrometrics(dc.outdoorTemp, dc.outdoorHumidity, dc.altitude || 0);
     const indoorPsych = calculatePsychrometrics(dc.indoorTemp, dc.indoorHumidity, dc.altitude || 0);
@@ -544,6 +597,16 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
       _calcGoverningTR: parseFloat(governingTR.toFixed(3)),
       _calcRequiredTR: parseFloat(requiredTR.toFixed(3)),
       _calcDesignCFM: parseFloat(designSupplyCFM.toFixed(0)),
+      _calcSensibleBTUH: parseFloat(ersh.toFixed(0)),
+      _calcLatentBTUH: parseFloat(erlh.toFixed(0)),
+      _calcMonsoonLoadTR: parseFloat(monsoonGrandTotalTR.toFixed(3)),
+      _calcMonsoonCfmTR: parseFloat(monsoonCfmTR.toFixed(3)),
+      _calcMonsoonGoverningTR: parseFloat(monsoonGoverningTR.toFixed(3)),
+      _calcMonsoonRequiredTR: parseFloat(monsoonRequiredTR.toFixed(3)),
+      _calcMonsoonDesignCFM: parseFloat(monsoonDesignCFM.toFixed(0)),
+      _calcOverallGoverningTR: parseFloat(overallGoverningTR.toFixed(3)),
+      _calcOverallRequiredTR: parseFloat(overallRequiredTR.toFixed(3)),
+      _calcOverallDesignCFM: parseFloat(overallDesignCFM.toFixed(0)),
       updatedAt: new Date(),
     });
 
@@ -565,6 +628,16 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
               _calcGoverningTR: parseFloat(governingTR.toFixed(3)),
               _calcRequiredTR: parseFloat(requiredTR.toFixed(3)),
               _calcDesignCFM: parseFloat(designSupplyCFM.toFixed(0)),
+              _calcSensibleBTUH: parseFloat(ersh.toFixed(0)),
+              _calcLatentBTUH: parseFloat(erlh.toFixed(0)),
+              _calcMonsoonLoadTR: parseFloat(monsoonGrandTotalTR.toFixed(3)),
+              _calcMonsoonCfmTR: parseFloat(monsoonCfmTR.toFixed(3)),
+              _calcMonsoonGoverningTR: parseFloat(monsoonGoverningTR.toFixed(3)),
+              _calcMonsoonRequiredTR: parseFloat(monsoonRequiredTR.toFixed(3)),
+              _calcMonsoonDesignCFM: parseFloat(monsoonDesignCFM.toFixed(0)),
+              _calcOverallGoverningTR: parseFloat(overallGoverningTR.toFixed(3)),
+              _calcOverallRequiredTR: parseFloat(overallRequiredTR.toFixed(3)),
+              _calcOverallDesignCFM: parseFloat(overallDesignCFM.toFixed(0)),
             }
           : r
       ),
@@ -585,8 +658,10 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
     let totalArea = 0;
     let summerCooling = 0;
     let summerDesignCfm = 0;
+    let summerCoilDehumCfm = 0;
     let monsoonCooling = 0;
     let monsoonDesignCfm = 0;
+    let monsoonCoilDehumCfm = 0;
 
     const calculateCoolingSnapshot = (room: any, elements: EnvelopeElement[], zoneDc: typeof defaultDesignConditions) => {
       const rd: RoomDetails = {
@@ -641,11 +716,12 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
       const presetTotalACH = getRecommendedAch(room.achProfile ?? room.activityType);
       const totalSupplyACH = Math.max(presetTotalACH, rd.facph);
       const totalSupplyCFM = (calculateRoomVolume(rd) * totalSupplyACH) / 60;
-      const designSupplyCFM = Math.max(coilLocal.dehumidifiedCFM, totalSupplyCFM);
+      const designSupplyCFM = Math.max(coilLocal.minAdpSensibleCFM, totalSupplyCFM);
 
       return {
         grandTotal,
         designSupplyCFM,
+        coilDehumCFM: designSupplyCFM,
         heating: calculateHeatingLoad(rd, elements, zoneDc),
         area: rd.length * rd.width,
       };
@@ -678,6 +754,7 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
 
         summerCooling += summerSnapshot.grandTotal;
         summerDesignCfm += summerSnapshot.designSupplyCFM;
+        summerCoilDehumCfm += summerSnapshot.coilDehumCFM;
         totalHeating += heatingSnapshot.heating.totalHeatingLoad;
         totalArea += summerSnapshot.area;
 
@@ -685,6 +762,7 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
           const monsoonSnapshot = calculateCoolingSnapshot(room, elements, zoneMonsoonDc);
           monsoonCooling += monsoonSnapshot.grandTotal;
           monsoonDesignCfm += monsoonSnapshot.designSupplyCFM;
+          monsoonCoilDehumCfm += monsoonSnapshot.coilDehumCFM;
         }
       }
     }
@@ -692,8 +770,8 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
     const roomCount = Object.values(liveRooms).reduce((sum, r) => sum + (r as any[]).length, 0);
     const monsoonTR = monsoonCooling / 12000;
     const summerTR = summerCooling / 12000;
-    const summerCfmTR = summerDesignCfm > 0 ? summerDesignCfm / 400 : 0;
-    const monsoonCfmTR = monsoonDesignCfm > 0 ? monsoonDesignCfm / 400 : 0;
+    const summerCfmTR = summerCoilDehumCfm > 0 ? summerCoilDehumCfm / 400 : 0;
+    const monsoonCfmTR = monsoonCoilDehumCfm > 0 ? monsoonCoilDehumCfm / 400 : 0;
     const summerGoverningTR = Math.max(summerTR, summerCfmTR);
     const monsoonGoverningTR = Math.max(monsoonTR, monsoonCfmTR);
     const governingLoadSeason = includeMonsoon && monsoonTR > summerTR ? 'Monsoon' : 'Summer';
@@ -748,81 +826,149 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
     insideWinterHumidity,
   ]);
 
-  // One-time load when project opens
+  // Firestore zone + system documents — authoritative for names, design-condition overrides, and empty zones.
+  // /zones    — LC zones created by the user
+  // /systems  — legacy VRF systems (backward compat)
+  // /equipmentSystems — SD equipment systems; rooms assigned in SD get zoneId = equipSystem.id
+  // Priority: /zones > /systems > /equipmentSystems (highest precision first)
+  const fsZoneDocsRef = useRef<Zone[]>([]);         // /zones
+  const fsSystemDocsRef = useRef<Zone[]>([]);        // /systems (legacy VRF)
+  const fsEquipSystemDocsRef = useRef<Zone[]>([]);   // /equipmentSystems (SD)
+  const fsZonesRef = useRef<Zone[]>([]);
+  const liveAllRoomsRef = useRef<Record<string, Room[]>>({}); // updated by rooms listener
+  const rebuildFsZonesRef = useRef(() => {
+    const zoneIds = new Set(fsZoneDocsRef.current.map(z => z.id));
+    const sysIds  = new Set([...zoneIds, ...fsSystemDocsRef.current.map(s => s.id)]);
+    const liveRooms = liveAllRoomsRef.current;
+    fsZonesRef.current = [
+      ...fsZoneDocsRef.current,
+      ...fsSystemDocsRef.current.filter(s => !zoneIds.has(s.id)),
+      // SD equipment systems: only show as a zone if at least one live room references it.
+      // Stale assignedRoomIds (pointing to deleted rooms) are not sufficient.
+      ...fsEquipSystemDocsRef.current.filter(es =>
+        !sysIds.has(es.id) && (liveRooms[es.id]?.length ?? 0) > 0
+      ),
+    ];
+    setZones(prev => mergeZones(fsZonesRef.current, prev));
+  });
+  useEffect(() => {
+    if (!project.id || !userProfile) return;
+    const unsubZones = onSnapshot(
+      collection(db, 'projects', project.id, 'zones'),
+      (snap) => {
+        fsZoneDocsRef.current = snap.docs.map(d => ({ id: d.id, ...d.data() } as Zone));
+        rebuildFsZonesRef.current();
+      },
+    );
+    const unsubSystems = onSnapshot(
+      collection(db, 'projects', project.id, 'systems'),
+      (snap) => {
+        fsSystemDocsRef.current = snap.docs.map(d => ({ id: d.id, ...d.data() } as Zone));
+        rebuildFsZonesRef.current();
+      },
+    );
+    const unsubEquipSystems = onSnapshot(
+      collection(db, 'projects', project.id, 'equipmentSystems'),
+      (snap) => {
+        const docs = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+        fsEquipSystemDocsRef.current = docs as Zone[];
+        setEquipSystems(docs);
+        rebuildFsZonesRef.current();
+      },
+    );
+    return () => { unsubZones(); unsubSystems(); unsubEquipSystems(); };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [project.id, userProfile]);
+
+  // Live room listener — re-groups zones instantly when room.zoneId changes
   useEffect(() => {
     if (!project.id || !userProfile) return;
     analysisBackfillDoneRef.current.clear();
     oaFacphMigrationDoneRef.current.clear();
+    loadedEnvelopeRoomsRef.current.clear();
+    setDataLoading(true);
 
-    const load = async () => {
-      setDataLoading(true);
-      try {
-        const allZones: Zone[] = [];
+    const unsub = onSnapshot(
+      collection(db, 'projects', project.id, 'rooms'),
+      async (snap) => {
+        const rList = snap.docs.map(d => normalizeRoom({ id: d.id, ...d.data() }));
+
         const allRooms: Record<string, Room[]> = {};
-        const allElements: Record<string, EnvelopeElement[]> = {};
-
-        if (isVRF || isHybrid) {
-          const sysSnap = await getDocs(collection(db, 'projects', project.id, 'systems'));
-          const sList = sysSnap.docs.map(d => ({ id: d.id, ...d.data() })) as HVACSystem[];
-          setSystems(sList);
-
-          for (const sys of sList) {
-            if (isVRF) {
-              // VRF: rooms directly under system
-              const roomsSnap = await getDocs(collection(db, 'projects', project.id, 'systems', sys.id, 'rooms'));
-              const rList = roomsSnap.docs.map(d => normalizeRoom({ id: d.id, ...d.data() }));
-              allRooms[sys.id] = rList;
-              for (const room of rList) {
-                const elSnap = await getDocs(collection(db, 'projects', project.id, 'systems', sys.id, 'rooms', room.id, 'envelopeElements'));
-                allElements[room.id] = elSnap.docs.map(d => ({ id: d.id, ...d.data() })) as EnvelopeElement[];
-              }
-            } else {
-              // Hybrid: zones under system
-              const zSnap = await getDocs(collection(db, 'projects', project.id, 'systems', sys.id, 'zones'));
-              const zList = zSnap.docs.map(d => ({ id: d.id, ...d.data(), systemId: sys.id })) as Zone[];
-              allZones.push(...zList);
-              for (const zone of zList) {
-                const roomsSnap = await getDocs(collection(db, 'projects', project.id, 'systems', sys.id, 'zones', zone.id, 'rooms'));
-                const rList = roomsSnap.docs.map(d => normalizeRoom({ id: d.id, ...d.data() }));
-                allRooms[zone.id] = rList;
-                for (const room of rList) {
-                  const elSnap = await getDocs(collection(db, 'projects', project.id, 'systems', sys.id, 'zones', zone.id, 'rooms', room.id, 'envelopeElements'));
-                  allElements[room.id] = elSnap.docs.map(d => ({ id: d.id, ...d.data() })) as EnvelopeElement[];
-                }
-              }
-            }
+        const zoneMap: Record<string, { id: string; name: string; systemId?: string }> = {};
+        for (const room of rList) {
+          const key = (room as any).zoneId ?? 'default';
+          const zName = (room as any).zoneName ?? 'Zone';
+          const zSystemId = (room as any).systemId as string | undefined;
+          if (!allRooms[key]) allRooms[key] = [];
+          allRooms[key].push(room);
+          if (!zoneMap[key]) {
+            zoneMap[key] = { id: key, name: zName, ...(zSystemId ? { systemId: zSystemId } : {}) };
           }
         }
 
-        if (!isVRF) {
-          // CAC and Hybrid: direct zones
-          const zSnap = await getDocs(collection(db, 'projects', project.id, 'zones'));
-          const zList = zSnap.docs.map(d => ({ id: d.id, ...d.data() })) as Zone[];
-          allZones.push(...zList);
-          for (const zone of zList) {
-            const roomsSnap = await getDocs(collection(db, 'projects', project.id, 'zones', zone.id, 'rooms'));
-            const rList = roomsSnap.docs.map(d => normalizeRoom({ id: d.id, ...d.data() }));
-            allRooms[zone.id] = rList;
-            for (const room of rList) {
-              const elSnap = await getDocs(collection(db, 'projects', project.id, 'zones', zone.id, 'rooms', room.id, 'envelopeElements'));
-              allElements[room.id] = elSnap.docs.map(d => ({ id: d.id, ...d.data() })) as EnvelopeElement[];
+        // Load envelope elements only for rooms not yet fetched this mount.
+        // Check the module-level cache first — avoids re-reading Firestore on tab switches.
+        const missingIds = rList.map(r => r.id).filter(id => !loadedEnvelopeRoomsRef.current.has(id));
+        if (missingIds.length > 0) {
+          const newElements: Record<string, EnvelopeElement[]> = {};
+          for (const roomId of missingIds) {
+            loadedEnvelopeRoomsRef.current.add(roomId);
+            const cached = envelopeCache.get(project.id, roomId);
+            if (cached) {
+              newElements[roomId] = cached;
+              continue;
             }
+            const elSnap = await getDocs(collection(db, 'projects', project.id, 'rooms', roomId, 'envelopeElements'));
+            const elements = elSnap.docs.map(d => ({ id: d.id, ...d.data() })) as EnvelopeElement[];
+            envelopeCache.set(project.id, roomId, elements);
+            newElements[roomId] = elements;
           }
+          setEnvelopeElements(prev => ({ ...prev, ...newElements }));
         }
 
-        setZones(allZones);
+        // Keep the live-rooms ref in sync so rebuildFsZonesRef can use actual room data.
+        liveAllRoomsRef.current = allRooms;
+
+        // Merge room-derived zones with Firestore zone documents so that:
+        // 1. Empty zones (no rooms yet) are preserved from Firestore
+        // 2. Zone names / design-condition overrides from Firestore take precedence
+        // Equipment system zones with no live rooms are stripped here as a safety net
+        // (handles the case where rebuildFsZonesRef ran before rooms loaded).
+        const equipSystemIds = new Set(fsEquipSystemDocsRef.current.map(es => es.id));
+        const filteredFsZones = fsZonesRef.current.filter(z =>
+          !equipSystemIds.has(z.id) || (allRooms[z.id]?.length ?? 0) > 0
+        );
+        const roomDerivedZones = Object.values(zoneMap) as Zone[];
+        const mergedZones = mergeZones(filteredFsZones, roomDerivedZones);
+        setZones(mergedZones);
         setRooms(allRooms);
-        setEnvelopeElements(allElements);
-      } catch (error) {
+        setDataLoading(false);
+      },
+      (error) => {
         console.error('[LoadCalculator] Failed to load project data:', error);
         toast.error('Failed to load project data');
-      } finally {
         setDataLoading(false);
-      }
-    };
+      },
+    );
 
-    load();
-  }, [project.id, isVRF, isHybrid, userProfile]);
+    return () => unsub();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [project.id, userProfile]);
+
+  // Reset auto-expand flag whenever the project changes
+  useEffect(() => {
+    hasAutoExpandedZoneRef.current = false;
+  }, [project.id]);
+
+  // Auto-expand the first zone once data has loaded
+  useEffect(() => {
+    if (dataLoading) return;
+    if (hasAutoExpandedZoneRef.current) return;
+    if (zones.length > 0) {
+      setExpandedZone(zones[0].id);
+      hasAutoExpandedZoneRef.current = true;
+    }
+  }, [dataLoading, zones.length]);
 
   useEffect(() => {
     if (dataLoading) return;
@@ -945,7 +1091,10 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
     }
   };
 
+  const [addingZone, setAddingZone] = useState(false);
   const addZone = async (systemId?: string) => {
+    if (addingZone) return;
+    setAddingZone(true);
     try {
       const name = `Zone ${zones.filter(z => z.systemId === systemId).length + 1}`;
       const path = systemId
@@ -958,6 +1107,8 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
       toast.success('Zone added');
     } catch (error) {
       toast.error('Failed to add zone');
+    } finally {
+      setAddingZone(false);
     }
   };
 
@@ -984,7 +1135,9 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
       Object.keys(cleanData).forEach(key => {
         if (cleanData[key] === undefined) cleanData[key] = deleteField();
       });
-      await updateDoc(zoneRef, cleanData);
+      // setDoc+merge creates the document if it doesn't exist (virtual zones have no
+      // Firestore doc until design-condition overrides are first saved).
+      await setDoc(zoneRef, cleanData, { merge: true });
 
       const zoneRooms = rooms[id] || [];
       for (const room of zoneRooms) {
@@ -1029,14 +1182,18 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
 
   const addRoom = async (zoneId: string, systemId?: string) => {
     try {
-      let path;
-      if (isVRF && systemId) {
-        path = collection(db, 'projects', project.id, 'systems', systemId, 'rooms');
-      } else {
-        path = systemId
-          ? collection(db, 'projects', project.id, 'systems', systemId, 'zones', zoneId, 'rooms')
-          : collection(db, 'projects', project.id, 'zones', zoneId, 'rooms');
-      }
+      const zone = zones.find(z => z.id === zoneId);
+      const zoneName = zone?.name ?? 'Zone';
+      const systemName = systemId
+        ? (systems.find(s => s.id === systemId)?.name ?? zoneName)
+        : undefined;
+      // Stamp new hierarchy fields when created under an equipment system zone.
+      // zoneId !== systemId means this is a sub-zone (AHU group) — use it as hvacZoneId.
+      const hvacFields = systemId
+        ? zoneId !== systemId
+          ? { hvacSystemId: systemId, hvacSystemName: systemName, hvacZoneId: zoneId, hvacZoneName: zoneName }
+          : { hvacSystemId: systemId, hvacSystemName: systemName }
+        : {};
       const roomData = {
         name: `Room ${(rooms[zoneId]?.length || 0) + 1}`,
         floor: 'Ground',
@@ -1055,10 +1212,16 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
         sensibleSafetyFactor: 10,
         latentSafetyFactor: 5,
         grandTotalSafetyFactor: 3,
+        zoneId,
+        zoneName,
+        ...(systemId ? { systemId, systemName } : {}),
+        ...hvacFields,
       };
-      const ref = await addDoc(path, roomData);
+      const ref = await addDoc(collection(db, 'projects', project.id, 'rooms'), roomData);
       const newRoom = normalizeRoom({ id: ref.id, ...roomData });
       setRooms(prev => ({ ...prev, [zoneId]: [...(prev[zoneId] || []), newRoom] }));
+      setExpandedZone(zoneId);
+      setExpandedRoom(ref.id);
       await persistRoomAnalysisSnapshot(zoneId, newRoom.id, systemId, newRoom, []);
       toast.success('Room added');
     } catch (error) {
@@ -1068,9 +1231,7 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
 
   const addEnvelopeElement = async (zoneId: string, roomId: string, type: EnvelopeElement['type'], systemId?: string) => {
     try {
-      const zone = isVRF && systemId
-        ? systems.find(s => s.id === systemId) as unknown as Zone
-        : zones.find(z => z.id === zoneId);
+      const zone = zones.find(z => z.id === zoneId);
       const deltaT = (zone?.outdoorTemp || 95) - (zone?.indoorTemp || 75);
       const designAltitude = zone?.altitude ?? project.altitude ?? project.data?.altitude ?? 0;
       const designMonth = zone?.designMonth ?? project.designMonth ?? project.data?.designMonth ?? 7;
@@ -1082,10 +1243,12 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
         dailyRange,
         designMonth,
       };
+      const room = (rooms[zoneId] || []).find((r: any) => r.id === roomId);
+      const roomFloorArea = Math.round((Number(room?.length) || 0) * (Number(room?.width) || 0));
       const elementData: any = {
         type,
         orientation: defaultOrient,
-        area: 0,
+        area: (type === 'Roof' || type === 'Floor') ? roomFloorArea : 0,
         uValue: type === 'Glass' ? 0.5 : 0.3,
         solarFactor: getCLTD(defaultOrient as any, type, deltaT, designAltitude, cltdOpts),
         description: `New ${type}`,
@@ -1107,14 +1270,7 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
         const wall = DEFAULT_WALL_TYPES.find(w => w.id === 'w1');
         if (wall) elementData.uValue = wall.uValue;
       }
-      let path;
-      if (isVRF && systemId) {
-        path = collection(db, 'projects', project.id, 'systems', systemId, 'rooms', roomId, 'envelopeElements');
-      } else {
-        path = systemId
-          ? collection(db, 'projects', project.id, 'systems', systemId, 'zones', zoneId, 'rooms', roomId, 'envelopeElements')
-          : collection(db, 'projects', project.id, 'zones', zoneId, 'rooms', roomId, 'envelopeElements');
-      }
+      const path = collection(db, 'projects', project.id, 'rooms', roomId, 'envelopeElements');
       const ref = await addDoc(path, elementData);
       const nextElements = [...(envelopeElements[roomId] || []), { id: ref.id, ...elementData }] as EnvelopeElement[];
       setEnvelopeElements(prev => ({ ...prev, [roomId]: nextElements }));
@@ -1132,9 +1288,7 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
       if ((data.orientation || data.color) && !data.isOverride) {
         const currentEl = (envelopeElements[roomId] || []).find(el => el.id === elementId);
         if (currentEl && !currentEl.isOverride) {
-          const zone = isVRF && systemId
-            ? systems.find(s => s.id === systemId) as unknown as Zone
-            : zones.find(z => z.id === zoneId);
+          const zone = zones.find(z => z.id === zoneId);
           const deltaT = (zone?.outdoorTemp || 95) - (zone?.indoorTemp || 75);
           const designAltitude = (zone as any)?.altitude ?? project.altitude ?? project.data?.altitude ?? 0;
           const designMonth = (zone as any)?.designMonth ?? project.designMonth ?? project.data?.designMonth ?? 7;
@@ -1160,14 +1314,7 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
         ...prev,
         [roomId]: nextElements,
       }));
-      let elRef;
-      if (isVRF && systemId) {
-        elRef = doc(db, 'projects', project.id, 'systems', systemId, 'rooms', roomId, 'envelopeElements', elementId);
-      } else {
-        elRef = systemId
-          ? doc(db, 'projects', project.id, 'systems', systemId, 'zones', zoneId, 'rooms', roomId, 'envelopeElements', elementId)
-          : doc(db, 'projects', project.id, 'zones', zoneId, 'rooms', roomId, 'envelopeElements', elementId);
-      }
+      const elRef = doc(db, 'projects', project.id, 'rooms', roomId, 'envelopeElements', elementId);
       await updateDoc(elRef, data);
       await persistRoomAnalysisSnapshot(zoneId, roomId, systemId, undefined, nextElements);
     } catch (error) {
@@ -1179,14 +1326,7 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
     try {
       const nextElements = ((envelopeElements[roomId] || []).filter(el => el.id !== elementId)) as EnvelopeElement[];
       setEnvelopeElements(prev => ({ ...prev, [roomId]: nextElements }));
-      let elRef;
-      if (isVRF && systemId) {
-        elRef = doc(db, 'projects', project.id, 'systems', systemId, 'rooms', roomId, 'envelopeElements', elementId);
-      } else {
-        elRef = systemId
-          ? doc(db, 'projects', project.id, 'systems', systemId, 'zones', zoneId, 'rooms', roomId, 'envelopeElements', elementId)
-          : doc(db, 'projects', project.id, 'zones', zoneId, 'rooms', roomId, 'envelopeElements', elementId);
-      }
+      const elRef = doc(db, 'projects', project.id, 'rooms', roomId, 'envelopeElements', elementId);
       await deleteDoc(elRef);
       await persistRoomAnalysisSnapshot(zoneId, roomId, systemId, undefined, nextElements);
       toast.success('Element deleted');
@@ -1206,16 +1346,10 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
     },
   ) => {
     const getElRef = (elId: string) => {
-      if (isVRF && systemId) return doc(db, 'projects', project.id, 'systems', systemId, 'rooms', roomId, 'envelopeElements', elId);
-      return systemId
-        ? doc(db, 'projects', project.id, 'systems', systemId, 'zones', zoneId, 'rooms', roomId, 'envelopeElements', elId)
-        : doc(db, 'projects', project.id, 'zones', zoneId, 'rooms', roomId, 'envelopeElements', elId);
+      return doc(db, 'projects', project.id, 'rooms', roomId, 'envelopeElements', elId);
     };
     const getColRef = () => {
-      if (isVRF && systemId) return collection(db, 'projects', project.id, 'systems', systemId, 'rooms', roomId, 'envelopeElements');
-      return systemId
-        ? collection(db, 'projects', project.id, 'systems', systemId, 'zones', zoneId, 'rooms', roomId, 'envelopeElements')
-        : collection(db, 'projects', project.id, 'zones', zoneId, 'rooms', roomId, 'envelopeElements');
+      return collection(db, 'projects', project.id, 'rooms', roomId, 'envelopeElements');
     };
 
     let nextElements = [...(envelopeElements[roomId] || [])] as EnvelopeElement[];
@@ -1234,8 +1368,9 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
     }
 
     setEnvelopeElements(prev => ({ ...prev, [roomId]: nextElements }));
+    envelopeCache.set(project.id, roomId, nextElements);
     await persistRoomAnalysisSnapshot(zoneId, roomId, systemId, undefined, nextElements);
-  }, [isVRF, project.id, envelopeElements, persistRoomAnalysisSnapshot]);
+  }, [project.id, envelopeElements, persistRoomAnalysisSnapshot]);
 
   const clampFalseCeilingToSlab = (currentRoom: Room | undefined, patch: Partial<Room>): Partial<Room> => {
     const nextPatch: Partial<Room> = { ...patch };
@@ -1266,14 +1401,7 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
         ...prev,
         [zoneId]: (prev[zoneId] || []).map(r => r.id === roomId ? { ...r, ...safeData } : r),
       }));
-      let roomRef;
-      if (isVRF && systemId) {
-        roomRef = doc(db, 'projects', project.id, 'systems', systemId, 'rooms', roomId);
-      } else {
-        roomRef = systemId
-          ? doc(db, 'projects', project.id, 'systems', systemId, 'zones', zoneId, 'rooms', roomId)
-          : doc(db, 'projects', project.id, 'zones', zoneId, 'rooms', roomId);
-      }
+      const roomRef = doc(db, 'projects', project.id, 'rooms', roomId);
       await updateDoc(roomRef, safeData);
       if (mergedRoom) {
         await persistRoomAnalysisSnapshot(zoneId, roomId, systemId, mergedRoom, envelopeElements[roomId] || []);
@@ -1287,14 +1415,7 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
     try {
       setRooms(prev => ({ ...prev, [zoneId]: (prev[zoneId] || []).filter(r => r.id !== roomId) }));
       setEnvelopeElements(prev => { const next = { ...prev }; delete next[roomId]; return next; });
-      let roomRef;
-      if (isVRF && systemId) {
-        roomRef = doc(db, 'projects', project.id, 'systems', systemId, 'rooms', roomId);
-      } else {
-        roomRef = systemId
-          ? doc(db, 'projects', project.id, 'systems', systemId, 'zones', zoneId, 'rooms', roomId)
-          : doc(db, 'projects', project.id, 'zones', zoneId, 'rooms', roomId);
-      }
+      const roomRef = doc(db, 'projects', project.id, 'rooms', roomId);
       await deleteDoc(roomRef);
       toast.success('Room deleted');
     } catch (error) {
@@ -1335,14 +1456,7 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
     if (!pending) return;
     try {
       const { zoneId, roomId, elementId, data, systemId, nextElements } = pending;
-      let elRef;
-      if (isVRF && systemId) {
-        elRef = doc(db, 'projects', project.id, 'systems', systemId, 'rooms', roomId, 'envelopeElements', elementId);
-      } else {
-        elRef = systemId
-          ? doc(db, 'projects', project.id, 'systems', systemId, 'zones', zoneId, 'rooms', roomId, 'envelopeElements', elementId)
-          : doc(db, 'projects', project.id, 'zones', zoneId, 'rooms', roomId, 'envelopeElements', elementId);
-      }
+      const elRef = doc(db, 'projects', project.id, 'rooms', roomId, 'envelopeElements', elementId);
       await updateDoc(elRef, data);
       schedulePersistRoomAnalysis(zoneId, roomId, systemId, undefined, nextElements);
     } catch (error) {
@@ -1351,21 +1465,14 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
       delete pendingEnvelopeWritesRef.current[key];
       delete envElementDbTimersRef.current[key];
     }
-  }, [isVRF, project.id, schedulePersistRoomAnalysis]);
+  }, [project.id, schedulePersistRoomAnalysis]);
 
   const runPendingRoomWrite = useCallback(async (key: string) => {
     const pending = pendingRoomWritesRef.current[key];
     if (!pending) return;
     try {
       const { zoneId, roomId, data, systemId, mergedRoom } = pending;
-      let roomRef;
-      if (isVRF && systemId) {
-        roomRef = doc(db, 'projects', project.id, 'systems', systemId, 'rooms', roomId);
-      } else {
-        roomRef = systemId
-          ? doc(db, 'projects', project.id, 'systems', systemId, 'zones', zoneId, 'rooms', roomId)
-          : doc(db, 'projects', project.id, 'zones', zoneId, 'rooms', roomId);
-      }
+      const roomRef = doc(db, 'projects', project.id, 'rooms', roomId);
       await updateDoc(roomRef, data);
       if (mergedRoom) {
         schedulePersistRoomAnalysis(zoneId, roomId, systemId, mergedRoom, envelopeElements[roomId] || []);
@@ -1386,7 +1493,7 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
       delete pendingRoomWritesRef.current[key];
       delete roomDbTimersRef.current[key];
     }
-  }, [isVRF, project.id, schedulePersistRoomAnalysis, envelopeElements]);
+  }, [project.id, schedulePersistRoomAnalysis, envelopeElements]);
 
   const runPendingAnalysisWrite = useCallback(async (key: string) => {
     const pending = pendingAnalysisWritesRef.current[key];
@@ -1580,67 +1687,61 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
 
   const moveRoom = async (room: Room, sourceZoneId: string, targetZoneId: string) => {
     try {
-      const sourceZone = zones.find(z => z.id === sourceZoneId) || systems.find(s => s.id === sourceZoneId);
       const targetZone = zones.find(z => z.id === targetZoneId) || systems.find(s => s.id === targetZoneId);
-      
-      if (!sourceZone || !targetZone) return;
 
-      const sourceIsSystem = systems.some(s => s.id === sourceZoneId);
-      const targetIsSystem = systems.some(s => s.id === targetZoneId);
-      
-      const sourceSystemId = (sourceZone as any).systemId || (sourceIsSystem ? sourceZoneId : undefined);
-      const targetSystemId = (targetZone as any).systemId || (targetIsSystem ? targetZoneId : undefined);
+      if (!targetZone) return;
+
+      const targetSystemId = (targetZone as any).systemId as string | undefined;
+      const targetSystemName: string | undefined = targetSystemId
+        ? (targetSystemId === targetZoneId
+            ? (targetZone as any).name
+            : systems.find(s => s.id === targetSystemId)?.name)
+        : undefined;
 
       // 1. Get elements
       const elements = envelopeElements[room.id] || [];
 
-      // 2. Define paths
-      let targetPath;
-      if (isVRF && targetIsSystem) {
-        targetPath = collection(db, 'projects', project.id, 'systems', targetZoneId, 'rooms');
-      } else {
-        targetPath = targetSystemId
-          ? collection(db, 'projects', project.id, 'systems', targetSystemId, 'zones', targetZoneId, 'rooms')
-          : collection(db, 'projects', project.id, 'zones', targetZoneId, 'rooms');
-      }
-
-      // 3. Create new room
-      const { id: oldId, ...roomData } = room;
-      const newRoomRef = await addDoc(targetPath, roomData);
+      // 2. Create new room at flat path with updated zoneId/zoneName
+      // Strip transient + undefined fields — Firestore rejects undefined values
+      const {
+        id: oldId,
+        _oaFacphWasMissingOnLoad,
+        _oaFacphMigrationSource,
+        _oaFacphMigratedAt,
+        analysis,
+        ...roomData
+      } = room as any;
+      const rawRoomData: Record<string, unknown> = {
+        ...roomData,
+        zoneId: targetZoneId,
+        zoneName: (targetZone as any).name ?? 'Zone',
+        ...(targetSystemId ? { systemId: targetSystemId, systemName: targetSystemName } : {}),
+        // Re-include migration fields only when they have actual values
+        ...(_oaFacphMigrationSource != null ? { _oaFacphMigrationSource } : {}),
+        ...(_oaFacphMigratedAt != null ? { _oaFacphMigratedAt } : {}),
+      };
+      // Final pass: strip any remaining undefined values (e.g. from room fields)
+      const newRoomData = Object.fromEntries(Object.entries(rawRoomData).filter(([, v]) => v !== undefined));
+      const newRoomRef = await addDoc(collection(db, 'projects', project.id, 'rooms'), newRoomData);
       const newRoomId = newRoomRef.id;
 
-      // 4. Copy elements
+      // 3. Copy elements
       const copiedElements: EnvelopeElement[] = [];
       for (const el of elements) {
         const { id: elOldId, ...elData } = el;
-        let elPath;
-        if (isVRF && targetIsSystem) {
-          elPath = collection(db, 'projects', project.id, 'systems', targetZoneId, 'rooms', newRoomId, 'envelopeElements');
-        } else {
-          elPath = targetSystemId
-            ? collection(db, 'projects', project.id, 'systems', targetSystemId, 'zones', targetZoneId, 'rooms', newRoomId, 'envelopeElements')
-            : collection(db, 'projects', project.id, 'zones', targetZoneId, 'rooms', newRoomId, 'envelopeElements');
-        }
+        const elPath = collection(db, 'projects', project.id, 'rooms', newRoomId, 'envelopeElements');
         const newElementRef = await addDoc(elPath, elData);
         copiedElements.push({ id: newElementRef.id, ...elData } as EnvelopeElement);
       }
 
-      // 5. Delete old room
-      let oldRoomRef;
-      if (isVRF && sourceIsSystem) {
-        oldRoomRef = doc(db, 'projects', project.id, 'systems', sourceZoneId, 'rooms', room.id);
-      } else {
-        oldRoomRef = sourceSystemId
-          ? doc(db, 'projects', project.id, 'systems', sourceSystemId, 'zones', sourceZoneId, 'rooms', room.id)
-          : doc(db, 'projects', project.id, 'zones', sourceZoneId, 'rooms', room.id);
-      }
-      await deleteDoc(oldRoomRef);
+      // 4. Delete old room
+      await deleteDoc(doc(db, 'projects', project.id, 'rooms', room.id));
 
-      // 6. Update local UI state immediately
+      // 5. Update local UI state immediately
       setRooms((prev) => {
         const next = { ...prev };
         next[sourceZoneId] = (next[sourceZoneId] || []).filter((r) => r.id !== room.id);
-        next[targetZoneId] = [...(next[targetZoneId] || []), normalizeRoom({ id: newRoomId, ...roomData })];
+        next[targetZoneId] = [...(next[targetZoneId] || []), normalizeRoom({ id: newRoomId, ...newRoomData })];
         return next;
       });
       setEnvelopeElements((prev) => {
@@ -1649,12 +1750,12 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
         next[newRoomId] = copiedElements;
         return next;
       });
-      await persistRoomAnalysisSnapshot(targetZoneId, newRoomId, targetSystemId, normalizeRoom({ id: newRoomId, ...roomData }), copiedElements);
+      await persistRoomAnalysisSnapshot(targetZoneId, newRoomId, targetSystemId, normalizeRoom({ id: newRoomId, ...newRoomData }), copiedElements);
       if (expandedRoom === room.id) {
         setExpandedRoom(newRoomId);
       }
-      
-      toast.success(`Moved ${room.name} to ${targetZone.name}`);
+
+      toast.success(`Moved ${room.name} to ${(targetZone as any).name}`);
     } catch (error) {
       console.error('Move failed:', error);
       toast.error('Failed to move room');
@@ -1833,16 +1934,16 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
       <div className="space-y-6 pb-20">
 
         {/* ── Compact header bar ─────────────────────────────────────────── */}
-        <div className="sticky top-0 z-20 -mx-2 px-2 py-2 bg-gray-50/95 backdrop-blur border-b border-gray-200 rounded-lg flex flex-wrap items-center gap-2">
+        <div className="sticky top-0 z-20 -mx-2 px-2 py-2 bg-gray-50/95 dark:bg-slate-900/95 backdrop-blur border-b border-gray-200 dark:border-slate-700 rounded-lg flex flex-wrap items-center gap-2">
           <div className="flex-1 min-w-0">
-            <h2 className="text-xl font-bold text-gray-900 truncate">{project.name}</h2>
-            <p className="text-xs text-gray-400">
-              {isHybrid ? 'Hybrid' : isVRF ? 'VRF — System › Room' : 'CAC — Zone › Room'}
+            <h2 className="text-xl font-bold text-gray-900 dark:text-slate-100 truncate">{project.name}</h2>
+            <p className="text-xs text-gray-400 dark:text-slate-500">
+              Zone › Room
             </p>
           </div>
           <div className="flex flex-wrap gap-2">
             {onNavigate && (
-              <Button variant="outline" size="sm" onClick={() => onNavigate('methodology')} className="gap-1 text-gray-600 border-gray-300">
+              <Button variant="outline" size="sm" onClick={() => onNavigate('methodology')} className="gap-1 text-gray-600 dark:text-slate-400 border-gray-300 dark:border-slate-600">
                 <BookOpen className="w-3.5 h-3.5" /> Methodology
               </Button>
             )}
@@ -1850,167 +1951,170 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
               variant="outline"
               size="sm"
               onClick={() => {
-                // Debug log for export state
-                console.log('[Excel Export] systems:', systems);
-                console.log('[Excel Export] zones:', zones);
-                console.log('[Excel Export] rooms:', rooms);
-                // Allow export if (systems OR zones) and rooms exist
-                if ((systems.length === 0 && zones.length === 0) || Object.keys(rooms).length === 0) {
+                if ((systems.length === 0 && zones.length === 0) || Object.keys(liveRooms).length === 0) {
                   toast.error('Data is still loading or incomplete. Please try again.');
                   return;
                 }
-                generateExcelReport(project, systems, zones, rooms, envelopeElements);
+                generateExcelReport(project, systems, zones, liveRooms, liveEnvelopeElements, equipSystems, userProfile);
               }}
-              className="gap-1 bg-green-50 text-green-700 border-green-200 hover:bg-green-100 shadow-sm"
+              className="gap-1 bg-green-50 dark:bg-green-950/20 text-green-700 dark:text-green-400 border-green-200 dark:border-green-800 hover:bg-green-100 dark:hover:bg-green-900/30 shadow-sm"
             >
               <Download className="w-3.5 h-3.5" /> Excel
             </Button>
-            <Button variant="outline" size="sm" onClick={() => generatePDFReport(project, systems, zones, rooms, envelopeElements)} className="gap-1 bg-orange-50 text-orange-700 border-orange-200 hover:bg-orange-100 shadow-sm">
+            <Button variant="outline" size="sm" onClick={() => generatePDFReport(project, systems, zones, liveRooms, liveEnvelopeElements, equipSystems)} className="gap-1 bg-orange-50 dark:bg-orange-950/20 text-orange-700 dark:text-orange-400 border-orange-200 dark:border-orange-800 hover:bg-orange-100 dark:hover:bg-orange-900/30 shadow-sm">
               <Download className="w-3.5 h-3.5" /> PDF
             </Button>
+            <Button variant="outline" size="sm" onClick={() => generatePDFReport(project, systems, zones, liveRooms, liveEnvelopeElements, equipSystems, undefined, true)} className="gap-1 bg-gray-50 dark:bg-slate-800 text-gray-600 dark:text-slate-400 border-gray-200 dark:border-slate-600 hover:bg-gray-100 dark:hover:bg-slate-700 shadow-sm" title="Print-friendly PDF (greyscale, no colour backgrounds)">
+              <Download className="w-3.5 h-3.5" /> PDF Eco
+            </Button>
+            <Button variant="outline" size="sm" onClick={() => generateEquipmentSchedulePDF(project, equipSystems, liveRooms)} className="gap-1 bg-teal-50 dark:bg-teal-950/20 text-teal-700 dark:text-teal-400 border-teal-200 dark:border-teal-800 hover:bg-teal-100 dark:hover:bg-teal-900/30 shadow-sm" title="Download Equipment Schedule as separate PDF">
+              <Download className="w-3.5 h-3.5" /> Equip. Schedule
+            </Button>
             <Button variant="outline" size="sm" onClick={() => {
+              const p = project;
+              const pd = project.data ?? {};
               setEditData({
-                name: '',
-                location: '',
-                longitude: '',
-                latitude: '',
-                altitude: '',
-                includeMonsoon: project.includeMonsoon ?? project.data?.includeMonsoon ?? false,
-                summerDesignTemp: '',
-                summerDesignHumidity: '',
-                monsoonDesignTemp: '',
-                monsoonDesignHumidity: '',
-                winterDesignTemp: '',
-                winterDesignHumidity: '',
-                insideSummerTemp: '',
-                insideSummerHumidity: '',
-                insideMonsoonTemp: '',
-                insideMonsoonHumidity: '',
-                insideWinterTemp: '',
-                insideWinterHumidity: '',
+                name:                 String(p.name                ?? pd.name                ?? ''),
+                location:             String(p.location            ?? pd.location            ?? p.place ?? pd.place ?? ''),
+                longitude:            String(p.longitude           ?? pd.longitude           ?? ''),
+                latitude:             String(p.latitude            ?? pd.latitude            ?? ''),
+                altitude:             String(p.altitude            ?? pd.altitude            ?? ''),
+                includeMonsoon:       p.includeMonsoon             ?? pd.includeMonsoon      ?? false,
+                summerDesignTemp:     String(p.summerDesignTemp    ?? pd.summerDesignTemp    ?? 95),
+                summerDesignHumidity: String(p.summerDesignHumidity ?? pd.summerDesignHumidity ?? 50),
+                monsoonDesignTemp:    String(p.monsoonDesignTemp   ?? pd.monsoonDesignTemp   ?? 85),
+                monsoonDesignHumidity:String(p.monsoonDesignHumidity ?? pd.monsoonDesignHumidity ?? 85),
+                winterDesignTemp:     String(p.winterDesignTemp    ?? pd.winterDesignTemp    ?? 30),
+                winterDesignHumidity: String(p.winterDesignHumidity ?? pd.winterDesignHumidity ?? 30),
+                insideSummerTemp:     String(p.insideSummerTemp    ?? pd.insideSummerTemp    ?? 75),
+                insideSummerHumidity: String(p.insideSummerHumidity ?? pd.insideSummerHumidity ?? 50),
+                insideMonsoonTemp:    String(p.insideMonsoonTemp   ?? pd.insideMonsoonTemp   ?? 75),
+                insideMonsoonHumidity:String(p.insideMonsoonHumidity ?? pd.insideMonsoonHumidity ?? 55),
+                insideWinterTemp:     String(p.insideWinterTemp    ?? pd.insideWinterTemp    ?? 72),
+                insideWinterHumidity: String(p.insideWinterHumidity ?? pd.insideWinterHumidity ?? 40),
               });
               setEditModalOpen(true);
-            }} className="gap-1 text-blue-600 border-blue-200 hover:bg-blue-50 shadow-sm">
+            }} className="gap-1 text-blue-600 dark:text-blue-400 border-blue-200 dark:border-blue-800 hover:bg-blue-50 dark:hover:bg-blue-950/20 shadow-sm">
               <Pencil className="w-3.5 h-3.5" /> Edit
             </Button>
           </div>
         </div>
 
-        <div className="rounded-xl border border-slate-200 bg-white p-3">
-          <p className="text-[11px] font-bold uppercase tracking-wider text-slate-500 mb-2">Workflow</p>
+        <div className="rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 p-3">
+          <p className="text-[11px] font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400 mb-2">Workflow</p>
           <div className="grid grid-cols-2 md:grid-cols-4 gap-2 text-xs">
-            <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
-              <p className="font-semibold text-slate-700">Step 1</p>
-              <p className="text-slate-500">Project Conditions</p>
+            <div className="rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 px-3 py-2">
+              <p className="font-semibold text-slate-700 dark:text-slate-300">Step 1</p>
+              <p className="text-slate-500 dark:text-slate-400">Project Conditions</p>
             </div>
-            <div className="rounded-lg border border-orange-200 bg-orange-50 px-3 py-2">
-              <p className="font-semibold text-orange-700">Step 2</p>
-              <p className="text-orange-600">Zones & Rooms</p>
+            <div className="rounded-lg border border-orange-200 dark:border-orange-800 bg-orange-50 dark:bg-orange-950/20 px-3 py-2">
+              <p className="font-semibold text-orange-700 dark:text-orange-400">Step 2</p>
+              <p className="text-orange-600 dark:text-orange-400">Zones & Rooms</p>
             </div>
-            <div className="rounded-lg border border-blue-200 bg-blue-50 px-3 py-2">
-              <p className="font-semibold text-blue-700">Step 3</p>
-              <p className="text-blue-600">Room-Level Loads</p>
+            <div className="rounded-lg border border-blue-200 dark:border-blue-800 bg-blue-50 dark:bg-blue-950/20 px-3 py-2">
+              <p className="font-semibold text-blue-700 dark:text-blue-400">Step 3</p>
+              <p className="text-blue-600 dark:text-blue-400">Room-Level Loads</p>
             </div>
-            <div className="rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2">
-              <p className="font-semibold text-emerald-700">Step 4</p>
-              <p className="text-emerald-600">Psychrometric Review</p>
+            <div className="rounded-lg border border-emerald-200 dark:border-emerald-800 bg-emerald-50 dark:bg-emerald-950/20 px-3 py-2">
+              <p className="font-semibold text-emerald-700 dark:text-emerald-400">Step 4</p>
+              <p className="text-emerald-600 dark:text-emerald-400">Psychrometric Review</p>
             </div>
           </div>
         </div>
 
         {/* ── Project summary strip ─────────────────────────────────────── */}
         {projectTotals.roomCount > 0 && (
-          <div className="rounded-2xl border border-slate-200 bg-gradient-to-br from-white via-orange-50/40 to-amber-50/70 shadow-sm overflow-hidden">
-            <div className="border-b border-slate-200/80 px-5 py-4">
+          <div className="rounded-2xl border border-slate-200 dark:border-slate-700 bg-gradient-to-br from-white dark:from-slate-800 via-orange-50/40 dark:via-orange-950/10 to-amber-50/70 dark:to-amber-950/10 shadow-sm overflow-hidden">
+            <div className="border-b border-slate-200/80 dark:border-slate-700/80 px-5 py-4">
               <div className="flex flex-wrap items-end justify-between gap-3">
                 <div>
-                  <p className="text-[11px] font-bold uppercase tracking-[0.18em] text-orange-700">Step 1</p>
-                  <h3 className="mt-1 text-lg font-semibold text-slate-900">Project-Level Summary</h3>
-                  <p className="mt-1 text-xs text-slate-500">Live aggregate of all room loads, airflow, and conditioned area.</p>
+                  <p className="text-[11px] font-bold uppercase tracking-[0.18em] text-orange-700 dark:text-orange-400">Step 1</p>
+                  <h3 className="mt-1 text-lg font-semibold text-slate-900 dark:text-slate-100">Project-Level Summary</h3>
+                  <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">Live aggregate of all room loads, airflow, and conditioned area.</p>
                 </div>
-                <div className="rounded-xl border border-orange-200 bg-orange-100/70 px-4 py-2 min-w-[220px]">
-                  <p className="text-[10px] font-bold uppercase tracking-[0.16em] text-orange-700">AHU Governing Basis</p>
+                <div className="rounded-xl border border-orange-200 dark:border-orange-800 bg-orange-100/70 dark:bg-orange-950/30 px-4 py-2 min-w-[220px]">
+                  <p className="text-[10px] font-bold uppercase tracking-[0.16em] text-orange-700 dark:text-orange-400">AHU Governing Basis</p>
                   <div className="mt-1 flex items-center gap-2">
-                    <span className="text-sm font-semibold text-orange-800">{projectTotals.peakSeason}</span>
-                    <span className="rounded-full border border-orange-300 bg-white/70 px-2 py-0.5 text-[10px] font-semibold text-orange-700">
+                    <span className="text-sm font-semibold text-orange-800 dark:text-orange-300">{projectTotals.peakSeason}</span>
+                    <span className="rounded-full border border-orange-300 dark:border-orange-700 bg-white/70 dark:bg-slate-800/70 px-2 py-0.5 text-[10px] font-semibold text-orange-700 dark:text-orange-400">
                       {projectTotals.totalTR === projectTotals.governingCfmTR ? 'CFM Gov' : 'Load Gov'}
                     </span>
                   </div>
-                  <p className="mt-1 font-mono text-2xl font-bold text-orange-900">{projectTotals.totalTR.toFixed(2)} <span className="text-sm font-semibold text-orange-600">TR</span></p>
+                  <p className="mt-1 font-mono text-2xl font-bold text-orange-900 dark:text-orange-300">{projectTotals.totalTR.toFixed(2)} <span className="text-sm font-semibold text-orange-600 dark:text-orange-400">TR</span></p>
                 </div>
               </div>
             </div>
 
             <div className="grid grid-cols-1 gap-3 p-5 sm:grid-cols-2 xl:grid-cols-5">
-              <div className="rounded-xl border border-orange-200 bg-orange-50 px-4 py-3">
+              <div className="rounded-xl border border-orange-200 dark:border-orange-800 bg-orange-50 dark:bg-orange-950/20 px-4 py-3">
                 <div className="flex items-start justify-between gap-3">
                   <div>
-                    <p className="text-[10px] font-bold uppercase tracking-[0.14em] text-orange-700">Summer Load</p>
-                    <p className="mt-2 font-mono text-xl font-bold text-orange-900">{projectTotals.summer.governingTR.toFixed(2)} <span className="text-[11px] font-semibold text-orange-600">TR</span></p>
+                    <p className="text-[10px] font-bold uppercase tracking-[0.14em] text-orange-700 dark:text-orange-400">Summer Load</p>
+                    <p className="mt-2 font-mono text-xl font-bold text-orange-900 dark:text-orange-300">{projectTotals.summer.governingTR.toFixed(2)} <span className="text-[11px] font-semibold text-orange-600 dark:text-orange-400">TR</span></p>
                   </div>
-                  <span className="rounded-full bg-white/80 px-2 py-0.5 text-[10px] font-semibold text-orange-700">{Math.round(projectTotals.summer.totalCooling).toLocaleString()} BTU/h</span>
+                  <span className="rounded-full bg-white/80 dark:bg-slate-800/80 px-2 py-0.5 text-[10px] font-semibold text-orange-700 dark:text-orange-400">{Math.round(projectTotals.summer.totalCooling).toLocaleString()} BTU/h</span>
                 </div>
                 <p className="mt-2 text-xs text-orange-600">Gov = max(Load {projectTotals.summer.totalTR.toFixed(2)} TR, CFM {projectTotals.summer.cfmTR.toFixed(2)} TR)</p>
               </div>
-              <div className={`rounded-xl border px-4 py-3 ${projectTotals.includeMonsoon ? 'border-teal-200 bg-teal-50' : 'border-slate-200 bg-slate-50'}`}>
+              <div className={`rounded-xl border px-4 py-3 ${projectTotals.includeMonsoon ? 'border-teal-200 dark:border-teal-800 bg-teal-50 dark:bg-teal-950/20' : 'border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/50'}`}>
                 <div className="flex items-start justify-between gap-3">
                   <div>
-                    <p className={`text-[10px] font-bold uppercase tracking-[0.14em] ${projectTotals.includeMonsoon ? 'text-teal-700' : 'text-slate-600'}`}>Monsoon Load</p>
-                    <p className={`mt-2 font-mono text-xl font-bold ${projectTotals.includeMonsoon ? 'text-teal-900' : 'text-slate-700'}`}>{projectTotals.includeMonsoon ? projectTotals.monsoon.governingTR.toFixed(2) : '--'} <span className={`text-[11px] font-semibold ${projectTotals.includeMonsoon ? 'text-teal-600' : 'text-slate-500'}`}>TR</span></p>
+                    <p className={`text-[10px] font-bold uppercase tracking-[0.14em] ${projectTotals.includeMonsoon ? 'text-teal-700 dark:text-teal-400' : 'text-slate-600 dark:text-slate-400'}`}>Monsoon Load</p>
+                    <p className={`mt-2 font-mono text-xl font-bold ${projectTotals.includeMonsoon ? 'text-teal-900 dark:text-teal-300' : 'text-slate-700 dark:text-slate-300'}`}>{projectTotals.includeMonsoon ? projectTotals.monsoon.governingTR.toFixed(2) : '--'} <span className={`text-[11px] font-semibold ${projectTotals.includeMonsoon ? 'text-teal-600 dark:text-teal-400' : 'text-slate-500 dark:text-slate-400'}`}>TR</span></p>
                   </div>
-                  <span className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${projectTotals.includeMonsoon ? 'bg-white/80 text-teal-700' : 'bg-white text-slate-500'}`}>{projectTotals.includeMonsoon ? `${Math.round(projectTotals.monsoon.totalCooling).toLocaleString()} BTU/h` : 'Disabled'}</span>
+                  <span className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${projectTotals.includeMonsoon ? 'bg-white/80 dark:bg-slate-800/80 text-teal-700 dark:text-teal-400' : 'bg-white dark:bg-slate-800 text-slate-500 dark:text-slate-400'}`}>{projectTotals.includeMonsoon ? `${Math.round(projectTotals.monsoon.totalCooling).toLocaleString()} BTU/h` : 'Disabled'}</span>
                 </div>
-                <p className={`mt-2 text-xs ${projectTotals.includeMonsoon ? 'text-teal-600' : 'text-slate-500'}`}>{projectTotals.includeMonsoon ? `Gov = max(Load ${projectTotals.monsoon.totalTR.toFixed(2)} TR, CFM ${projectTotals.monsoon.cfmTR.toFixed(2)} TR)` : 'Enable monsoon to compare seasonal peak.'}</p>
+                <p className={`mt-2 text-xs ${projectTotals.includeMonsoon ? 'text-teal-600 dark:text-teal-400' : 'text-slate-500 dark:text-slate-400'}`}>{projectTotals.includeMonsoon ? `Gov = max(Load ${projectTotals.monsoon.totalTR.toFixed(2)} TR, CFM ${projectTotals.monsoon.cfmTR.toFixed(2)} TR)` : 'Enable monsoon to compare seasonal peak.'}</p>
               </div>
-              <div className="rounded-xl border border-blue-200 bg-blue-50 px-4 py-3">
-                <p className="text-[10px] font-bold uppercase tracking-[0.14em] text-blue-700">Heating Load</p>
-                <p className="mt-2 font-mono text-xl font-bold text-blue-900">{Math.round(projectTotals.totalHeating).toLocaleString()}</p>
-                <p className="mt-1 text-xs text-blue-600">BTU/h winter design basis</p>
+              <div className="rounded-xl border border-blue-200 dark:border-blue-800 bg-blue-50 dark:bg-blue-950/20 px-4 py-3">
+                <p className="text-[10px] font-bold uppercase tracking-[0.14em] text-blue-700 dark:text-blue-400">Heating Load</p>
+                <p className="mt-2 font-mono text-xl font-bold text-blue-900 dark:text-blue-300">{Math.round(projectTotals.totalHeating).toLocaleString()}</p>
+                <p className="mt-1 text-xs text-blue-600 dark:text-blue-400">BTU/h winter design basis</p>
               </div>
-              <div className="rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3">
-                <p className="text-[10px] font-bold uppercase tracking-[0.14em] text-emerald-700">Design Airflow</p>
-                <p className="mt-2 font-mono text-xl font-bold text-emerald-900">{Math.round(projectTotals.totalDesignCfm).toLocaleString()}</p>
-                <p className="mt-1 text-xs text-emerald-600">CFM governed by {projectTotals.governingAirflowSeason.toLowerCase()} season</p>
+              <div className="rounded-xl border border-emerald-200 dark:border-emerald-800 bg-emerald-50 dark:bg-emerald-950/20 px-4 py-3">
+                <p className="text-[10px] font-bold uppercase tracking-[0.14em] text-emerald-700 dark:text-emerald-400">Design Airflow</p>
+                <p className="mt-2 font-mono text-xl font-bold text-emerald-900 dark:text-emerald-300">{Math.round(projectTotals.totalDesignCfm).toLocaleString()}</p>
+                <p className="mt-1 text-xs text-emerald-600 dark:text-emerald-400">CFM governed by {projectTotals.governingAirflowSeason.toLowerCase()} season</p>
               </div>
-              <div className="rounded-xl border border-violet-200 bg-violet-50 px-4 py-3">
-                <p className="text-[10px] font-bold uppercase tracking-[0.14em] text-violet-700">Conditioned Area</p>
-                <p className="mt-2 font-mono text-xl font-bold text-violet-900">{Math.round(projectTotals.totalArea).toLocaleString()}</p>
-                <p className="mt-1 text-xs text-violet-600">{projectTotals.roomCount} rooms included in load model</p>
+              <div className="rounded-xl border border-violet-200 dark:border-violet-800 bg-violet-50 dark:bg-violet-950/20 px-4 py-3">
+                <p className="text-[10px] font-bold uppercase tracking-[0.14em] text-violet-700 dark:text-violet-400">Conditioned Area</p>
+                <p className="mt-2 font-mono text-xl font-bold text-violet-900 dark:text-violet-300">{Math.round(projectTotals.totalArea).toLocaleString()}</p>
+                <p className="mt-1 text-xs text-violet-600 dark:text-violet-400">{projectTotals.roomCount} rooms included in load model</p>
               </div>
             </div>
 
-            <div className="border-t border-slate-200/80 bg-white/70 px-5 py-4">
+            <div className="border-t border-slate-200/80 dark:border-slate-700/80 bg-white/70 dark:bg-slate-800/70 px-5 py-4">
               {projectTotals.includeMonsoon ? (
                 <div className="grid grid-cols-1 gap-2 lg:grid-cols-4">
-                  <div className="rounded-lg border border-slate-200 bg-white px-3 py-2">
-                    <p className="text-[10px] uppercase tracking-wider font-semibold text-slate-500">Seasonal Comparison</p>
-                    <p className="mt-1 text-xs font-semibold text-slate-700">
+                  <div className="rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 px-3 py-2">
+                    <p className="text-[10px] uppercase tracking-wider font-semibold text-slate-500 dark:text-slate-400">Seasonal Comparison</p>
+                    <p className="mt-1 text-xs font-semibold text-slate-700 dark:text-slate-300">
                       <span className="font-mono text-orange-700">S {projectTotals.summer.governingTR.toFixed(2)} TR</span>
                       <span className="mx-1 text-slate-300">vs</span>
                       <span className="font-mono text-teal-700">M {projectTotals.monsoon.governingTR.toFixed(2)} TR</span>
                     </p>
                   </div>
-                  <div className="rounded-lg border border-slate-200 bg-white px-3 py-2">
-                    <p className="text-[10px] uppercase tracking-wider font-semibold text-slate-500">Delta</p>
-                    <p className="mt-1 font-mono text-sm font-bold text-slate-800">{Math.abs(projectTotals.monsoon.governingTR - projectTotals.summer.governingTR).toFixed(2)} TR</p>
+                  <div className="rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 px-3 py-2">
+                    <p className="text-[10px] uppercase tracking-wider font-semibold text-slate-500 dark:text-slate-400">Delta</p>
+                    <p className="mt-1 font-mono text-sm font-bold text-slate-800 dark:text-slate-200">{Math.abs(projectTotals.monsoon.governingTR - projectTotals.summer.governingTR).toFixed(2)} TR</p>
                   </div>
-                  <div className="rounded-lg border border-blue-200 bg-blue-50 px-3 py-2">
-                    <p className="text-[10px] uppercase tracking-wider font-semibold text-blue-600">Load Governor</p>
-                    <p className="mt-1 text-sm font-semibold text-blue-800">{projectTotals.governingLoadSeason} <span className="font-mono">{projectTotals.governingLoadTR.toFixed(2)} TR</span></p>
+                  <div className="rounded-lg border border-blue-200 dark:border-blue-800 bg-blue-50 dark:bg-blue-950/20 px-3 py-2">
+                    <p className="text-[10px] uppercase tracking-wider font-semibold text-blue-600 dark:text-blue-400">Load Governor</p>
+                    <p className="mt-1 text-sm font-semibold text-blue-800 dark:text-blue-300">{projectTotals.governingLoadSeason} <span className="font-mono">{projectTotals.governingLoadTR.toFixed(2)} TR</span></p>
                   </div>
-                  <div className="rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2">
-                    <p className="text-[10px] uppercase tracking-wider font-semibold text-emerald-600">Airflow Governor</p>
-                    <p className="mt-1 text-sm font-semibold text-emerald-800">{projectTotals.governingAirflowSeason} <span className="font-mono">{projectTotals.governingCfmTR.toFixed(2)} TR</span></p>
+                  <div className="rounded-lg border border-emerald-200 dark:border-emerald-800 bg-emerald-50 dark:bg-emerald-950/20 px-3 py-2">
+                    <p className="text-[10px] uppercase tracking-wider font-semibold text-emerald-600 dark:text-emerald-400">Airflow Governor</p>
+                    <p className="mt-1 text-sm font-semibold text-emerald-800 dark:text-emerald-300">{projectTotals.governingAirflowSeason} <span className="font-mono">{projectTotals.governingCfmTR.toFixed(2)} TR</span></p>
                   </div>
                 </div>
               ) : (
-                <p className="text-xs text-slate-600">
+                <p className="text-xs text-slate-600 dark:text-slate-400">
                   Monsoon comparison is blank because Include Monsoon Calculation is OFF. Governing cooling currently follows Summer.
                 </p>
               )}
             </div>
 
-            <div className="border-t border-slate-200/80 bg-white/70 px-5 py-3 flex justify-end">
+            <div className="border-t border-slate-200/80 dark:border-slate-700/80 bg-white/70 dark:bg-slate-800/70 px-5 py-3 flex justify-end">
               <Button
                 type="button"
                 size="sm"
@@ -2024,20 +2128,20 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
             </div>
 
             {projectPsychroOpen && (
-              <div className="border-t border-slate-200/80 p-4 bg-white/90">
+              <div className="border-t border-slate-200/80 dark:border-slate-700/80 p-4 bg-white/90 dark:bg-slate-800/90">
                 <div className="mx-auto w-full max-w-5xl space-y-3">
                 <div>
-                  <h3 className="font-semibold text-gray-900 text-sm">Project Psychrometrics</h3>
+                  <h3 className="font-semibold text-gray-900 dark:text-slate-100 text-sm">Project Psychrometrics</h3>
                   <p className="text-xs text-gray-400 mt-0.5">
                     {includeMonsoon ? 'Summer and Monsoon design conditions' : 'Summer design conditions only'} · Altitude {projectAltitude || 0} ft
                   </p>
                 </div>
 
                 <div className={`grid gap-4 ${includeMonsoon ? 'grid-cols-1 xl:grid-cols-2' : 'grid-cols-1'}`}>
-                  <div className="rounded-xl border border-orange-200 bg-orange-50/40 p-4">
+                  <div className="rounded-xl border border-orange-200 dark:border-orange-800 bg-orange-50/40 dark:bg-orange-950/20 p-4">
                     <div className="mb-3 flex items-center justify-between">
-                      <p className="text-xs font-bold uppercase tracking-wider text-orange-700">Summer Psychrometric</p>
-                      <span className="rounded-full bg-white px-2 py-0.5 text-[10px] font-semibold text-orange-700">
+                      <p className="text-xs font-bold uppercase tracking-wider text-orange-700 dark:text-orange-400">Summer Psychrometric</p>
+                      <span className="rounded-full bg-white dark:bg-slate-800 px-2 py-0.5 text-[10px] font-semibold text-orange-700 dark:text-orange-400">
                         {summerDesignTemp}°F / {summerDesignHumidity}% RH
                       </span>
                     </div>
@@ -2051,23 +2155,23 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
                       ]}
                     />
                     <div className="mt-3 grid grid-cols-2 gap-3 text-xs">
-                      <div className="rounded-lg border border-red-100 bg-red-50 px-3 py-2">
-                        <p className="text-[10px] font-bold uppercase text-red-700">Outdoor</p>
-                        <p className="font-semibold text-red-800">{summerDesignTemp}°F</p>
-                        <p className="text-red-600">{summerDesignHumidity}% RH</p>
+                      <div className="rounded-lg border border-red-100 dark:border-red-900 bg-red-50 dark:bg-red-950/20 px-3 py-2">
+                        <p className="text-[10px] font-bold uppercase text-red-700 dark:text-red-400">Outdoor</p>
+                        <p className="font-semibold text-red-800 dark:text-red-300">{summerDesignTemp}°F</p>
+                        <p className="text-red-600 dark:text-red-400">{summerDesignHumidity}% RH</p>
                       </div>
-                      <div className="rounded-lg border border-blue-100 bg-blue-50 px-3 py-2">
-                        <p className="text-[10px] font-bold uppercase text-blue-700">Indoor</p>
-                        <p className="font-semibold text-blue-800">{insideSummerTemp}°F</p>
-                        <p className="text-blue-600">{insideSummerHumidity}% RH</p>
+                      <div className="rounded-lg border border-blue-100 dark:border-blue-900 bg-blue-50 dark:bg-blue-950/20 px-3 py-2">
+                        <p className="text-[10px] font-bold uppercase text-blue-700 dark:text-blue-400">Indoor</p>
+                        <p className="font-semibold text-blue-800 dark:text-blue-300">{insideSummerTemp}°F</p>
+                        <p className="text-blue-600 dark:text-blue-400">{insideSummerHumidity}% RH</p>
                       </div>
                     </div>
                   </div>
 
-                  <div className={`rounded-xl border p-4 ${includeMonsoon ? 'border-teal-200 bg-teal-50/40' : 'border-slate-200 bg-slate-50/70 border-dashed'}`}>
+                  <div className={`rounded-xl border p-4 ${includeMonsoon ? 'border-teal-200 dark:border-teal-800 bg-teal-50/40 dark:bg-teal-950/20' : 'border-slate-200 dark:border-slate-700 bg-slate-50/70 dark:bg-slate-800/50 border-dashed'}`}>
                     <div className="mb-3 flex items-center justify-between">
-                      <p className={`text-xs font-bold uppercase tracking-wider ${includeMonsoon ? 'text-teal-700' : 'text-slate-500'}`}>Monsoon Psychrometric</p>
-                      <span className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${includeMonsoon ? 'bg-white text-teal-700' : 'bg-white text-slate-500'}`}>
+                      <p className={`text-xs font-bold uppercase tracking-wider ${includeMonsoon ? 'text-teal-700 dark:text-teal-400' : 'text-slate-500 dark:text-slate-400'}`}>Monsoon Psychrometric</p>
+                      <span className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${includeMonsoon ? 'bg-white dark:bg-slate-800 text-teal-700 dark:text-teal-400' : 'bg-white dark:bg-slate-800 text-slate-500 dark:text-slate-400'}`}>
                         {includeMonsoon ? `${monsoonDesignTemp}°F / ${monsoonDesignHumidity}% RH` : 'Blank'}
                       </span>
                     </div>
@@ -2083,23 +2187,23 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
                           ]}
                         />
                         <div className="mt-3 grid grid-cols-2 gap-3 text-xs">
-                          <div className="rounded-lg border border-teal-100 bg-teal-50 px-3 py-2">
-                            <p className="text-[10px] font-bold uppercase text-teal-700">Outdoor</p>
-                            <p className="font-semibold text-teal-800">{monsoonDesignTemp}°F</p>
-                            <p className="text-teal-600">{monsoonDesignHumidity}% RH</p>
+                          <div className="rounded-lg border border-teal-100 dark:border-teal-900 bg-teal-50 dark:bg-teal-950/20 px-3 py-2">
+                            <p className="text-[10px] font-bold uppercase text-teal-700 dark:text-teal-400">Outdoor</p>
+                            <p className="font-semibold text-teal-800 dark:text-teal-300">{monsoonDesignTemp}°F</p>
+                            <p className="text-teal-600 dark:text-teal-400">{monsoonDesignHumidity}% RH</p>
                           </div>
-                          <div className="rounded-lg border border-sky-100 bg-sky-50 px-3 py-2">
-                            <p className="text-[10px] font-bold uppercase text-sky-700">Indoor</p>
-                            <p className="font-semibold text-sky-800">{insideMonsoonTemp}°F</p>
-                            <p className="text-sky-600">{insideMonsoonHumidity}% RH</p>
+                          <div className="rounded-lg border border-sky-100 dark:border-sky-900 bg-sky-50 dark:bg-sky-950/20 px-3 py-2">
+                            <p className="text-[10px] font-bold uppercase text-sky-700 dark:text-sky-400">Indoor</p>
+                            <p className="font-semibold text-sky-800 dark:text-sky-300">{insideMonsoonTemp}°F</p>
+                            <p className="text-sky-600 dark:text-sky-400">{insideMonsoonHumidity}% RH</p>
                           </div>
                         </div>
                       </>
                     ) : (
-                      <div className="flex h-[240px] items-center justify-center rounded-lg border border-dashed border-slate-300 bg-white text-center">
+                      <div className="flex h-[240px] items-center justify-center rounded-lg border border-dashed border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 text-center">
                         <div className="px-4">
-                          <p className="text-sm font-semibold text-slate-600">Monsoon chart is blank</p>
-                          <p className="mt-1 text-xs text-slate-500">Enable Include Monsoon Calculation in Project Edit to run and visualize monsoon conditions.</p>
+                          <p className="text-sm font-semibold text-slate-600 dark:text-slate-400">Monsoon chart is blank</p>
+                          <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">Enable Include Monsoon Calculation in Project Edit to run and visualize monsoon conditions.</p>
                         </div>
                       </div>
                     )}
@@ -2107,7 +2211,7 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
                 </div>
 
                 {includeMonsoon && (
-                  <div className="rounded-lg border border-slate-200 bg-slate-50 px-4 py-2 text-xs text-slate-700">
+                  <div className="rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 px-4 py-2 text-xs text-slate-700 dark:text-slate-300">
                     Governing Cooling: <span className="font-semibold">{projectTotals.peakSeason}</span> based on project cooling comparison.
                   </div>
                 )}
@@ -2118,14 +2222,14 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
         )}
 
         {/* ── Zone / System management ───────────────────────────────────── */}
-        <div className="rounded-xl border border-gray-200 bg-white shadow-sm overflow-hidden">
+        <div className="rounded-xl border border-gray-200 dark:border-slate-700 bg-white dark:bg-slate-800 shadow-sm overflow-hidden">
           {/* Section header */}
-          <div className="flex items-center justify-between px-4 py-3 bg-gray-50 border-b border-gray-200">
+          <div className="flex items-center justify-between px-4 py-3 bg-gray-50 dark:bg-slate-800/80 border-b border-gray-200 dark:border-slate-700">
             <div>
-              <h3 className="font-semibold text-gray-900 text-sm">
-                Step 2: 
+              <h3 className="font-semibold text-gray-900 dark:text-slate-100 text-sm">
+                Step 2:
                 <span className="ml-1">
-                {isVRF ? 'Systems & Rooms' : isHybrid ? 'Systems & Zones' : 'Zones & Rooms'}
+                Zones &amp; Rooms
                 </span>
               </h3>
               <p className="text-xs text-gray-400 mt-0.5">
@@ -2134,25 +2238,18 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
             </div>
             {canEdit && (
               <div className="flex gap-2">
-                {(isVRF || isHybrid) && (
-                  <Button size="sm" onClick={addSystem} className="gap-1 bg-blue-600 hover:bg-blue-700 text-xs h-8">
-                    <Plus className="w-3.5 h-3.5" /> Add System
-                  </Button>
-                )}
-                {!isVRF && (
-                  <Button size="sm" onClick={() => addZone()} className="gap-1 bg-orange-600 hover:bg-orange-700 text-xs h-8">
-                    <Plus className="w-3.5 h-3.5" /> Add Zone
-                  </Button>
-                )}
+                <Button size="sm" onClick={() => addZone()} disabled={addingZone} className="gap-1 bg-orange-600 hover:bg-orange-700 text-xs h-8">
+                  {addingZone ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Plus className="w-3.5 h-3.5" />} Add Zone
+                </Button>
               </div>
             )}
           </div>
 
           {/* Zone / System list */}
-          <div className="divide-y divide-gray-100">
+          <div className="divide-y divide-gray-100 dark:divide-slate-700">
             {dataLoading ? (
-              <div className="py-12 text-center text-gray-500">
-                <Loader2 className="mx-auto mb-2 h-6 w-6 animate-spin text-gray-400" />
+              <div className="py-12 text-center text-gray-500 dark:text-slate-400">
+                <Loader2 className="mx-auto mb-2 h-6 w-6 animate-spin text-gray-400 dark:text-slate-500" />
                 <p className="text-sm">Loading project structure...</p>
               </div>
             ) : zones.length === 0 && systems.length === 0 ? (
@@ -2193,9 +2290,9 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
                 userProfile={userProfile}
                 defaultDesignConditions={defaultDesignConditions}
                 canEdit={canEdit}
-                isVRF={isVRF}
-                isHybrid={isHybrid}
                 roomSaveStates={roomSaveStates}
+                moveRoom={moveRoom}
+                equipSystems={equipSystems}
               />
             )}
           </div>
@@ -2263,7 +2360,7 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
                 placeholder={(project.altitude ?? project.data?.altitude)?.toString() || 'Elevation in feet'}
               />
             </div>
-            <div className="flex items-center justify-between rounded-md border border-teal-200 bg-teal-50 px-3 py-2">
+            <div className="flex items-center justify-between rounded-md border border-teal-200 dark:border-teal-800 bg-teal-50 dark:bg-teal-950/20 px-3 py-2">
               <Label htmlFor="edit-include-monsoon" className="font-semibold text-teal-700">Include Monsoon</Label>
               <input
                 id="edit-include-monsoon"

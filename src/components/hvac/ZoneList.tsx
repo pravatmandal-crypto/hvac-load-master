@@ -1,8 +1,7 @@
-import { useEffect, useMemo, useState } from 'react';
-import { Plus, Trash2, ChevronDown, ChevronRight, PackagePlus, Loader2 } from 'lucide-react';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { Plus, Trash2, ChevronDown, ChevronRight, Loader2, ArrowRight } from 'lucide-react';
 import { useDroppable } from '@dnd-kit/core';
 import RoomTable from './RoomTable';
-import EquipmentPickerDialog from './EquipmentPickerDialog';
 import { toast } from 'sonner';
 import {
   calculateRoomVolume,
@@ -28,7 +27,7 @@ function ZoneDropContainer({ zoneId, children }: { zoneId: string; children: Rea
   return (
     <div
       ref={setNodeRef}
-      className={isOver ? 'ring-2 ring-blue-300 ring-inset bg-blue-50/40' : ''}
+      className={isOver ? 'ring-2 ring-blue-300 ring-inset bg-blue-50/40 dark:bg-blue-900/20' : ''}
     >
       {children}
     </div>
@@ -92,6 +91,7 @@ function computeZoneTotals(
       const oaLatent = vent.latent * (1 - BF);
       const coilSensible = ersh + oaSensible;
       const coilLatent = erlh + oaLatent;
+      const minAdp = isChiller ? 44 : 42;
       const coil = calculateCoilParameters(
         coilSensible,
         coilLatent,
@@ -101,14 +101,18 @@ function computeZoneTotals(
         BF,
         35,
         65,
-        isChiller ? 50 : 54,
+        minAdp,
       );
-      const grandTotal = (coilSensible + coilLatent) * (1 + overallSafetyPct / 100);
+      // Overall safety is NOT applied here — the zone summary applies its own margin
+      // via requiredTR = governingTR × 1.10. Applying it here too would double-count.
+      const grandTotal = coilSensible + coilLatent;
 
       const presetTotalACH = getRecommendedAch(room.achProfile ?? room.activityType);
       const effectiveTotalACH = Math.max(presetTotalACH, rd.facph);
       const totalSupplyCFM = (calculateRoomVolume(rd) * effectiveTotalACH) / 60;
-      const designCFM = Math.max(coil.dehumidifiedCFM, totalSupplyCFM);
+      // Use minAdpSensibleCFM (CFM at fixed system ADP) for the 400 CFM/TR checkpoint —
+      // not dehumidifiedCFM which uses floating indicated ADP and inflates high-sensible rooms.
+      const designCFM = Math.max(coil.minAdpSensibleCFM, totalSupplyCFM);
 
       if (isFinite(grandTotal)) totalCooling += grandTotal;
       if (isFinite(heating.totalHeatingLoad)) totalHeating += heating.totalHeatingLoad;
@@ -144,6 +148,7 @@ function ZoneSummaryBar({
   project,
   zoneId,
   zoneName,
+  equipSystems,
 }: {
   zoneRooms: any[];
   envelopeElements: Record<string, any[]>;
@@ -152,6 +157,7 @@ function ZoneSummaryBar({
   project?: any;
   zoneId?: string;
   zoneName?: string;
+  equipSystems?: any[];
 }) {
   const includeMonsoon = !!(project?.includeMonsoon ?? project?.data?.includeMonsoon);
   const monsoonDc = useMemo<DesignConditions>(() => ({
@@ -171,12 +177,11 @@ function ZoneSummaryBar({
     () => (includeMonsoon ? computeZoneTotals(zoneRooms, envelopeElements, monsoonDc, isChiller) : null),
     [zoneRooms, envelopeElements, monsoonDc, isChiller, includeMonsoon],
   );
-  const [pickerOpen, setPickerOpen] = useState(false);
 
   if (zoneRooms.length === 0) return null;
   const n = (v: number) => Math.round(v).toLocaleString();
-  const summerCfmTR = summerTotals.totalDesignCfm > 0 ? (summerTotals.totalDesignCfm * 1.08 * 20) / 12000 : 0;
-  const monsoonCfmTR = monsoonTotals && monsoonTotals.totalDesignCfm > 0 ? (monsoonTotals.totalDesignCfm * 1.08 * 20) / 12000 : 0;
+  const summerCfmTR = summerTotals.totalDesignCfm > 0 ? summerTotals.totalDesignCfm / 400 : 0;
+  const monsoonCfmTR = monsoonTotals && monsoonTotals.totalDesignCfm > 0 ? monsoonTotals.totalDesignCfm / 400 : 0;
   const summerGoverningTR = Math.max(summerTotals.totalTR, summerCfmTR);
   const monsoonGoverningTR = monsoonTotals ? Math.max(monsoonTotals.totalTR, monsoonCfmTR) : 0;
   const governingLoadSeason = includeMonsoon && monsoonTotals && monsoonTotals.totalTR > summerTotals.totalTR ? 'Monsoon' : 'Summer';
@@ -192,68 +197,102 @@ function ZoneSummaryBar({
   const requiredTR = governingTR * 1.10;
   const achGovernsAirflow = governingCfmTR >= governingLoadTR;
 
+  const installedForZone = (equipSystems ?? []).reduce<{ tr: number; cfm: number }>(
+    (acc, sys) => {
+      const eqZones = (sys.zones ?? []) as any[];
+      const eZone = eqZones.find((z: any) => z.id === zoneId);
+      if (eZone) {
+        if (eZone.unitSelections?.length) {
+          acc.tr  += (eZone.unitSelections as any[]).reduce((s: number, u: any) => s + (u.trCapacity ?? 0) * (u.quantity ?? 1), 0);
+          acc.cfm += (eZone.unitSelections as any[]).reduce((s: number, u: any) => s + (u.cfmRated  ?? 0) * (u.quantity ?? 1), 0);
+        } else if (eZone.selection) {
+          acc.tr  += (eZone.selection.trCapacity ?? 0) * (eZone.selection.quantity ?? 1);
+          acc.cfm += (eZone.selection.cfmRated  ?? 0) * (eZone.selection.quantity ?? 1);
+        }
+      }
+      if (sys.roomSelections) {
+        for (const room of zoneRooms) {
+          const units = (sys.roomSelections[room.id] ?? []) as any[];
+          acc.tr  += units.reduce((s: number, u: any) => s + (u.trCapacity ?? 0), 0);
+          acc.cfm += units.reduce((s: number, u: any) => s + (u.cfmRated  ?? 0), 0);
+        }
+      }
+      return acc;
+    },
+    { tr: 0, cfm: 0 },
+  );
+  const instFit = installedForZone.tr > 0
+    ? installedForZone.tr >= requiredTR * 0.97 ? 'ok' : 'low'
+    : 'none';
+
   return (
     <>
-      <div className="border-t border-orange-100 bg-gradient-to-r from-white via-orange-50/50 to-amber-50/70 px-4 py-3">
+      <div className="border-t border-orange-100 dark:border-orange-900/40 bg-gradient-to-r from-white via-orange-50/50 to-amber-50/70 dark:from-slate-800 dark:via-orange-950/20 dark:to-amber-950/20 px-4 py-3">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div className="min-w-0 flex-1">
             <div className="flex flex-wrap items-center gap-2">
               <span className="text-[10px] font-bold uppercase tracking-[0.16em] text-orange-700">Zone Summary</span>
-              <span className="rounded-full border border-orange-200 bg-white px-2 py-0.5 text-[10px] font-semibold text-orange-700">{zoneRooms.length} room{zoneRooms.length !== 1 ? 's' : ''}</span>
-              <span className="rounded-full border border-slate-200 bg-slate-100 px-2 py-0.5 text-[10px] font-semibold text-slate-700">AHU Basis: {peakSeason}</span>
-              <span className="rounded-full border border-indigo-200 bg-indigo-50 px-2 py-0.5 text-[10px] font-semibold text-indigo-700">{governingTR === governingCfmTR ? 'CFM Gov' : 'Load Gov'}</span>
+              <span className="rounded-full border border-orange-200 dark:border-orange-800 bg-white dark:bg-slate-800 px-2 py-0.5 text-[10px] font-semibold text-orange-700 dark:text-orange-400">{zoneRooms.length} room{zoneRooms.length !== 1 ? 's' : ''}</span>
+              <span className="rounded-full border border-slate-200 dark:border-slate-600 bg-slate-100 dark:bg-slate-700 px-2 py-0.5 text-[10px] font-semibold text-slate-700 dark:text-slate-300">AHU Basis: {peakSeason}</span>
+              <span className="rounded-full border border-indigo-200 dark:border-indigo-800 bg-indigo-50 dark:bg-indigo-950/30 px-2 py-0.5 text-[10px] font-semibold text-indigo-700 dark:text-indigo-400">{governingTR === governingCfmTR ? 'CFM Gov' : 'Load Gov'}</span>
             </div>
             <div className="mt-3 grid grid-cols-2 gap-2 md:grid-cols-5">
-              <div className="rounded-lg border border-orange-200 bg-white px-3 py-2">
-                <p className="text-[10px] font-bold uppercase tracking-[0.14em] text-orange-700">Summer Cooling</p>
-                <p className="mt-1 font-mono text-lg font-bold text-orange-900">{summerGoverningTR.toFixed(2)} <span className="text-[11px] font-semibold text-orange-600">TR</span></p>
-                <p className="text-[10px] text-orange-600">{n(summerTotals.totalCooling)} BTU/h</p>
+              <div className="rounded-lg border border-orange-200 dark:border-orange-800 bg-white dark:bg-slate-800 px-3 py-2">
+                <p className="text-[10px] font-bold uppercase tracking-[0.14em] text-orange-700 dark:text-orange-400">Summer Cooling</p>
+                <p className="mt-1 font-mono text-lg font-bold text-orange-900 dark:text-orange-200">{summerGoverningTR.toFixed(2)} <span className="text-[11px] font-semibold text-orange-600 dark:text-orange-400">TR</span></p>
+                <p className="text-[10px] text-orange-600 dark:text-orange-400">{n(summerTotals.totalCooling)} BTU/h</p>
               </div>
-              <div className={`rounded-lg border bg-white px-3 py-2 ${includeMonsoon ? 'border-teal-200' : 'border-slate-200'}`}>
-                <p className={`text-[10px] font-bold uppercase tracking-[0.14em] ${includeMonsoon ? 'text-teal-700' : 'text-slate-500'}`}>Monsoon Cooling</p>
-                <p className={`mt-1 font-mono text-lg font-bold ${includeMonsoon ? 'text-teal-900' : 'text-slate-500'}`}>
+              <div className={`rounded-lg border bg-white dark:bg-slate-800 px-3 py-2 ${includeMonsoon ? 'border-teal-200 dark:border-teal-800' : 'border-slate-200 dark:border-slate-700'}`}>
+                <p className={`text-[10px] font-bold uppercase tracking-[0.14em] ${includeMonsoon ? 'text-teal-700 dark:text-teal-400' : 'text-slate-500 dark:text-slate-400'}`}>Monsoon Cooling</p>
+                <p className={`mt-1 font-mono text-lg font-bold ${includeMonsoon ? 'text-teal-900 dark:text-teal-200' : 'text-slate-500 dark:text-slate-400'}`}>
                   {includeMonsoon && monsoonTotals ? monsoonGoverningTR.toFixed(2) : '--'}
-                  <span className={`text-[11px] font-semibold ml-1 ${includeMonsoon ? 'text-teal-600' : 'text-slate-400'}`}>TR</span>
+                  <span className={`text-[11px] font-semibold ml-1 ${includeMonsoon ? 'text-teal-600 dark:text-teal-400' : 'text-slate-400 dark:text-slate-500'}`}>TR</span>
                 </p>
-                <p className={`text-[10px] ${includeMonsoon ? 'text-teal-600' : 'text-slate-500'}`}>
+                <p className={`text-[10px] ${includeMonsoon ? 'text-teal-600 dark:text-teal-400' : 'text-slate-500 dark:text-slate-400'}`}>
                   {includeMonsoon && monsoonTotals ? `${n(monsoonTotals.totalCooling)} BTU/h` : 'Blank (Monsoon OFF)'}
                 </p>
               </div>
-              <div className="rounded-lg border border-blue-200 bg-white px-3 py-2">
-                <p className="text-[10px] font-bold uppercase tracking-[0.14em] text-blue-700">Heating</p>
-                <p className="mt-1 font-mono text-lg font-bold text-blue-900">{n(t.totalHeating)}</p>
-                <p className="text-[10px] text-blue-600">BTU/h winter load</p>
+              <div className="rounded-lg border border-blue-200 dark:border-blue-800 bg-white dark:bg-slate-800 px-3 py-2">
+                <p className="text-[10px] font-bold uppercase tracking-[0.14em] text-blue-700 dark:text-blue-400">Heating</p>
+                <p className="mt-1 font-mono text-lg font-bold text-blue-900 dark:text-blue-200">{n(summerTotals.totalHeating)}</p>
+                <p className="text-[10px] text-blue-600 dark:text-blue-400">BTU/h winter load</p>
               </div>
-              <div className="rounded-lg border border-emerald-200 bg-white px-3 py-2">
-                <p className="text-[10px] font-bold uppercase tracking-[0.14em] text-emerald-700">Design CFM</p>
-                <p className="mt-1 font-mono text-lg font-bold text-emerald-900">{Math.round(governingDesignCfm)}</p>
-                <p className="text-[10px] text-emerald-600">OA {Math.round(t.totalOaCfm)} CFM</p>
+              <div className="rounded-lg border border-emerald-200 dark:border-emerald-800 bg-white dark:bg-slate-800 px-3 py-2">
+                <p className="text-[10px] font-bold uppercase tracking-[0.14em] text-emerald-700 dark:text-emerald-400">Design CFM</p>
+                <p className="mt-1 font-mono text-lg font-bold text-emerald-900 dark:text-emerald-200">{Math.round(governingDesignCfm)}</p>
+                <p className="text-[10px] text-emerald-600 dark:text-emerald-400">w/o Reheat · OA {Math.round(t.totalOaCfm)} CFM</p>
               </div>
-              <div className="rounded-lg border border-violet-200 bg-white px-3 py-2">
-                <p className="text-[10px] font-bold uppercase tracking-[0.14em] text-violet-700">Area</p>
-                <p className="mt-1 font-mono text-lg font-bold text-violet-900">{Math.round(t.totalArea)}</p>
-                <p className="text-[10px] text-violet-600">ft² conditioned</p>
+              <div className="rounded-lg border border-violet-200 dark:border-violet-800 bg-white dark:bg-slate-800 px-3 py-2">
+                <p className="text-[10px] font-bold uppercase tracking-[0.14em] text-violet-700 dark:text-violet-400">Area</p>
+                <p className="mt-1 font-mono text-lg font-bold text-violet-900 dark:text-violet-200">{Math.round(t.totalArea)}</p>
+                <p className="text-[10px] text-violet-600 dark:text-violet-400">ft² conditioned</p>
               </div>
-              <div className="rounded-lg border border-slate-200 bg-white px-3 py-2">
-                <p className="text-[10px] font-bold uppercase tracking-[0.14em] text-slate-600">Equipment Basis</p>
-                <p className="mt-1 font-mono text-lg font-bold text-slate-900">{requiredTR.toFixed(2)}</p>
-                <p className="text-[10px] text-slate-500">Req TR (Load: {governingLoadSeason} · CFM: {governingAirflowSeason})</p>
+              <div className={`rounded-lg border bg-white dark:bg-slate-800 px-3 py-2 ${instFit === 'ok' ? 'border-green-300 dark:border-green-700' : instFit === 'low' ? 'border-red-300 dark:border-red-700' : 'border-slate-200 dark:border-slate-700'}`}>
+                <p className="text-[10px] font-bold uppercase tracking-[0.14em] text-slate-600 dark:text-slate-400">Equipment</p>
+                <p className="mt-1 font-mono text-lg font-bold text-slate-900 dark:text-slate-100">{requiredTR.toFixed(2)} <span className="text-[11px] font-normal text-slate-500 dark:text-slate-400">TR req'd</span></p>
+                {instFit === 'none' ? (
+                  <p className="text-[10px] text-slate-400">No equipment selected</p>
+                ) : instFit === 'ok' ? (
+                  <p className="text-[10px] font-semibold text-green-600">{installedForZone.tr.toFixed(2)} TR installed ✓</p>
+                ) : (
+                  <p className="text-[10px] font-semibold text-red-500">{installedForZone.tr.toFixed(2)} TR installed ⚠ Under</p>
+                )}
               </div>
             </div>
 
             {includeMonsoon && monsoonTotals ? (
               <div className="mt-3 grid grid-cols-1 gap-2 lg:grid-cols-3">
-                <div className="rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-[11px]">
-                  <p className="uppercase tracking-wider font-semibold text-blue-600 text-[10px]">Load Governor</p>
-                  <p className="mt-1 text-blue-800 font-semibold">{governingLoadSeason} <span className="font-mono">{governingLoadTR.toFixed(2)} TR</span></p>
+                <div className="rounded-lg border border-blue-200 dark:border-blue-800 bg-blue-50 dark:bg-blue-950/20 px-3 py-2 text-[11px]">
+                  <p className="uppercase tracking-wider font-semibold text-blue-600 dark:text-blue-400 text-[10px]">Load Governor</p>
+                  <p className="mt-1 text-blue-800 dark:text-blue-200 font-semibold">{governingLoadSeason} <span className="font-mono">{governingLoadTR.toFixed(2)} TR</span></p>
                 </div>
-                <div className="rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-[11px]">
-                  <p className="uppercase tracking-wider font-semibold text-emerald-600 text-[10px]">Airflow Governor</p>
-                  <p className="mt-1 text-emerald-800 font-semibold">{governingAirflowSeason} <span className="font-mono">{governingCfmTR.toFixed(2)} TR</span></p>
+                <div className="rounded-lg border border-emerald-200 dark:border-emerald-800 bg-emerald-50 dark:bg-emerald-950/20 px-3 py-2 text-[11px]">
+                  <p className="uppercase tracking-wider font-semibold text-emerald-600 dark:text-emerald-400 text-[10px]">Airflow Governor (w/o Reheat)</p>
+                  <p className="mt-1 text-emerald-800 dark:text-emerald-200 font-semibold">{governingAirflowSeason} <span className="font-mono">{governingCfmTR.toFixed(2)} TR</span></p>
                 </div>
-                <div className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-[11px]">
-                  <p className="uppercase tracking-wider font-semibold text-slate-500 text-[10px]">Season Delta</p>
-                  <p className="mt-1 text-slate-800 font-semibold"><span className="font-mono">{Math.abs(monsoonGoverningTR - summerGoverningTR).toFixed(2)} TR</span></p>
+                <div className="rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 px-3 py-2 text-[11px]">
+                  <p className="uppercase tracking-wider font-semibold text-slate-500 dark:text-slate-400 text-[10px]">Season Delta</p>
+                  <p className="mt-1 text-slate-800 dark:text-slate-200 font-semibold"><span className="font-mono">{Math.abs(monsoonGoverningTR - summerGoverningTR).toFixed(2)} TR</span></p>
                 </div>
               </div>
             ) : (
@@ -261,36 +300,9 @@ function ZoneSummaryBar({
             )}
           </div>
 
-          {/* Add Equipment button — AHU / zone-level */}
-          {project?.id && (
-            <button
-              type="button"
-              onClick={() => setPickerOpen(true)}
-              className="flex items-center gap-1.5 rounded-lg bg-emerald-600 px-3.5 py-2 text-xs font-semibold text-white shadow-sm transition-colors hover:bg-emerald-700"
-            >
-              <PackagePlus className="w-3.5 h-3.5" />
-              Add Zone Equipment (AHU)
-            </button>
-          )}
         </div>
       </div>
 
-      {/* Equipment Picker Dialog — zone level */}
-      {project?.id && (
-        <EquipmentPickerDialog
-          open={pickerOpen}
-          onClose={() => setPickerOpen(false)}
-          projectId={project.id}
-          zoneId={zoneId}
-          zoneName={zoneName}
-          governingTR={governingTR}
-          loadTR={governingLoadTR}
-          cfmTR={governingCfmTR > 0 ? governingCfmTR : undefined}
-          requiredTR={requiredTR}
-          designCFM={governingDesignCfm > 0 ? governingDesignCfm : undefined}
-          achGovernsAirflow={achGovernsAirflow}
-        />
-      )}
     </>
   );
 }
@@ -316,7 +328,7 @@ function ZoneCollapsedBadge({
   if (zoneRooms.length === 0) return null;
 
   return (
-    <span className="hidden md:flex items-center gap-2 rounded-full border border-orange-200 bg-gradient-to-r from-orange-50 to-amber-50 px-2.5 py-1 text-[11px] font-semibold text-orange-700 flex-shrink-0 shadow-sm">
+    <span className="hidden md:flex items-center gap-2 rounded-full border border-orange-200 dark:border-orange-800 bg-gradient-to-r from-orange-50 to-amber-50 dark:from-orange-950/30 dark:to-amber-950/30 px-2.5 py-1 text-[11px] font-semibold text-orange-700 dark:text-orange-400 flex-shrink-0 shadow-sm">
       <span>{t.totalTR.toFixed(2)} TR</span>
       <span className="h-3 w-px bg-orange-200" />
       <span>{Math.round(t.totalDesignCfm)} CFM</span>
@@ -356,13 +368,59 @@ const ZoneList = ({
   project,
   defaultDesignConditions,
   canEdit,
-  isVRF,
-  isHybrid,
   roomSaveStates,
+  userProfile,
+  moveRoom,
+  equipSystems,
 }: any) => {
   const isChiller = String(project?.systemType || '').toLowerCase().includes('chiller');
   const [overrideDrafts, setOverrideDrafts] = useState<Record<string, string>>({});
   const [savingZoneOverrideId, setSavingZoneOverrideId] = useState<string | null>(null);
+
+  // ── Bulk move state ──────────────────────────────────────────────────────────
+  const [bulkMoveOpen, setBulkMoveOpen] = useState(false);
+  const [bulkSourceZoneId, setBulkSourceZoneId] = useState<string | null>(null);
+  const [bulkSelected, setBulkSelected] = useState<Set<string>>(new Set());
+  const [bulkTargetZoneId, setBulkTargetZoneId] = useState<string>('');
+  const [bulkMoving, setBulkMoving] = useState(false);
+  const bulkDialogRef = useRef<HTMLDivElement>(null);
+
+  const openBulkMove = (zoneId: string) => {
+    setBulkSourceZoneId(zoneId);
+    setBulkSelected(new Set());
+    setBulkTargetZoneId('');
+    setBulkOpen(true);
+  };
+  const setBulkOpen = (v: boolean) => { setBulkMoveOpen(v); if (!v) { setBulkSourceZoneId(null); setBulkSelected(new Set()); setBulkTargetZoneId(''); } };
+
+  const handleBulkMove = async () => {
+    if (!bulkSourceZoneId || bulkSelected.size === 0 || !bulkTargetZoneId) return;
+    if (!moveRoom) { toast.error('Move not available'); return; }
+    setBulkMoving(true);
+    const sourceRooms = (rooms[bulkSourceZoneId] || []).filter((r: any) => bulkSelected.has(r.id));
+    let ok = 0;
+    let fail = 0;
+    for (const room of sourceRooms) {
+      try {
+        await moveRoom(room, bulkSourceZoneId, bulkTargetZoneId);
+        ok++;
+      } catch {
+        fail++;
+      }
+    }
+    setBulkMoving(false);
+    setBulkOpen(false);
+    if (ok > 0) toast.success(`Moved ${ok} room${ok > 1 ? 's' : ''} successfully`);
+    if (fail > 0) toast.error(`${fail} room${fail > 1 ? 's' : ''} failed to move`);
+  };
+
+  // All zones + systems for the target dropdown (exclude source)
+  const allZonesForMove = useMemo(() => {
+    const list: { id: string; name: string }[] = [];
+    (systems || []).forEach((s: any) => list.push({ id: s.id, name: s.name }));
+    (zones || []).filter((z: any) => !z.systemId).forEach((z: any) => list.push({ id: z.id, name: z.name }));
+    return list;
+  }, [systems, zones]);
 
   const dc: DesignConditions = defaultDesignConditions ?? {
     outdoorTemp: 95,
@@ -574,7 +632,7 @@ const ZoneList = ({
         {/* Zone header row */}
         <div
           className={`flex items-center gap-3 px-4 py-3 cursor-pointer select-none transition-colors border-l-2 ${
-            isOpen ? 'bg-orange-50 border-l-orange-500' : 'hover:bg-gray-50 border-l-transparent'
+            isOpen ? 'bg-orange-50 dark:bg-orange-950/20 border-l-orange-500' : 'hover:bg-gray-50 dark:hover:bg-slate-700/50 border-l-transparent'
           }`}
           onClick={() => {
             if (blockDirtyZoneNavigation(isOpen ? null : zoneId)) return;
@@ -582,7 +640,7 @@ const ZoneList = ({
           }}
         >
           {/* Expand icon */}
-          <span className="text-gray-400 flex-shrink-0">
+          <span className="text-gray-400 dark:text-slate-500 flex-shrink-0">
             {isOpen ? <ChevronDown className="w-4 h-4" /> : <ChevronRight className="w-4 h-4" />}
           </span>
 
@@ -591,7 +649,7 @@ const ZoneList = ({
             value={zone.name}
             title="Zone name"
             aria-label="Zone name"
-            className="flex-1 min-w-0 font-semibold text-sm text-gray-900 bg-transparent border-none outline-none focus:ring-0 p-0 placeholder:text-slate-400"
+            className="flex-1 min-w-0 font-semibold text-sm text-gray-900 dark:text-slate-100 bg-transparent border-none outline-none focus:ring-0 p-0 placeholder:text-slate-400"
             onClick={e => e.stopPropagation()}
             onChange={e =>
               isSystem
@@ -600,15 +658,27 @@ const ZoneList = ({
             }
           />
 
-          {/* VRF System badge */}
+          {/* System type badge — legacy VRF system or SD equipment system */}
           {isSystem && (
-            <span className="text-[10px] font-bold uppercase tracking-wider bg-blue-100 text-blue-700 px-1.5 py-0.5 rounded flex-shrink-0">
+            <span className="text-[10px] font-bold uppercase tracking-wider bg-blue-100 dark:bg-blue-900/30 text-blue-700 dark:text-blue-400 px-1.5 py-0.5 rounded flex-shrink-0">
               VRF System
+            </span>
+          )}
+          {!isSystem && zone.type && (
+            <span className={`text-[10px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded flex-shrink-0 ${
+              zone.type === 'VRF'     ? 'bg-blue-100 dark:bg-blue-900/30 text-blue-700 dark:text-blue-400' :
+              zone.type === 'Chiller' ? 'bg-indigo-100 dark:bg-indigo-900/30 text-indigo-700 dark:text-indigo-400' :
+              zone.type === 'AHU'    ? 'bg-sky-100 dark:bg-sky-900/30 text-sky-700 dark:text-sky-400' :
+              zone.type === 'Package' || zone.type === 'DuctableSplit' ? 'bg-teal-100 dark:bg-teal-900/30 text-teal-700 dark:text-teal-400' :
+              zone.type === 'Split'  ? 'bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-400' :
+              'bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-400'
+            }`}>
+              {zone.type}
             </span>
           )}
 
           {/* Room count */}
-          <span className="text-xs text-gray-400 flex-shrink-0 rounded bg-slate-100 px-1.5 py-0.5">
+          <span className="text-xs text-gray-400 dark:text-slate-400 flex-shrink-0 rounded bg-slate-100 dark:bg-slate-700 px-1.5 py-0.5">
             {zoneRooms.length} room{zoneRooms.length !== 1 ? 's' : ''}
           </span>
 
@@ -628,10 +698,20 @@ const ZoneList = ({
               <button
                 type="button"
                 onClick={() => addRoom(zoneId, systemId)}
-                className="flex items-center gap-1 text-xs text-blue-600 hover:text-blue-800 bg-blue-50 hover:bg-blue-100 px-2 py-1 rounded font-medium transition-colors border border-blue-100"
+                className="flex items-center gap-1 text-xs text-blue-600 dark:text-blue-400 hover:text-blue-800 dark:hover:text-blue-300 bg-blue-50 dark:bg-blue-900/20 hover:bg-blue-100 dark:hover:bg-blue-900/40 px-2 py-1 rounded font-medium transition-colors border border-blue-100 dark:border-blue-800"
               >
                 <Plus className="w-3 h-3" /> Add Room
               </button>
+              {zoneRooms.length > 0 && moveRoom && (
+                <button
+                  type="button"
+                  onClick={() => openBulkMove(zoneId)}
+                  className="flex items-center gap-1 text-xs text-slate-500 dark:text-slate-400 hover:text-violet-700 dark:hover:text-violet-400 bg-slate-50 dark:bg-slate-700/50 hover:bg-violet-50 dark:hover:bg-violet-900/20 px-2 py-1 rounded font-medium transition-colors border border-slate-200 dark:border-slate-600 hover:border-violet-200 dark:hover:border-violet-700"
+                  title="Move rooms to another zone"
+                >
+                  <ArrowRight className="w-3 h-3" /> Move
+                </button>
+              )}
               <button
                 type="button"
                 onClick={() => {
@@ -651,7 +731,7 @@ const ZoneList = ({
         {isOpen && (
           <>
             {/* Inside design conditions for this zone */}
-            <div className="border-t border-slate-100 bg-slate-50/80 px-4 py-3">
+            <div className="border-t border-slate-100 dark:border-slate-700 bg-slate-50/80 dark:bg-slate-800/80 px-4 py-3">
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <span className="text-[10px] font-bold uppercase tracking-wider text-slate-500">Inside Design Overrides</span>
                 {zoneOverrideDirty ? (
@@ -660,7 +740,7 @@ const ZoneList = ({
                     <button
                       type="button"
                       onClick={() => clearZoneOverrideDrafts(zoneId)}
-                      className="h-7 rounded-md border border-slate-300 bg-white px-2.5 text-[11px] font-semibold text-slate-700 hover:bg-slate-50"
+                      className="h-7 rounded-md border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-700 px-2.5 text-[11px] font-semibold text-slate-700 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-600"
                     >
                       Cancel
                     </button>
@@ -688,63 +768,63 @@ const ZoneList = ({
               </div>
 
               <div className="mt-3 grid grid-cols-1 gap-3 lg:grid-cols-2">
-                <div className="rounded-lg border border-orange-200 bg-orange-50/70 px-3 py-2.5">
+                <div className="rounded-lg border border-orange-200 dark:border-orange-800 bg-orange-50/70 dark:bg-orange-950/20 px-3 py-2.5">
                   <div className="mb-2 flex items-center justify-between gap-2">
-                    <span className="text-[10px] font-semibold uppercase tracking-wide text-orange-700">Summer / Monsoon</span>
-                    <span className="text-[10px] text-orange-500">Monsoon follows summer override</span>
+                    <span className="text-[10px] font-semibold uppercase tracking-wide text-orange-700 dark:text-orange-400">Summer / Monsoon</span>
+                    <span className="text-[10px] text-orange-500 dark:text-orange-400">Monsoon follows summer override</span>
                   </div>
                   <div className="grid grid-cols-2 gap-3">
                     <label className="space-y-1">
-                      <span className="text-[11px] text-slate-600">Temp (°F)</span>
+                      <span className="text-[11px] text-slate-600 dark:text-slate-400">Temp (°F)</span>
                       <input
                         type="text"
                         inputMode="decimal"
                         title="Indoor design temperature for this zone"
                         value={getOverrideInputValue(zone, zoneId, 'indoorTemp', dc.indoorTemp ?? 75)}
                         onChange={e => setOverrideDraft(zoneId, 'indoorTemp', e.target.value)}
-                        className="h-8 w-full text-xs border border-orange-200 rounded px-2 bg-white focus:outline-none focus:ring-1 focus:ring-orange-400"
+                        className="h-8 w-full text-xs border border-orange-200 dark:border-orange-800 rounded px-2 bg-white dark:bg-slate-700 text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-1 focus:ring-orange-400"
                       />
                     </label>
                     <label className="space-y-1">
-                      <span className="text-[11px] text-slate-600">RH (%)</span>
+                      <span className="text-[11px] text-slate-600 dark:text-slate-400">RH (%)</span>
                       <input
                         type="text"
                         inputMode="decimal"
                         title="Indoor relative humidity for this zone"
                         value={getOverrideInputValue(zone, zoneId, 'indoorHumidity', dc.indoorHumidity ?? 50)}
                         onChange={e => setOverrideDraft(zoneId, 'indoorHumidity', e.target.value)}
-                        className="h-8 w-full text-xs border border-orange-200 rounded px-2 bg-white focus:outline-none focus:ring-1 focus:ring-orange-400"
+                        className="h-8 w-full text-xs border border-orange-200 dark:border-orange-800 rounded px-2 bg-white dark:bg-slate-700 text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-1 focus:ring-orange-400"
                       />
                     </label>
                   </div>
                 </div>
 
-                <div className="rounded-lg border border-blue-200 bg-blue-50/70 px-3 py-2.5">
+                <div className="rounded-lg border border-blue-200 dark:border-blue-800 bg-blue-50/70 dark:bg-blue-950/20 px-3 py-2.5">
                   <div className="mb-2 flex items-center justify-between gap-2">
-                    <span className="text-[10px] font-semibold uppercase tracking-wide text-blue-700">Winter</span>
-                    <span className="text-[10px] text-blue-500">Used for heating analysis</span>
+                    <span className="text-[10px] font-semibold uppercase tracking-wide text-blue-700 dark:text-blue-400">Winter</span>
+                    <span className="text-[10px] text-blue-500 dark:text-blue-400">Used for heating analysis</span>
                   </div>
                   <div className="grid grid-cols-2 gap-3">
                     <label className="space-y-1">
-                      <span className="text-[11px] text-slate-600">Temp (°F)</span>
+                      <span className="text-[11px] text-slate-600 dark:text-slate-400">Temp (°F)</span>
                       <input
                         type="text"
                         inputMode="decimal"
                         title="Winter indoor design temperature for this zone"
                         value={getOverrideInputValue(zone, zoneId, 'winterIndoorTemp', zoneDc.winterIndoorTemp ?? dc.winterIndoorTemp ?? 72)}
                         onChange={e => setOverrideDraft(zoneId, 'winterIndoorTemp', e.target.value)}
-                        className="h-8 w-full text-xs border border-blue-200 rounded px-2 bg-white focus:outline-none focus:ring-1 focus:ring-blue-400"
+                        className="h-8 w-full text-xs border border-blue-200 dark:border-blue-800 rounded px-2 bg-white dark:bg-slate-700 text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-1 focus:ring-blue-400"
                       />
                     </label>
                     <label className="space-y-1">
-                      <span className="text-[11px] text-slate-600">RH (%)</span>
+                      <span className="text-[11px] text-slate-600 dark:text-slate-400">RH (%)</span>
                       <input
                         type="text"
                         inputMode="decimal"
                         title="Winter indoor relative humidity for this zone"
                         value={getOverrideInputValue(zone, zoneId, 'winterIndoorHumidity', zoneDc.winterIndoorHumidity ?? dc.winterIndoorHumidity ?? 40)}
                         onChange={e => setOverrideDraft(zoneId, 'winterIndoorHumidity', e.target.value)}
-                        className="h-8 w-full text-xs border border-blue-200 rounded px-2 bg-white focus:outline-none focus:ring-1 focus:ring-blue-400"
+                        className="h-8 w-full text-xs border border-blue-200 dark:border-blue-800 rounded px-2 bg-white dark:bg-slate-700 text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-1 focus:ring-blue-400"
                       />
                     </label>
                   </div>
@@ -752,7 +832,7 @@ const ZoneList = ({
               </div>
             </div>
 
-            <div className="border-t border-gray-100 bg-gray-50/50">
+            <div className="border-t border-gray-100 dark:border-slate-700 bg-gray-50/50 dark:bg-slate-800/50">
               <RoomTable
                 rooms={zoneRooms}
                 liveRooms={liveZoneRooms}
@@ -772,6 +852,7 @@ const ZoneList = ({
                 roomSaveStates={roomSaveStates}
                 onRoomDraftChange={onRoomDraftChange}
                 onEnvelopeDraftChange={onEnvelopeDraftChange}
+                userId={userProfile?.uid}
               />
             </div>
             <ZoneSummaryBar
@@ -782,6 +863,7 @@ const ZoneList = ({
               project={project}
               zoneId={zoneId}
               zoneName={zone.name}
+              equipSystems={equipSystems}
             />
           </>
         )}
@@ -790,54 +872,102 @@ const ZoneList = ({
   };
 
   return (
-    <div className="divide-y divide-gray-100">
-      {/* VRF / Hybrid: systems */}
-      {(isVRF || isHybrid) && systems.map((system: any) => (
-        <div key={system.id}>
-          {isVRF ? (
-            renderZone(system, system.id)
-          ) : (
-            <>
-              {/* System header for Hybrid */}
-              <div
-                className={`flex items-center gap-3 px-4 py-3 cursor-pointer select-none transition-colors border-l-2 ${
-                  expandedSystem === system.id ? 'bg-blue-50 border-l-blue-500' : 'hover:bg-gray-50 border-l-transparent'
-                }`}
-                onClick={() => {
-                  if (blockDirtyZoneNavigation(expandedSystem === system.id ? null : system.id)) return;
-                  setExpandedSystem(expandedSystem === system.id ? null : system.id);
-                }}
-              >
-                <span className="text-blue-400 flex-shrink-0">
-                  {expandedSystem === system.id ? <ChevronDown className="w-4 h-4" /> : <ChevronRight className="w-4 h-4" />}
-                </span>
-                <span className="flex-1 font-semibold text-sm text-blue-900">{system.name}</span>
-                <span className="text-[10px] font-bold uppercase bg-blue-100 text-blue-700 px-1.5 py-0.5 rounded">VRF System</span>
-                {canEdit && (
-                  <button
-                    type="button"
-                    onClick={e => { e.stopPropagation(); addZone(system.id); }}
-                    className="flex items-center gap-1 text-xs text-blue-600 hover:text-blue-800 bg-blue-50 hover:bg-blue-100 px-2 py-1 rounded font-medium"
-                  >
-                    <Plus className="w-3 h-3" /> Add Zone
-                  </button>
-                )}
-              </div>
-              {expandedSystem === system.id && (
-                <div className="border-t border-blue-100 divide-y divide-gray-100 pl-6 border-l-2 border-l-blue-100">
-                  {zones.filter((z: any) => z.systemId === system.id).map((zone: any) => renderZone(zone, system.id))}
-                  {zones.filter((z: any) => z.systemId === system.id).length === 0 && (
-                    <p className="text-xs text-gray-400 italic py-3 px-4">No zones in this system yet.</p>
-                  )}
-                </div>
-              )}
-            </>
-          )}
-        </div>
-      ))}
+    <div className="divide-y divide-gray-100 dark:divide-slate-700">
+      {/* All zones rendered flat — system type is assigned in System Design, not Load Calculator */}
+      {zones.map((zone: any) => renderZone(zone, undefined))}
 
-      {/* CAC / Hybrid direct zones */}
-      {!isVRF && zones.filter((z: any) => !z.systemId).map((zone: any) => renderZone(zone, undefined))}
+      {/* ── Bulk Move Dialog ─────────────────────────────────────────────────── */}
+      {bulkMoveOpen && bulkSourceZoneId && (() => {
+        const sourceRooms: any[] = rooms[bulkSourceZoneId] || [];
+        const sourceName = allZonesForMove.find(z => z.id === bulkSourceZoneId)?.name ?? 'Zone';
+        const targets = allZonesForMove.filter(z => z.id !== bulkSourceZoneId);
+        return (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm p-4">
+            <div ref={bulkDialogRef} className="bg-white dark:bg-slate-800 rounded-2xl shadow-2xl w-full max-w-md flex flex-col max-h-[80vh]">
+              {/* Header */}
+              <div className="flex items-center justify-between px-5 py-4 border-b dark:border-slate-700">
+                <div>
+                  <h3 className="text-sm font-bold text-slate-800 dark:text-slate-100">Move Rooms</h3>
+                  <p className="text-xs text-slate-400 dark:text-slate-400 mt-0.5">From: <span className="font-semibold text-slate-600 dark:text-slate-300">{sourceName}</span></p>
+                </div>
+                <button onClick={() => setBulkOpen(false)} className="text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 text-lg font-bold leading-none">×</button>
+              </div>
+
+              {/* Room checkboxes */}
+              <div className="overflow-y-auto flex-1 px-5 py-3 space-y-1">
+                {sourceRooms.length === 0 && <p className="text-xs text-slate-400 italic">No rooms in this zone.</p>}
+                {/* Select all */}
+                {sourceRooms.length > 1 && (
+                  <label className="flex items-center gap-2.5 py-1.5 text-xs font-semibold text-slate-500 dark:text-slate-400 cursor-pointer select-none border-b dark:border-slate-700 mb-1 pb-2">
+                    <input
+                      type="checkbox"
+                      className="w-3.5 h-3.5 rounded accent-violet-600"
+                      checked={bulkSelected.size === sourceRooms.length}
+                      onChange={e => setBulkSelected(e.target.checked ? new Set(sourceRooms.map((r: any) => r.id)) : new Set())}
+                    />
+                    Select all ({sourceRooms.length})
+                  </label>
+                )}
+                {sourceRooms.map((r: any) => (
+                  <label key={r.id} className="flex items-center gap-2.5 py-1.5 text-sm text-slate-700 dark:text-slate-300 cursor-pointer select-none hover:bg-slate-50 dark:hover:bg-slate-700/50 rounded px-1">
+                    <input
+                      type="checkbox"
+                      className="w-3.5 h-3.5 rounded accent-violet-600"
+                      checked={bulkSelected.has(r.id)}
+                      onChange={e => setBulkSelected(prev => {
+                        const next = new Set(prev);
+                        e.target.checked ? next.add(r.id) : next.delete(r.id);
+                        return next;
+                      })}
+                    />
+                    <span className="flex-1 min-w-0">
+                      <span className="truncate block">{r.name || r.id}</span>
+                      {r.floor && <span className="text-[10px] text-slate-400">{r.floor} Floor</span>}
+                    </span>
+                    {r._calcRequiredTR > 0 && (
+                      <span className="text-[10px] text-slate-400 font-mono shrink-0">{Number(r._calcRequiredTR).toFixed(2)} TR</span>
+                    )}
+                  </label>
+                ))}
+              </div>
+
+              {/* Target zone + action */}
+              <div className="px-5 py-4 border-t dark:border-slate-700 bg-slate-50 dark:bg-slate-900/50 rounded-b-2xl space-y-3">
+                <div className="flex items-center gap-2">
+                  <ArrowRight className="w-4 h-4 text-slate-400 shrink-0" />
+                  <label className="text-xs font-semibold text-slate-500 dark:text-slate-400 whitespace-nowrap">Move to:</label>
+                  <select
+                    className="flex-1 text-sm border border-slate-200 dark:border-slate-600 rounded-lg px-2 py-1.5 bg-white dark:bg-slate-700 text-slate-900 dark:text-slate-100 focus:ring-2 focus:ring-violet-400 outline-none"
+                    value={bulkTargetZoneId}
+                    onChange={e => setBulkTargetZoneId(e.target.value)}
+                  >
+                    <option value="">— select zone —</option>
+                    {targets.map(z => (
+                      <option key={z.id} value={z.id}>{z.name}</option>
+                    ))}
+                  </select>
+                </div>
+                <div className="flex gap-2 justify-end">
+                  <button
+                    onClick={() => setBulkOpen(false)}
+                    className="px-4 py-1.5 text-xs font-semibold rounded-lg border border-slate-200 dark:border-slate-600 text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-700"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    onClick={handleBulkMove}
+                    disabled={bulkSelected.size === 0 || !bulkTargetZoneId || bulkMoving}
+                    className="px-4 py-1.5 text-xs font-semibold rounded-lg bg-violet-600 text-white hover:bg-violet-700 disabled:opacity-40 disabled:cursor-not-allowed flex items-center gap-1.5"
+                  >
+                    {bulkMoving ? <Loader2 className="w-3 h-3 animate-spin" /> : <ArrowRight className="w-3 h-3" />}
+                    {bulkMoving ? 'Moving…' : `Move ${bulkSelected.size > 0 ? bulkSelected.size : ''} Room${bulkSelected.size !== 1 ? 's' : ''}`}
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
     </div>
   );
 };

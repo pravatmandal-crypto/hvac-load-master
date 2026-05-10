@@ -56,6 +56,7 @@ interface Project {
   altitude?: number;
   systemType: string;
   includeMonsoon: boolean;
+  includeWinter: boolean;
   // Outside
   summerDesignTemp: number;
   summerDesignHumidity: number;
@@ -92,8 +93,8 @@ const EMPTY_FORM = {
   latitude: '',
   longitude: '',
   altitude: '',
-  systemType: 'CAC',
   includeMonsoon: false,
+  includeWinter: false,
   // Outside
   summerTemp: '',
   summerRH: '',
@@ -136,9 +137,10 @@ interface Props {
   userRole?: string | null;
   pendingPageChange?: string | null;
   onPageChangeResolved?: (page: string | null) => void;
+  onProjectChange?: (project: any) => void;
 }
 
-export default function LoadCalculatorPage({ currentUser, initialProjectId, userRole = null, pendingPageChange, onPageChangeResolved }: Props) {
+export default function LoadCalculatorPage({ currentUser, initialProjectId, userRole = null, pendingPageChange, onPageChangeResolved, onProjectChange }: Props) {
   const [projects, setProjects] = useState<Project[]>([]);
   const [activeProject, setActiveProject] = useState<Project | null>(null);
   const [ownerEmails, setOwnerEmails] = useState<Record<string, string>>({});
@@ -150,6 +152,7 @@ export default function LoadCalculatorPage({ currentUser, initialProjectId, user
   const [geocoding, setGeocoding] = useState(false);
   const [searchText, setSearchText] = useState('');
   const [systemFilter, setSystemFilter] = useState<'all' | string>('all');
+  const [reloadKey, setReloadKey] = useState(0);
 
   // Stable reference — prevents the data-loading effect in LoadCalculator
   // from re-triggering when LoadCalculatorPage re-renders.
@@ -157,6 +160,14 @@ export default function LoadCalculatorPage({ currentUser, initialProjectId, user
     () => ({ uid: currentUser.uid, email: currentUser.email }),
     [currentUser.uid, currentUser.email],
   );
+
+  // Increment reloadKey when Equipment Selection pushes zone assignments so that
+  // LoadCalculator re-fetches rooms even if it's already mounted (e.g. separate browser tab).
+  useEffect(() => {
+    const syncedAt = (activeProject as any)?.zonesLastSyncedAt?.seconds;
+    if (syncedAt) setReloadKey(k => k + 1);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [(activeProject as any)?.zonesLastSyncedAt?.seconds]);
 
   // ── Unsaved-changes navigation guard ─────────────────────────────────────
   const calculatorRef = useRef<LoadCalculatorHandle>(null);
@@ -212,6 +223,7 @@ export default function LoadCalculatorPage({ currentUser, initialProjectId, user
           altitude: data.altitude,
           systemType: p.systemType || 'CAC',
           includeMonsoon: p.includeMonsoon ?? false,
+          includeWinter: p.includeWinter ?? true,
           summerDesignTemp: data.summerDesignTemp ?? 95,
           summerDesignHumidity: data.summerDesignHumidity ?? 50,
           monsoonDesignTemp: data.monsoonDesignTemp ?? 85,
@@ -236,6 +248,7 @@ export default function LoadCalculatorPage({ currentUser, initialProjectId, user
           insideMonsoonHumidityRatio: data.insideMonsoonHumidityRatio,
           createdAt: p.createdAt?.toDate?.() ?? new Date(),
           updatedAt: p.updatedAt?.toDate?.() ?? new Date(),
+          zonesLastSyncedAt: p.zonesLastSyncedAt ?? null,
           data,
         } as Project;
       }));
@@ -279,6 +292,7 @@ export default function LoadCalculatorPage({ currentUser, initialProjectId, user
       const found = projects.find((p) => p.id === initialProjectId);
       if (found) {
         setActiveProject(found);
+        onProjectChange?.(found);
         setInitialHandled(true);
       }
     }
@@ -299,8 +313,8 @@ export default function LoadCalculatorPage({ currentUser, initialProjectId, user
       latitude: project.latitude != null ? String(project.latitude) : '',
       longitude: project.longitude != null ? String(project.longitude) : '',
       altitude: project.altitude != null ? String(project.altitude) : '',
-      systemType: project.systemType,
       includeMonsoon: project.includeMonsoon,
+      includeWinter: project.includeWinter ?? true,
       summerTemp: String(project.summerDesignTemp),
       summerRH: String(project.summerDesignHumidity),
       monsoonTemp: String(project.monsoonDesignTemp ?? 85),
@@ -347,15 +361,20 @@ export default function LoadCalculatorPage({ currentUser, initialProjectId, user
           altitude: String(locationData.altitude),
           summerTemp: String(locationData.summerDesignTemp),
           summerRH: String(locationData.summerDesignHumidity),
-          monsoonTemp: String(locationData.monsoonDesignTemp ?? 85),
-          monsoonRH: String(locationData.monsoonDesignHumidity ?? 85),
-          winterTemp: String(locationData.winterDesignTemp),
-          winterRH: String(locationData.winterDesignHumidity),
+          monsoonTemp: String(locationData.monsoonDesignTemp ?? (prev.monsoonTemp || '85')),
+          monsoonRH: String(locationData.monsoonDesignHumidity ?? (prev.monsoonRH || '85')),
+          winterTemp: String(locationData.winterDesignTemp ?? (prev.winterTemp || '40')),
+          winterRH: String(locationData.winterDesignHumidity ?? (prev.winterRH || '30')),
           includeMonsoon: locationData.monsoonDesignTemp != null || locationData.monsoonDesignHumidity != null
             ? true
             : prev.includeMonsoon,
+          includeWinter: locationData.winterDesignTemp != null || locationData.winterDesignHumidity != null
+            ? true
+            : prev.includeWinter,
           insideMonsoonTemp: prev.insideMonsoonTemp || prev.insideSummerTemp || '75',
           insideMonsoonRH: prev.insideMonsoonRH || '55',
+          insideWinterTemp: prev.insideWinterTemp || '70',
+          insideWinterRH: prev.insideWinterRH || '30',
         }));
         toast.success('Location and design conditions auto-filled');
         setGeocoding(false);
@@ -372,8 +391,8 @@ export default function LoadCalculatorPage({ currentUser, initialProjectId, user
         latitude: savedProjectMatch.latitude != null ? String(savedProjectMatch.latitude) : prev.latitude,
         longitude: savedProjectMatch.longitude != null ? String(savedProjectMatch.longitude) : prev.longitude,
         altitude: savedProjectMatch.altitude != null ? String(savedProjectMatch.altitude) : prev.altitude,
-        systemType: savedProjectMatch.systemType || prev.systemType,
         includeMonsoon: savedProjectMatch.includeMonsoon ?? prev.includeMonsoon,
+        includeWinter: savedProjectMatch.includeWinter ?? prev.includeWinter,
         summerTemp: String(savedProjectMatch.summerDesignTemp ?? prev.summerTemp),
         summerRH: String(savedProjectMatch.summerDesignHumidity ?? prev.summerRH),
         monsoonTemp: String(savedProjectMatch.monsoonDesignTemp ?? prev.monsoonTemp),
@@ -426,43 +445,48 @@ export default function LoadCalculatorPage({ currentUser, initialProjectId, user
 
     const outsideSummer = psychro(sumT, sumRH);
     const outsideMonsoon = psychro(monT, monRH);
-    const outsideWinter = psychro(winT, winRH);
+    const outsideWinter = form.includeWinter ? psychro(winT, winRH) : null;
     const insideSummer = psychro(inSumT, inSumRH);
     const insideMonsoon = psychro(inMonT, inMonRH);
 
-    const data = {
+    const data: Record<string, any> = {
       longitude: form.longitude !== '' ? parseFloat(form.longitude) : undefined,
       latitude: form.latitude !== '' ? parseFloat(form.latitude) : undefined,
       altitude: form.altitude !== '' ? parseFloat(form.altitude) : 0,
       summerDesignTemp: sumT,
       summerDesignHumidity: sumRH,
-      monsoonDesignTemp: monT,
-      monsoonDesignHumidity: monRH,
-      winterDesignTemp: winT,
-      winterDesignHumidity: winRH,
+      ...(form.includeMonsoon && {
+        monsoonDesignTemp: monT,
+        monsoonDesignHumidity: monRH,
+        insideMonsoonTemp: inMonT,
+        insideMonsoonHumidity: inMonRH,
+        monsoonEnthalpy: outsideMonsoon.enthalpy,
+        monsoonHumidityRatio: outsideMonsoon.humidityRatio,
+        insideMonsoonEnthalpy: insideMonsoon.enthalpy,
+        insideMonsoonHumidityRatio: insideMonsoon.humidityRatio,
+      }),
+      ...(form.includeWinter && outsideWinter && {
+        winterDesignTemp: winT,
+        winterDesignHumidity: winRH,
+        insideWinterTemp: inWinT,
+        insideWinterHumidity: inWinRH,
+        winterEnthalpy: outsideWinter.enthalpy,
+        winterHumidityRatio: outsideWinter.humidityRatio,
+      }),
       insideSummerTemp: inSumT,
       insideSummerHumidity: inSumRH,
-      insideMonsoonTemp: inMonT,
-      insideMonsoonHumidity: inMonRH,
-      insideWinterTemp: inWinT,
-      insideWinterHumidity: inWinRH,
       summerEnthalpy: outsideSummer.enthalpy,
       summerHumidityRatio: outsideSummer.humidityRatio,
-      monsoonEnthalpy: outsideMonsoon.enthalpy,
-      monsoonHumidityRatio: outsideMonsoon.humidityRatio,
-      winterEnthalpy: outsideWinter.enthalpy,
-      winterHumidityRatio: outsideWinter.humidityRatio,
       insideSummerEnthalpy: insideSummer.enthalpy,
       insideSummerHumidityRatio: insideSummer.humidityRatio,
-      insideMonsoonEnthalpy: insideMonsoon.enthalpy,
-      insideMonsoonHumidityRatio: insideMonsoon.humidityRatio,
     };
 
     const payload = {
       name: form.name.trim(),
       location: form.location.trim(),
-      systemType: form.systemType,
+      systemType: editingProject?.systemType || 'CAC',
       includeMonsoon: form.includeMonsoon,
+      includeWinter: form.includeWinter,
       userId: currentUser.uid,
       data,
     };
@@ -552,13 +576,13 @@ export default function LoadCalculatorPage({ currentUser, initialProjectId, user
             <ArrowLeft className="h-4 w-4" />
             Projects
           </Button>
-          <div className="flex items-center gap-2 text-sm text-gray-500">
+          <div className="flex items-center gap-2 text-sm text-gray-500 dark:text-slate-400">
             <span>Load Calculator</span>
             <ChevronRight className="h-4 w-4" />
-            <span className="font-semibold text-gray-900">{activeProject.name}</span>
+            <span className="font-semibold text-gray-900 dark:text-slate-100">{activeProject.name}</span>
           </div>
           {userRole === 'Super' && activeProject.userId && (
-            <Badge variant="outline" className="border-amber-200 bg-amber-50 text-amber-800">
+            <Badge variant="outline" className="border-amber-200 bg-amber-50 text-amber-800 dark:border-amber-700 dark:bg-amber-950/20 dark:text-amber-300">
               Owned by: {ownerEmails[activeProject.userId] || activeProject.userId}
             </Badge>
           )}
@@ -570,6 +594,7 @@ export default function LoadCalculatorPage({ currentUser, initialProjectId, user
           project={activeProject}
           userProfile={userProfile}
           onUnsavedChangesChange={handleCalculatorUnsaved}
+          reloadKey={reloadKey}
         />
 
         {/* Edit dialog accessible from calculator view */}
@@ -593,6 +618,7 @@ export default function LoadCalculatorPage({ currentUser, initialProjectId, user
               setIsSavingAll(true);
               try {
                 await calculatorRef.current?.saveAllDirty();
+                calculatorHasUnsavedRef.current = false;
                 const action = pendingNavAction;
                 setPendingNavAction(null);
                 action();
@@ -623,8 +649,8 @@ export default function LoadCalculatorPage({ currentUser, initialProjectId, user
       {/* Header */}
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
-          <h1 className="text-2xl font-bold text-gray-900">Load Calculator</h1>
-          <p className="text-sm text-gray-500">Select a project or create a new one to begin</p>
+          <h1 className="text-2xl font-bold text-gray-900 dark:text-slate-100">Load Calculator</h1>
+          <p className="text-sm text-gray-500 dark:text-slate-400">Select a project or create a new one to begin</p>
         </div>
         <Button onClick={openCreateDialog} className="gap-2 bg-blue-600 hover:bg-blue-700">
           <Plus className="h-4 w-4" />
@@ -633,22 +659,22 @@ export default function LoadCalculatorPage({ currentUser, initialProjectId, user
       </div>
 
       <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-        <Card className="border-blue-100 bg-blue-50">
+        <Card className="border-blue-100 bg-blue-50 dark:border-blue-900 dark:bg-blue-950/20">
           <CardContent className="pt-5">
-            <p className="text-xs font-semibold uppercase tracking-wide text-blue-600">Total Projects</p>
-            <p className="mt-1 text-2xl font-bold text-blue-900">{projectStats.total}</p>
+            <p className="text-xs font-semibold uppercase tracking-wide text-blue-600 dark:text-blue-400">Total Projects</p>
+            <p className="mt-1 text-2xl font-bold text-blue-900 dark:text-blue-200">{projectStats.total}</p>
           </CardContent>
         </Card>
-        <Card className="border-indigo-100 bg-indigo-50">
+        <Card className="border-indigo-100 bg-indigo-50 dark:border-indigo-900 dark:bg-indigo-950/20">
           <CardContent className="pt-5">
-            <p className="text-xs font-semibold uppercase tracking-wide text-indigo-600">Primary System</p>
-            <p className="mt-1 text-2xl font-bold text-indigo-900">{projectStats.dominantSystem}</p>
+            <p className="text-xs font-semibold uppercase tracking-wide text-indigo-600 dark:text-indigo-400">Primary System</p>
+            <p className="mt-1 text-2xl font-bold text-indigo-900 dark:text-indigo-200">{projectStats.dominantSystem}</p>
           </CardContent>
         </Card>
-        <Card className="border-emerald-100 bg-emerald-50">
+        <Card className="border-emerald-100 bg-emerald-50 dark:border-emerald-900 dark:bg-emerald-950/20">
           <CardContent className="pt-5">
-            <p className="text-xs font-semibold uppercase tracking-wide text-emerald-600">Avg Summer Temp</p>
-            <p className="mt-1 text-2xl font-bold text-emerald-900">{projectStats.averageSummerTemp}°F</p>
+            <p className="text-xs font-semibold uppercase tracking-wide text-emerald-600 dark:text-emerald-400">Avg Summer Temp</p>
+            <p className="mt-1 text-2xl font-bold text-emerald-900 dark:text-emerald-200">{projectStats.averageSummerTemp}°F</p>
           </CardContent>
         </Card>
       </div>
@@ -685,19 +711,19 @@ export default function LoadCalculatorPage({ currentUser, initialProjectId, user
 
       {/* Project grid */}
       {projects.length === 0 ? (
-        <div className="flex flex-col items-center justify-center rounded-2xl border-2 border-dashed border-gray-200 py-24 text-center">
-          <Thermometer className="mx-auto mb-4 h-12 w-12 text-gray-300" />
-          <h3 className="font-semibold text-gray-700">No projects yet</h3>
-          <p className="mt-1 text-sm text-gray-500">Create your first project to start a load calculation</p>
+        <div className="flex flex-col items-center justify-center rounded-2xl border-2 border-dashed border-gray-200 dark:border-slate-700 py-24 text-center dark:bg-slate-900">
+          <Thermometer className="mx-auto mb-4 h-12 w-12 text-gray-300 dark:text-slate-600" />
+          <h3 className="font-semibold text-gray-700 dark:text-slate-300">No projects yet</h3>
+          <p className="mt-1 text-sm text-gray-500 dark:text-slate-400">Create your first project to start a load calculation</p>
           <Button onClick={openCreateDialog} className="mt-4 gap-2">
             <Plus className="h-4 w-4" />
             New Project
           </Button>
         </div>
       ) : filteredProjects.length === 0 ? (
-        <div className="rounded-2xl border border-dashed border-gray-300 bg-gray-50 py-16 text-center">
-          <p className="text-sm font-semibold text-gray-700">No matching projects</p>
-          <p className="mt-1 text-xs text-gray-500">Try a different search term or clear system filter.</p>
+        <div className="rounded-2xl border border-dashed border-gray-300 bg-gray-50 dark:border-slate-700 dark:bg-slate-900 py-16 text-center">
+          <p className="text-sm font-semibold text-gray-700 dark:text-slate-300">No matching projects</p>
+          <p className="mt-1 text-xs text-gray-500 dark:text-slate-400">Try a different search term or clear system filter.</p>
         </div>
       ) : (
         <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
@@ -706,7 +732,7 @@ export default function LoadCalculatorPage({ currentUser, initialProjectId, user
               key={project.id}
               project={project}
               ownerLabel={userRole === 'Super' && project.userId ? (ownerEmails[project.userId] || project.userId) : undefined}
-              onOpen={() => guardedNavigate(() => setActiveProject(project))}
+              onOpen={() => guardedNavigate(() => { setActiveProject(project); onProjectChange?.(project); })}
               onEdit={() => openEditDialog(project)}
               onDelete={() => deleteProject(project.id)}
             />
@@ -824,7 +850,7 @@ function ProjectCard({
 
         {ownerLabel && (
           <div>
-            <span className="inline-flex items-center rounded-md border border-amber-200 bg-amber-50 px-2 py-1 text-[11px] font-medium text-amber-800">
+            <span className="inline-flex items-center rounded-md border border-amber-200 bg-amber-50 px-2 py-1 text-[11px] font-medium text-amber-800 dark:border-amber-700 dark:bg-amber-950/20 dark:text-amber-300">
               Owned by: {ownerLabel}
             </span>
           </div>
@@ -855,27 +881,27 @@ function ConditionBox({
   enthalpy?: number; hr?: number;
 }) {
   const bg: Record<string, string> = {
-    red: 'bg-red-50 border-red-100',
-    blue: 'bg-blue-50 border-blue-100',
-    teal: 'bg-teal-50 border-teal-100',
-    cyan: 'bg-cyan-50 border-cyan-100',
-    indigo: 'bg-indigo-50 border-indigo-100',
-    purple: 'bg-purple-50 border-purple-100',
+    red: 'bg-red-50 border-red-100 dark:bg-red-950/20 dark:border-red-900',
+    blue: 'bg-blue-50 border-blue-100 dark:bg-blue-950/20 dark:border-blue-900',
+    teal: 'bg-teal-50 border-teal-100 dark:bg-teal-950/20 dark:border-teal-900',
+    cyan: 'bg-cyan-50 border-cyan-100 dark:bg-cyan-950/20 dark:border-cyan-900',
+    indigo: 'bg-indigo-50 border-indigo-100 dark:bg-indigo-950/20 dark:border-indigo-900',
+    purple: 'bg-purple-50 border-purple-100 dark:bg-purple-950/20 dark:border-purple-900',
   };
   const text: Record<string, string> = {
-    red: 'text-red-700',
-    blue: 'text-blue-700',
-    teal: 'text-teal-700',
-    cyan: 'text-cyan-700',
-    indigo: 'text-indigo-700',
-    purple: 'text-purple-700',
+    red: 'text-red-700 dark:text-red-300',
+    blue: 'text-blue-700 dark:text-blue-300',
+    teal: 'text-teal-700 dark:text-teal-300',
+    cyan: 'text-cyan-700 dark:text-cyan-300',
+    indigo: 'text-indigo-700 dark:text-indigo-300',
+    purple: 'text-purple-700 dark:text-purple-300',
   };
   return (
     <div className={`rounded border p-2 ${bg[color]}`}>
-      <p className="mb-0.5 text-[10px] font-semibold uppercase tracking-wide text-gray-500">{label}</p>
+      <p className="mb-0.5 text-[10px] font-semibold uppercase tracking-wide text-gray-500 dark:text-slate-400">{label}</p>
       <p className={`font-bold ${text[color]}`}>{temp}°F / {rh}% RH</p>
       {enthalpy != null && (
-        <p className="text-[10px] text-gray-500">
+        <p className="text-[10px] text-gray-500 dark:text-slate-400">
           h={enthalpy} BTU/lb · W={hr?.toFixed(4)}
         </p>
       )}
@@ -897,269 +923,298 @@ interface DialogProps {
   editing: boolean;
 }
 
+function ConditionPair({
+  tempVal, rhVal,
+  onTempChange, onRhChange,
+  tempPlaceholder, rhPlaceholder,
+}: {
+  tempVal: string; rhVal: string;
+  onTempChange: (v: string) => void; onRhChange: (v: string) => void;
+  tempPlaceholder: string; rhPlaceholder: string;
+}) {
+  return (
+    <div className="grid grid-cols-2 gap-2">
+      <div className="space-y-1">
+        <Label className="text-[11px] text-slate-500 dark:text-slate-400">Temp (°F)</Label>
+        <Input
+          type="text" inputMode="decimal" placeholder={tempPlaceholder}
+          value={tempVal}
+          onChange={(e) => onTempChange(e.target.value)}
+          className="h-8 text-sm"
+        />
+      </div>
+      <div className="space-y-1">
+        <Label className="text-[11px] text-slate-500 dark:text-slate-400">RH (%)</Label>
+        <Input
+          type="text" inputMode="decimal" placeholder={rhPlaceholder}
+          value={rhVal}
+          onChange={(e) => onRhChange(e.target.value)}
+          className="h-8 text-sm"
+        />
+      </div>
+    </div>
+  );
+}
+
 function ProjectDialog({
   open, onClose, form, setField, onSave, onGeocode, saving, geocoding, editing,
 }: DialogProps) {
+  const activeSeasonsCount = 1 + (form.includeMonsoon ? 1 : 0) + (form.includeWinter ? 1 : 0);
+  const gridCols = activeSeasonsCount === 1 ? 'grid-cols-1' : activeSeasonsCount === 2 ? 'grid-cols-2' : 'grid-cols-3';
+
   return (
     <Dialog open={open} onOpenChange={(v) => !v && onClose()}>
-      <DialogContent className="max-h-[90vh] max-w-4xl overflow-y-auto">
-        <DialogHeader>
-          <DialogTitle>{editing ? 'Edit Project' : 'New Project'}</DialogTitle>
-        </DialogHeader>
+      <DialogContent className="max-h-[92vh] max-w-5xl overflow-y-auto p-0">
 
-        <div className="space-y-5 py-2">
-          {/* Name */}
-          <div className="space-y-1">
-            <Label>Project Name *</Label>
-            <Input
-              placeholder="e.g. Office Building — East Tower"
-              value={form.name}
-              onChange={(e) => setField('name', e.target.value)}
-            />
-          </div>
-
-          {/* Address + geocode */}
-          <div className="space-y-1">
-            <Label>Project Address / Location</Label>
-            <div className="flex gap-2">
-              <Input
-                placeholder="e.g. Connaught Place, New Delhi, India"
-                value={form.location}
-                onChange={(e) => setField('location', e.target.value)}
-                className="flex-1"
-              />
-              <Button
-                type="button"
-                variant="outline"
-                onClick={onGeocode}
-                disabled={geocoding}
-                className="shrink-0 gap-1"
-              >
-                {geocoding ? <Loader2 className="h-4 w-4 animate-spin" /> : <Search className="h-4 w-4" />}
-                {geocoding ? 'Searching...' : 'Search'}
-              </Button>
+        {/* Header */}
+        <div className="sticky top-0 z-10 rounded-t-lg border-b border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-6 py-4">
+          <div className="flex items-center gap-3">
+            <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-teal-500/10 dark:bg-teal-500/20">
+              <Thermometer className="h-5 w-5 text-teal-600 dark:text-teal-400" />
             </div>
-            <p className="text-xs text-gray-400">
-              Click Search to auto-fill coordinates <strong>and design conditions</strong> (altitude, temperature, humidity) from address.
-            </p>
-          </div>
-
-          {/* Coordinates + System */}
-          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
-            <div className="space-y-1">
-              <Label>Latitude</Label>
-              <Input
-                type="number" step="0.0001" placeholder="e.g. 28.6315"
-                value={form.latitude}
-                onChange={(e) => setField('latitude', e.target.value)}
-              />
-            </div>
-            <div className="space-y-1">
-              <Label>Longitude</Label>
-              <Input
-                type="number" step="0.0001" placeholder="e.g. 77.2167"
-                value={form.longitude}
-                onChange={(e) => setField('longitude', e.target.value)}
-              />
-            </div>
-            <div className="space-y-1">
-              <Label>Altitude (ft)</Label>
-              <Input
-                type="number" step="1" placeholder="e.g. 745"
-                value={form.altitude}
-                onChange={(e) => setField('altitude', e.target.value)}
-              />
-            </div>
-            <div className="space-y-1">
-              <Label>System Type</Label>
-              <Select value={form.systemType} onValueChange={(v) => v && setField('systemType', v)}>
-                <SelectTrigger><SelectValue /></SelectTrigger>
-                <SelectContent>
-                  {['CAC', 'VRF', 'Hybrid', 'Chiller', 'VAV', 'WSHP'].map((s) => (
-                    <SelectItem key={s} value={s}>{s}</SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
+            <div>
+              <h2 className="text-base font-bold text-slate-800 dark:text-slate-100">
+                {editing ? 'Edit Project' : 'New Project'}
+              </h2>
+              <p className="text-xs text-slate-500 dark:text-slate-400">
+                {editing ? 'Update project settings and design conditions' : 'Set up project details and climate design conditions'}
+              </p>
             </div>
           </div>
+        </div>
 
-          {/* Include Monsoon */}
-          <div className="flex items-center gap-3 rounded-lg bg-teal-50 p-3">
-            <input
-              type="checkbox"
-              id="includeMonsoon"
-              checked={form.includeMonsoon}
-              onChange={(e) => setField('includeMonsoon', e.target.checked)}
-              className="h-4 w-4 cursor-pointer rounded border-gray-300"
-            />
-            <label htmlFor="includeMonsoon" className="flex-1 cursor-pointer">
-              <p className="text-sm font-semibold text-teal-800">Include Monsoon Calculation</p>
-              <p className="text-xs text-teal-700">Show monsoon season conditions in reports and exports</p>
-            </label>
+        <div className="px-6 py-5 space-y-6">
+
+          {/* ── Project Info ─────────────────────────────────────────── */}
+          <div className="space-y-4">
+            <h3 className="text-xs font-semibold uppercase tracking-widest text-slate-400 dark:text-slate-500">Project Information</h3>
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+              <div className="sm:col-span-2 space-y-1.5">
+                <Label className="text-sm font-medium">Project Name <span className="text-red-500">*</span></Label>
+                <Input
+                  placeholder="e.g. Office Building — East Tower"
+                  value={form.name}
+                  onChange={(e) => setField('name', e.target.value)}
+                  className="h-9"
+                />
+              </div>
+
+              {/* Location + geocode */}
+              <div className="sm:col-span-2 space-y-1.5">
+                <Label className="text-sm font-medium">Project Location</Label>
+                <div className="flex gap-2">
+                  <Input
+                    placeholder="e.g. Connaught Place, New Delhi, India"
+                    value={form.location}
+                    onChange={(e) => setField('location', e.target.value)}
+                    className="flex-1 h-9"
+                  />
+                  <Button
+                    type="button"
+                    variant="outline"
+                    onClick={onGeocode}
+                    disabled={geocoding}
+                    className="shrink-0 h-9 gap-1.5 px-3"
+                  >
+                    {geocoding ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Search className="h-3.5 w-3.5" />}
+                    <span className="text-sm">{geocoding ? 'Searching…' : 'Search'}</span>
+                  </Button>
+                </div>
+                <p className="text-[11px] text-slate-400 dark:text-slate-500">
+                  Search auto-fills coordinates, altitude, and all design conditions via AI.
+                </p>
+              </div>
+
+              {/* Lat / Lon / Alt */}
+              <div className="space-y-1.5">
+                <Label className="text-sm font-medium flex items-center gap-1.5">
+                  <MapPin className="h-3.5 w-3.5 text-slate-400" /> Latitude
+                </Label>
+                <Input type="number" step="0.0001" placeholder="e.g. 28.6315"
+                  value={form.latitude} onChange={(e) => setField('latitude', e.target.value)} className="h-9" />
+              </div>
+              <div className="space-y-1.5">
+                <Label className="text-sm font-medium flex items-center gap-1.5">
+                  <MapPin className="h-3.5 w-3.5 text-slate-400" /> Longitude
+                </Label>
+                <Input type="number" step="0.0001" placeholder="e.g. 77.2167"
+                  value={form.longitude} onChange={(e) => setField('longitude', e.target.value)} className="h-9" />
+              </div>
+              <div className="space-y-1.5">
+                <Label className="text-sm font-medium">Altitude (ft)</Label>
+                <Input type="number" step="1" placeholder="e.g. 745"
+                  value={form.altitude} onChange={(e) => setField('altitude', e.target.value)} className="h-9" />
+              </div>
+            </div>
           </div>
 
-          <Separator />
+          <Separator className="dark:bg-slate-700" />
 
-          {/* Outside conditions */}
+          {/* ── Season Toggles ───────────────────────────────────────── */}
+          <div className="space-y-3">
+            <h3 className="text-xs font-semibold uppercase tracking-widest text-slate-400 dark:text-slate-500">Design Seasons</h3>
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+              {/* Monsoon toggle */}
+              <label className={`flex cursor-pointer items-start gap-3 rounded-xl border p-4 transition-all ${
+                form.includeMonsoon
+                  ? 'border-teal-400/60 bg-teal-50 dark:border-teal-600/50 dark:bg-teal-900/20'
+                  : 'border-slate-200 dark:border-slate-700 hover:border-teal-300 dark:hover:border-teal-700'
+              }`}>
+                <input
+                  type="checkbox"
+                  checked={form.includeMonsoon}
+                  onChange={(e) => setField('includeMonsoon', e.target.checked)}
+                  className="mt-0.5 h-4 w-4 cursor-pointer accent-teal-500"
+                />
+                <div>
+                  <p className="text-sm font-semibold text-slate-700 dark:text-slate-200">Include Monsoon</p>
+                  <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5">
+                    Calculate peak load at monsoon conditions (high humidity)
+                  </p>
+                </div>
+              </label>
+
+              {/* Winter toggle */}
+              <label className={`flex cursor-pointer items-start gap-3 rounded-xl border p-4 transition-all ${
+                form.includeWinter
+                  ? 'border-blue-400/60 bg-blue-50 dark:border-blue-600/50 dark:bg-blue-900/20'
+                  : 'border-slate-200 dark:border-slate-700 hover:border-blue-300 dark:hover:border-blue-700'
+              }`}>
+                <input
+                  type="checkbox"
+                  checked={form.includeWinter}
+                  onChange={(e) => setField('includeWinter', e.target.checked)}
+                  className="mt-0.5 h-4 w-4 cursor-pointer accent-blue-500"
+                />
+                <div>
+                  <p className="text-sm font-semibold text-slate-700 dark:text-slate-200">Include Winter</p>
+                  <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5">
+                    Calculate heating load at winter design conditions
+                  </p>
+                </div>
+              </label>
+            </div>
+          </div>
+
+          <Separator className="dark:bg-slate-700" />
+
+          {/* ── Outside Design Conditions ─────────────────────────── */}
           <div className="space-y-3">
             <div className="flex items-center gap-2">
-              <Thermometer className="h-4 w-4 text-red-500" />
-              <Label className="text-sm font-semibold">Outside Design Conditions</Label>
+              <Thermometer className="h-4 w-4 text-orange-500" />
+              <h3 className="text-sm font-semibold text-slate-700 dark:text-slate-200">Outside Design Conditions</h3>
             </div>
-            <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
-              <div className="space-y-3 rounded-lg bg-red-50 p-3">
-                <p className="text-xs font-semibold text-red-700">Summer</p>
-                <div className="grid grid-cols-1 gap-3">
-                  <div className="space-y-1">
-                    <Label className="text-xs">Temp (°F)</Label>
-                    <Input
-                      type="text" inputMode="decimal" placeholder="95"
-                      value={form.summerTemp}
-                      onChange={(e) => setField('summerTemp', e.target.value)}
-                    />
-                  </div>
-                  <div className="space-y-1">
-                    <Label className="text-xs">RH (%)</Label>
-                    <Input
-                      type="text" inputMode="decimal" placeholder="50"
-                      value={form.summerRH}
-                      onChange={(e) => setField('summerRH', e.target.value)}
-                    />
-                  </div>
+            <div className={`grid gap-3 ${gridCols}`}>
+              {/* Summer — always shown */}
+              <div className="rounded-xl border border-orange-200 dark:border-orange-800/50 bg-orange-50 dark:bg-orange-900/15 p-4 space-y-3">
+                <div className="flex items-center gap-1.5">
+                  <span className="h-2 w-2 rounded-full bg-orange-400" />
+                  <p className="text-xs font-bold text-orange-700 dark:text-orange-300 uppercase tracking-wide">Summer</p>
                 </div>
+                <ConditionPair
+                  tempVal={form.summerTemp} rhVal={form.summerRH}
+                  onTempChange={(v) => setField('summerTemp', v)} onRhChange={(v) => setField('summerRH', v)}
+                  tempPlaceholder="95" rhPlaceholder="50"
+                />
               </div>
+
+              {/* Monsoon — conditional */}
               {form.includeMonsoon && (
-              <div className="space-y-3 rounded-lg bg-teal-50 p-3">
-                <p className="text-xs font-semibold text-teal-700">Monsoon</p>
-                <div className="grid grid-cols-1 gap-3">
-                  <div className="space-y-1">
-                    <Label className="text-xs">Temp (°F)</Label>
-                    <Input
-                      type="text" inputMode="decimal" placeholder="85"
-                      value={form.monsoonTemp}
-                      onChange={(e) => setField('monsoonTemp', e.target.value)}
-                    />
+                <div className="rounded-xl border border-teal-200 dark:border-teal-700/50 bg-teal-50 dark:bg-teal-900/15 p-4 space-y-3">
+                  <div className="flex items-center gap-1.5">
+                    <span className="h-2 w-2 rounded-full bg-teal-400" />
+                    <p className="text-xs font-bold text-teal-700 dark:text-teal-300 uppercase tracking-wide">Monsoon</p>
                   </div>
-                  <div className="space-y-1">
-                    <Label className="text-xs">RH (%)</Label>
-                    <Input
-                      type="text" inputMode="decimal" placeholder="85"
-                      value={form.monsoonRH}
-                      onChange={(e) => setField('monsoonRH', e.target.value)}
-                    />
-                  </div>
+                  <ConditionPair
+                    tempVal={form.monsoonTemp} rhVal={form.monsoonRH}
+                    onTempChange={(v) => setField('monsoonTemp', v)} onRhChange={(v) => setField('monsoonRH', v)}
+                    tempPlaceholder="85" rhPlaceholder="85"
+                  />
                 </div>
-              </div>
               )}
-              <div className="space-y-3 rounded-lg bg-indigo-50 p-3">
-                <p className="text-xs font-semibold text-indigo-700">Winter</p>
-                <div className="grid grid-cols-1 gap-3">
-                  <div className="space-y-1">
-                    <Label className="text-xs">Temp (°F)</Label>
-                    <Input
-                      type="text" inputMode="decimal" placeholder="40"
-                      value={form.winterTemp}
-                      onChange={(e) => setField('winterTemp', e.target.value)}
-                    />
+
+              {/* Winter — conditional */}
+              {form.includeWinter && (
+                <div className="rounded-xl border border-blue-200 dark:border-blue-700/50 bg-blue-50 dark:bg-blue-900/15 p-4 space-y-3">
+                  <div className="flex items-center gap-1.5">
+                    <span className="h-2 w-2 rounded-full bg-blue-400" />
+                    <p className="text-xs font-bold text-blue-700 dark:text-blue-300 uppercase tracking-wide">Winter</p>
                   </div>
-                  <div className="space-y-1">
-                    <Label className="text-xs">RH (%)</Label>
-                    <Input
-                      type="text" inputMode="decimal" placeholder="30"
-                      value={form.winterRH}
-                      onChange={(e) => setField('winterRH', e.target.value)}
-                    />
-                  </div>
+                  <ConditionPair
+                    tempVal={form.winterTemp} rhVal={form.winterRH}
+                    onTempChange={(v) => setField('winterTemp', v)} onRhChange={(v) => setField('winterRH', v)}
+                    tempPlaceholder="40" rhPlaceholder="30"
+                  />
                 </div>
-              </div>
+              )}
             </div>
           </div>
 
-          {/* Inside conditions */}
+          {/* ── Inside Design Conditions ──────────────────────────── */}
           <div className="space-y-3">
             <div className="flex items-center gap-2">
-              <Droplets className="h-4 w-4 text-blue-500" />
-              <Label className="text-sm font-semibold">Inside Design Conditions</Label>
+              <Droplets className="h-4 w-4 text-sky-500" />
+              <h3 className="text-sm font-semibold text-slate-700 dark:text-slate-200">Inside Design Conditions</h3>
             </div>
-            <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
-              <div className="space-y-3 rounded-lg bg-blue-50 p-3">
-                <p className="text-xs font-semibold text-blue-700">Summer (Cooling)</p>
-                <div className="grid grid-cols-1 gap-3">
-                  <div className="space-y-1">
-                    <Label className="text-xs">Temp (°F)</Label>
-                    <Input
-                      type="text" inputMode="decimal" placeholder="75"
-                      value={form.insideSummerTemp}
-                      onChange={(e) => setField('insideSummerTemp', e.target.value)}
-                    />
-                  </div>
-                  <div className="space-y-1">
-                    <Label className="text-xs">RH (%)</Label>
-                    <Input
-                      type="text" inputMode="decimal" placeholder="50"
-                      value={form.insideSummerRH}
-                      onChange={(e) => setField('insideSummerRH', e.target.value)}
-                    />
-                  </div>
+            <div className={`grid gap-3 ${gridCols}`}>
+              {/* Summer inside — always shown */}
+              <div className="rounded-xl border border-sky-200 dark:border-sky-700/50 bg-sky-50 dark:bg-sky-900/15 p-4 space-y-3">
+                <div className="flex items-center gap-1.5">
+                  <span className="h-2 w-2 rounded-full bg-sky-400" />
+                  <p className="text-xs font-bold text-sky-700 dark:text-sky-300 uppercase tracking-wide">Summer (Cooling)</p>
                 </div>
+                <ConditionPair
+                  tempVal={form.insideSummerTemp} rhVal={form.insideSummerRH}
+                  onTempChange={(v) => setField('insideSummerTemp', v)} onRhChange={(v) => setField('insideSummerRH', v)}
+                  tempPlaceholder="75" rhPlaceholder="50"
+                />
               </div>
+
+              {/* Monsoon inside — conditional */}
               {form.includeMonsoon && (
-              <div className="space-y-3 rounded-lg bg-cyan-50 p-3">
-                <p className="text-xs font-semibold text-cyan-700">Monsoon (Cooling)</p>
-                <div className="grid grid-cols-1 gap-3">
-                  <div className="space-y-1">
-                    <Label className="text-xs">Temp (°F)</Label>
-                    <Input
-                      type="text" inputMode="decimal" placeholder="75"
-                      value={form.insideMonsoonTemp}
-                      onChange={(e) => setField('insideMonsoonTemp', e.target.value)}
-                    />
+                <div className="rounded-xl border border-cyan-200 dark:border-cyan-700/50 bg-cyan-50 dark:bg-cyan-900/15 p-4 space-y-3">
+                  <div className="flex items-center gap-1.5">
+                    <span className="h-2 w-2 rounded-full bg-cyan-400" />
+                    <p className="text-xs font-bold text-cyan-700 dark:text-cyan-300 uppercase tracking-wide">Monsoon (Cooling)</p>
                   </div>
-                  <div className="space-y-1">
-                    <Label className="text-xs">RH (%)</Label>
-                    <Input
-                      type="text" inputMode="decimal" placeholder="55"
-                      value={form.insideMonsoonRH}
-                      onChange={(e) => setField('insideMonsoonRH', e.target.value)}
-                    />
-                  </div>
+                  <ConditionPair
+                    tempVal={form.insideMonsoonTemp} rhVal={form.insideMonsoonRH}
+                    onTempChange={(v) => setField('insideMonsoonTemp', v)} onRhChange={(v) => setField('insideMonsoonRH', v)}
+                    tempPlaceholder="75" rhPlaceholder="55"
+                  />
                 </div>
-              </div>
               )}
-              <div className="space-y-3 rounded-lg bg-purple-50 p-3">
-                <p className="text-xs font-semibold text-purple-700">Winter (Heating)</p>
-                <div className="grid grid-cols-1 gap-3">
-                  <div className="space-y-1">
-                    <Label className="text-xs">Temp (°F)</Label>
-                    <Input
-                      type="text" inputMode="decimal" placeholder="70"
-                      value={form.insideWinterTemp}
-                      onChange={(e) => setField('insideWinterTemp', e.target.value)}
-                    />
+
+              {/* Winter inside — conditional */}
+              {form.includeWinter && (
+                <div className="rounded-xl border border-indigo-200 dark:border-indigo-700/50 bg-indigo-50 dark:bg-indigo-900/15 p-4 space-y-3">
+                  <div className="flex items-center gap-1.5">
+                    <span className="h-2 w-2 rounded-full bg-indigo-400" />
+                    <p className="text-xs font-bold text-indigo-700 dark:text-indigo-300 uppercase tracking-wide">Winter (Heating)</p>
                   </div>
-                  <div className="space-y-1">
-                    <Label className="text-xs">RH (%)</Label>
-                    <Input
-                      type="text" inputMode="decimal" placeholder="30"
-                      value={form.insideWinterRH}
-                      onChange={(e) => setField('insideWinterRH', e.target.value)}
-                    />
-                  </div>
+                  <ConditionPair
+                    tempVal={form.insideWinterTemp} rhVal={form.insideWinterRH}
+                    onTempChange={(v) => setField('insideWinterTemp', v)} onRhChange={(v) => setField('insideWinterRH', v)}
+                    tempPlaceholder="70" rhPlaceholder="30"
+                  />
                 </div>
-              </div>
+              )}
             </div>
-            <p className="text-xs text-gray-400">
-              Enthalpy and Humidity Ratio will be calculated automatically on save.
+            <p className="text-[11px] text-slate-400 dark:text-slate-500">
+              Enthalpy and humidity ratio are calculated automatically on save.
             </p>
           </div>
         </div>
 
-        <DialogFooter>
-          <Button variant="outline" onClick={onClose} disabled={saving}>Cancel</Button>
-          <Button onClick={onSave} disabled={saving} className="bg-blue-600 hover:bg-blue-700">
-            {saving ? <><Loader2 className="mr-2 h-4 w-4 animate-spin" />Saving...</> : editing ? 'Update Project' : 'Create Project'}
+        {/* Footer */}
+        <div className="sticky bottom-0 rounded-b-lg border-t border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-6 py-4 flex justify-end gap-3">
+          <Button variant="outline" onClick={onClose} disabled={saving} className="h-9">Cancel</Button>
+          <Button onClick={onSave} disabled={saving} className="h-9 bg-teal-600 hover:bg-teal-500 text-white min-w-[130px]">
+            {saving
+              ? <><Loader2 className="mr-2 h-4 w-4 animate-spin" />Saving…</>
+              : editing ? 'Update Project' : 'Create Project'}
           </Button>
-        </DialogFooter>
+        </div>
       </DialogContent>
     </Dialog>
   );
@@ -1184,7 +1239,7 @@ function UnsavedChangesDialog({
         <DialogHeader>
           <DialogTitle>Unsaved Changes</DialogTitle>
         </DialogHeader>
-        <p className="text-sm text-gray-600">
+        <p className="text-sm text-gray-600 dark:text-slate-300">
           You have unsaved room or envelope changes. Save them to the database before leaving, or discard them.
         </p>
         <DialogFooter className="flex-col gap-2 sm:flex-row">
@@ -1195,7 +1250,7 @@ function UnsavedChangesDialog({
             variant="outline"
             onClick={onDiscardAndLeave}
             disabled={isSaving}
-            className="border-red-200 text-red-700 hover:bg-red-50"
+            className="border-red-200 text-red-700 hover:bg-red-50 dark:border-red-800 dark:text-red-400 dark:hover:bg-red-950/20"
           >
             Discard &amp; Leave
           </Button>

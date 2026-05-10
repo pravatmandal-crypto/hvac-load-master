@@ -179,7 +179,7 @@ service cloud.firestore {
         allow read: if isEmployee();
         allow create: if isAdminA() || isDesignTeam();
         allow update: if isAdminA() || isDesignTeam() || hasRole('Technician');
-        allow delete: if isAdminA() || isSuper();
+        allow delete: if isAdminA() || isDesignTeam() || isSuper();
       }
 
       // Equipment Systems (VRF / Package / Split system design)
@@ -190,7 +190,18 @@ service cloud.firestore {
         allow delete: if isAdminA() || isSuper();
       }
 
-      // Zones (Hydronic/Others)
+      // Flat rooms (new unified path — all project types)
+      match /rooms/{roomId} {
+        allow read: if isEmployee();
+        allow write: if isDesignTeam();
+
+        match /envelopeElements/{elementId} {
+          allow read: if isEmployee();
+          allow write: if isDesignTeam();
+        }
+      }
+
+      // Zones (Hydronic/Others — legacy path, kept for backwards compatibility)
       match /zones/{zoneId} {
         allow read: if isEmployee();
         allow write: if isDesignTeam();
@@ -207,9 +218,46 @@ service cloud.firestore {
       }
     }
 
+    // Global equipment library — app-wide catalog, project-agnostic
+    match /globalEquipmentLibrary/{equipId} {
+      allow read: if isEmployee();
+      allow create: if isDesignTeam() || isAdminA();
+      allow update: if isDesignTeam() || isAdminA();
+      allow delete: if isDesignTeam() || isAdminA() || isSuper();
+    }
+
+    // Custom equipment library — shared across all projects (legacy library panel)
+    match /customEquipment/{equipId} {
+      allow read: if isEmployee();
+      allow create: if isDesignTeam();
+      allow update: if isDesignTeam();
+      allow delete: if isDesignTeam();
+    }
+
+    // Custom equipment catalog — used by picker dialogs (IDU / ODU / unit selection)
+    match /customEquipmentCatalog/{equipId} {
+      allow read: if isEmployee();
+      allow create: if isDesignTeam();
+      allow update: if isDesignTeam();
+      allow delete: if isDesignTeam() || isSuper();
+    }
+
+    // Equipment overrides — discontinued flags, spec corrections (admin-managed)
+    match /equipmentOverrides/{equipId} {
+      allow read: if isEmployee();
+      allow write: if isSuper();
+    }
+
     match /wallTypes/{wallTypeId} {
       allow read: if isAuthenticated();
       allow write: if isSuper();
+    }
+
+    match /u_assemblies/{assemblyId} {
+      allow read: if isAuthenticated();
+      allow create: if isAuthenticated() && request.resource.data.userId == request.auth.uid;
+      allow update: if isAuthenticated() && resource.data.userId == request.auth.uid;
+      allow delete: if isAuthenticated() && resource.data.userId == request.auth.uid;
     }
 
     match /_test_/connection {

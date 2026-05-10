@@ -23,6 +23,9 @@ fix*.cjs
 service-account.json
 *-service-account.json
 
+# Firestore backups - contain live data, never commit
+backups/
+
 # Binary/example files
 *.xlsx
 *.xls

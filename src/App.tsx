@@ -16,8 +16,11 @@ import EquipmentSelection from './components/hvac/EquipmentSelection';
 import MaterialTakeoff from './components/hvac/MaterialTakeoff';
 import UserManagement from './components/hvac/UserManagement';
 import Methodology from './components/hvac/Methodology';
+import UBuilder from './components/ubuilder/UBuilder';
+import HvacSystems from './components/hvac/HvacSystems';
+import UserManual from './components/hvac/UserManual';
 
-type Page = 'dashboard' | 'auth' | 'calculator' | 'cable' | 'equipment' | 'takeoff' | 'team' | 'duct' | 'pipe' | 'methodology';
+type Page = 'dashboard' | 'auth' | 'calculator' | 'cable' | 'equipment' | 'takeoff' | 'ubuilder' | 'team' | 'duct' | 'pipe' | 'methodology' | 'systems' | 'manual';
 
 async function syncUserProfile(user: User) {
   if (!user?.uid) return;
@@ -157,12 +160,12 @@ export default function App() {
 
   if (loading) {
     return (
-      <div className="flex h-screen items-center justify-center bg-gradient-to-br from-blue-50 to-indigo-100">
+      <div className="flex h-screen items-center justify-center bg-gradient-to-br from-slate-900 to-teal-900">
         <div className="text-center">
           <div className="mb-4 flex justify-center">
-            <div className="h-12 w-12 animate-spin rounded-full border-4 border-blue-200 border-t-blue-600" />
+            <div className="h-12 w-12 animate-spin rounded-full border-4 border-teal-800 border-t-teal-400" />
           </div>
-          <p className="text-lg font-semibold text-gray-700">Loading HVAC Load Master...</p>
+          <p className="text-base font-semibold text-slate-300">Loading HVAC Load Master…</p>
         </div>
       </div>
     );
@@ -179,6 +182,7 @@ export default function App() {
           currentUser={currentUser}
           userRole={userRole}
           currentPage={currentPage}
+          activeProject={activeProject}
           onLogout={() => {
             localStorage.removeItem('demo-user');
             localStorage.removeItem('demo-mode');
@@ -210,6 +214,7 @@ export default function App() {
                 setPendingPage(null);
                 if (page) setCurrentPage(page as Page);
               }}
+              onProjectChange={(p) => setAndPersistProject(p)}
             />
           )}
           {currentPage === 'cable' && <CableMCBSelectorV2 />}
@@ -219,11 +224,23 @@ export default function App() {
             <EquipmentSelection
               project={activeProject}
               userProfile={{ uid: currentUser.uid, email: currentUser.email }}
+              userRole={userRole}
+              onProjectChange={setAndPersistProject}
             />
           )}
           {currentPage === 'takeoff' && <MaterialTakeoff />}
+          {currentPage === 'ubuilder' && <UBuilder currentUser={currentUser} />}
           {currentPage === 'team' && <UserManagement currentUser={currentUser} />}
           {currentPage === 'methodology' && <Methodology userRole={userRole} />}
+          {currentPage === 'manual' && <UserManual />}
+          {currentPage === 'systems' && (
+            <HvacSystems
+              project={activeProject}
+              userProfile={currentUser ? { uid: currentUser.uid, email: currentUser.email } : null}
+              userRole={userRole}
+              onProjectChange={setAndPersistProject}
+            />
+          )}
         </AppLayout>
       )}
       <Toaster />
