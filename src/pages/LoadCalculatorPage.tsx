@@ -307,26 +307,27 @@ export default function LoadCalculatorPage({ currentUser, initialProjectId, user
 
   const openEditDialog = (project: Project) => {
     setEditingProject(project);
+    const p = project as any;
     setForm({
-      name: project.name,
-      location: project.location,
+      name: project.name ?? '',
+      location: project.location ?? p.place ?? '',
       latitude: project.latitude != null ? String(project.latitude) : '',
       longitude: project.longitude != null ? String(project.longitude) : '',
       altitude: project.altitude != null ? String(project.altitude) : '',
-      includeMonsoon: project.includeMonsoon,
-      includeWinter: project.includeWinter ?? true,
-      summerTemp: String(project.summerDesignTemp),
-      summerRH: String(project.summerDesignHumidity),
+      includeMonsoon: project.includeMonsoon ?? false,
+      includeWinter: project.includeWinter ?? false,
+      summerTemp: String(project.summerDesignTemp ?? p.summerDesignTemp ?? 95),
+      summerRH: String(project.summerDesignHumidity ?? p.summerDesignHumidity ?? 50),
       monsoonTemp: String(project.monsoonDesignTemp ?? 85),
       monsoonRH: String(project.monsoonDesignHumidity ?? 85),
-      winterTemp: String(project.winterDesignTemp),
-      winterRH: String(project.winterDesignHumidity),
-      insideSummerTemp: String(project.insideSummerTemp),
-      insideSummerRH: String(project.insideSummerHumidity),
+      winterTemp: String(project.winterDesignTemp ?? p.winterDesignTemp ?? 40),
+      winterRH: String(project.winterDesignHumidity ?? p.winterDesignHumidity ?? 30),
+      insideSummerTemp: String(project.insideSummerTemp ?? p.summerIndoorTemp ?? p.insideSummerTemp ?? 75),
+      insideSummerRH: String(project.insideSummerHumidity ?? p.summerIndoorHumidity ?? p.insideSummerHumidity ?? 50),
       insideMonsoonTemp: String(project.insideMonsoonTemp ?? project.insideSummerTemp ?? 75),
       insideMonsoonRH: String(project.insideMonsoonHumidity ?? 55),
-      insideWinterTemp: String(project.insideWinterTemp),
-      insideWinterRH: String(project.insideWinterHumidity),
+      insideWinterTemp: String(project.insideWinterTemp ?? p.winterIndoorTemp ?? p.insideWinterTemp ?? 70),
+      insideWinterRH: String(project.insideWinterHumidity ?? p.winterIndoorHumidity ?? p.insideWinterHumidity ?? 30),
     });
     setDialogOpen(true);
   };
@@ -483,11 +484,11 @@ export default function LoadCalculatorPage({ currentUser, initialProjectId, user
 
     const payload = {
       name: form.name.trim(),
-      location: form.location.trim(),
+      location: (form.location ?? '').trim(),
       systemType: editingProject?.systemType || 'CAC',
       includeMonsoon: form.includeMonsoon,
       includeWinter: form.includeWinter,
-      userId: currentUser.uid,
+      userId: editingProject ? (editingProject.userId ?? currentUser.uid) : currentUser.uid,
       data,
     };
 

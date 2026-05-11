@@ -24,8 +24,6 @@ function rectDimsFromAR(D_e: number, AR: number): { a: number; b: number } {
 // using ASHRAE formula: 1.3 × (a·b)^0.625 / (a+b)^0.25 = D_e
 function solveWidthForHeight(D_e: number, b: number): number {
   const target = D_e / 1.3;
-  // f(a) = (a·b)^0.625 / (a+b)^0.25 - target = 0
-  // Use bisection
   let lo = b * 0.5, hi = b * 20;
   for (let i = 0; i < 80; i++) {
     const mid = (lo + hi) / 2;
@@ -46,20 +44,15 @@ interface RectOption {
 export default function DuctSizer() {
   const [cfm, setCfm] = useState(1000);
   const [friction, setFriction] = useState(0.1);
-  const [maxVelocity, setMaxVelocity] = useState(1200); // FPM constraint
-  const [minHeight, setMinHeight] = useState(0); // inches, 0 = no constraint
+  const [maxVelocity, setMaxVelocity] = useState(1200);
+  const [minHeight, setMinHeight] = useState(0);
 
-  // Round duct sizing
   const roundResult = useMemo(() => {
-    // Friction-based sizing
     const res = sizeDuct(cfm, friction);
-    // Velocity-based sizing: D = 1.128 × √(Q/V) [inches]
     const diaFromVelocity = maxVelocity > 0
-      ? 1.128 * Math.sqrt(cfm / maxVelocity) * 12  // 1.128 × √(A_ft²) × 12
+      ? 1.128 * Math.sqrt(cfm / maxVelocity) * 12
       : 0;
-    // Take the larger (more conservative) diameter
     const diaRequired = Math.max(res.diameter, diaFromVelocity);
-    // Round to next integer inch
     const diaFinal = Math.ceil(diaRequired * 10) / 10;
     const areaSqFt = Math.PI * Math.pow(diaFinal / 24, 2);
     const actualVelocity = cfm / areaSqFt;
@@ -72,7 +65,6 @@ export default function DuctSizer() {
     };
   }, [cfm, friction, maxVelocity]);
 
-  // Rectangular duct options (5 aspect ratios)
   const rectOptions: RectOption[] = useMemo(() => {
     const D_e = roundResult.diaFinal;
     const aspectRatios = [1.0, 1.5, 2.0, 3.0, 4.0];
@@ -82,7 +74,6 @@ export default function DuctSizer() {
       let a_raw: number, b_raw: number;
 
       if (minHeight > 0) {
-        // If minHeight constraint: fix b to max(natural b, minHeight), solve for a
         const natural = rectDimsFromAR(D_e, ar);
         if (natural.b >= minHeight) {
           a_raw = natural.a;
@@ -102,13 +93,7 @@ export default function DuctSizer() {
       const areaSqFt = (width * height) / 144;
       const velocity = cfm / areaSqFt;
 
-      return {
-        ar: labels[idx],
-        width,
-        height,
-        velocity: Math.round(velocity),
-        aspect: ar,
-      };
+      return { ar: labels[idx], width, height, velocity: Math.round(velocity), aspect: ar };
     });
   }, [roundResult.diaFinal, minHeight, cfm]);
 
@@ -153,8 +138,8 @@ export default function DuctSizer() {
   return (
     <div className="space-y-6 max-w-5xl mx-auto">
       <div>
-        <h2 className="text-2xl font-bold text-gray-900">Duct Sizing Tool</h2>
-        <p className="text-gray-500 text-sm mt-1">
+        <h2 className="text-2xl font-bold text-gray-900 dark:text-slate-100">Duct Sizing Tool</h2>
+        <p className="text-gray-500 dark:text-slate-400 text-sm mt-1">
           Equal friction method — ASHRAE Fundamentals 2017, Chapter 21
         </p>
       </div>
@@ -171,7 +156,7 @@ export default function DuctSizer() {
           <CardContent className="space-y-4">
             <div className="grid grid-cols-2 gap-3">
               <div className="space-y-1">
-                <Label className="text-xs font-medium text-gray-600">Airflow (CFM)</Label>
+                <Label className="text-xs font-medium text-gray-600 dark:text-slate-400">Airflow (CFM)</Label>
                 <Input
                   type="number"
                   value={cfm}
@@ -181,7 +166,7 @@ export default function DuctSizer() {
                 />
               </div>
               <div className="space-y-1">
-                <Label className="text-xs font-medium text-gray-600">Friction Loss (in.wg/100ft)</Label>
+                <Label className="text-xs font-medium text-gray-600 dark:text-slate-400">Friction Loss (in.wg/100ft)</Label>
                 <Input
                   type="number"
                   step="0.01"
@@ -190,10 +175,10 @@ export default function DuctSizer() {
                   placeholder="e.g. 0.10"
                   className="font-mono"
                 />
-                <p className="text-[10px] text-gray-400">Typical: 0.08–0.12 in.wg/100ft</p>
+                <p className="text-[10px] text-gray-400 dark:text-slate-500">Typical: 0.08–0.12 in.wg/100ft</p>
               </div>
               <div className="space-y-1">
-                <Label className="text-xs font-medium text-gray-600">Max Velocity (FPM)</Label>
+                <Label className="text-xs font-medium text-gray-600 dark:text-slate-400">Max Velocity (FPM)</Label>
                 <Input
                   type="number"
                   step="50"
@@ -202,10 +187,10 @@ export default function DuctSizer() {
                   placeholder="e.g. 1200"
                   className="font-mono"
                 />
-                <p className="text-[10px] text-gray-400">Supply: ≤1200, Return: ≤800</p>
+                <p className="text-[10px] text-gray-400 dark:text-slate-500">Supply: ≤1200, Return: ≤800</p>
               </div>
               <div className="space-y-1">
-                <Label className="text-xs font-medium text-gray-600">Min Rect. Height (in)</Label>
+                <Label className="text-xs font-medium text-gray-600 dark:text-slate-400">Min Rect. Height (in)</Label>
                 <Input
                   type="number"
                   step="1"
@@ -215,11 +200,11 @@ export default function DuctSizer() {
                   placeholder="e.g. 10 (space limit)"
                   className="font-mono"
                 />
-                <p className="text-[10px] text-gray-400">0 = no constraint</p>
+                <p className="text-[10px] text-gray-400 dark:text-slate-500">0 = no constraint</p>
               </div>
             </div>
 
-            <div className="p-3 rounded-lg bg-blue-50 border border-blue-200 text-xs text-blue-800 space-y-1">
+            <div className="p-3 rounded-lg bg-blue-50 dark:bg-blue-950/30 border border-blue-200 dark:border-blue-900 text-xs text-blue-800 dark:text-blue-300 space-y-1">
               <p className="font-semibold">Velocity Guidelines (ASHRAE)</p>
               <p>Main duct — Supply: ≤1200 FPM | Return: ≤800 FPM</p>
               <p>Branch duct — Supply: ≤800 FPM | Return: ≤600 FPM</p>
@@ -228,7 +213,7 @@ export default function DuctSizer() {
           </CardContent>
         </Card>
 
-        {/* Round duct result */}
+        {/* Round duct result — coloured panel, works in both modes */}
         <Card className="border-none shadow-sm bg-blue-600 text-white overflow-hidden">
           <CardHeader>
             <CardTitle className="text-blue-100 text-sm font-medium uppercase tracking-wider">
@@ -247,9 +232,7 @@ export default function DuctSizer() {
                   <span className="text-base font-normal ml-2">Round</span>
                 </h3>
                 <p className="text-xs text-blue-200 mt-0.5">
-                  {roundResult.velocityLimited
-                    ? 'Governed by max velocity'
-                    : 'Governed by friction loss'}
+                  {roundResult.velocityLimited ? 'Governed by max velocity' : 'Governed by friction loss'}
                 </p>
               </div>
             </div>
@@ -287,7 +270,7 @@ export default function DuctSizer() {
           <CardTitle className="text-lg flex items-center gap-2">
             <Ruler className="w-5 h-5 text-indigo-500" />
             Rectangular Duct Options
-            <span className="text-xs font-normal text-gray-500 ml-1">
+            <span className="text-xs font-normal text-gray-500 dark:text-slate-400 ml-1">
               (ASHRAE equivalent D = {roundResult.diaFinal.toFixed(1)}")
             </span>
           </CardTitle>
@@ -300,21 +283,21 @@ export default function DuctSizer() {
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
               <thead>
-                <tr className="border-b border-gray-200">
-                  <th className="text-left py-2 px-3 text-xs font-semibold text-gray-500 uppercase">Aspect Ratio</th>
-                  <th className="text-center py-2 px-3 text-xs font-semibold text-gray-500 uppercase">Width</th>
-                  <th className="text-center py-2 px-3 text-xs font-semibold text-gray-500 uppercase">Height</th>
-                  <th className="text-center py-2 px-3 text-xs font-semibold text-gray-500 uppercase">W × H</th>
-                  <th className="text-right py-2 px-3 text-xs font-semibold text-gray-500 uppercase">Velocity (FPM)</th>
+                <tr className="border-b border-gray-200 dark:border-slate-700">
+                  <th className="text-left py-2 px-3 text-xs font-semibold text-gray-500 dark:text-slate-400 uppercase">Aspect Ratio</th>
+                  <th className="text-center py-2 px-3 text-xs font-semibold text-gray-500 dark:text-slate-400 uppercase">Width</th>
+                  <th className="text-center py-2 px-3 text-xs font-semibold text-gray-500 dark:text-slate-400 uppercase">Height</th>
+                  <th className="text-center py-2 px-3 text-xs font-semibold text-gray-500 dark:text-slate-400 uppercase">W × H</th>
+                  <th className="text-right py-2 px-3 text-xs font-semibold text-gray-500 dark:text-slate-400 uppercase">Velocity (FPM)</th>
                 </tr>
               </thead>
-              <tbody className="divide-y divide-gray-100">
+              <tbody className="divide-y divide-gray-100 dark:divide-slate-700">
                 {rectOptions.map((opt, i) => (
-                  <tr key={i} className={i === 0 ? 'bg-indigo-50' : ''}>
-                    <td className="py-2.5 px-3 font-medium text-gray-700">{opt.ar}</td>
-                    <td className="py-2.5 px-3 text-center font-mono font-semibold">{opt.width}"</td>
-                    <td className="py-2.5 px-3 text-center font-mono font-semibold">{opt.height}"</td>
-                    <td className="py-2.5 px-3 text-center font-mono text-gray-600">{opt.width}" × {opt.height}"</td>
+                  <tr key={i} className={i === 0 ? 'bg-indigo-50 dark:bg-indigo-950/30' : ''}>
+                    <td className="py-2.5 px-3 font-medium text-gray-700 dark:text-slate-300">{opt.ar}</td>
+                    <td className="py-2.5 px-3 text-center font-mono font-semibold dark:text-slate-200">{opt.width}"</td>
+                    <td className="py-2.5 px-3 text-center font-mono font-semibold dark:text-slate-200">{opt.height}"</td>
+                    <td className="py-2.5 px-3 text-center font-mono text-gray-600 dark:text-slate-400">{opt.width}" × {opt.height}"</td>
                     <td className={`py-2.5 px-3 text-right font-semibold ${velocityColor(opt.velocity)}`}>
                       {opt.velocity.toLocaleString()}
                     </td>
@@ -323,7 +306,7 @@ export default function DuctSizer() {
               </tbody>
             </table>
           </div>
-          <p className="text-xs text-gray-400 mt-3">
+          <p className="text-xs text-gray-400 dark:text-slate-500 mt-3">
             * Sizes rounded up to nearest SMACNA standard dimension. Highlighted row (1:1) is most space-efficient.
             Velocity in <span className="text-green-600 font-medium">green</span> = acceptable,{' '}
             <span className="text-amber-600 font-medium">amber</span> = borderline,{' '}
@@ -333,11 +316,11 @@ export default function DuctSizer() {
       </Card>
 
       {/* Engineering notes */}
-      <Card className="border-none shadow-sm bg-gray-50">
+      <Card className="border-none shadow-sm bg-gray-50 dark:bg-slate-800/50">
         <CardContent className="p-5 flex gap-3 items-start">
-          <Info className="w-5 h-5 text-gray-400 shrink-0 mt-0.5" />
-          <div className="space-y-2 text-sm text-gray-600">
-            <p className="font-medium text-gray-800">Engineering Notes</p>
+          <Info className="w-5 h-5 text-gray-400 dark:text-slate-500 shrink-0 mt-0.5" />
+          <div className="space-y-2 text-sm text-gray-600 dark:text-slate-400">
+            <p className="font-medium text-gray-800 dark:text-slate-200">Engineering Notes</p>
             <ul className="space-y-1 list-disc list-inside">
               <li>
                 <strong>Equal friction method</strong> maintains constant pressure drop per unit length;

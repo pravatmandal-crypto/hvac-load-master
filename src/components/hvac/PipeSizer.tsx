@@ -8,7 +8,6 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '.
 import { sizePipe } from '../../lib/hvac-logic';
 import { toast } from 'sonner';
 
-// Standard nominal pipe sizes (IPS / IS 1239) — internal diameters in inches
 const PIPE_TABLE: { nominal: string; id: number; od: number }[] = [
   { nominal: '1/2"',   id: 0.622,  od: 0.840  },
   { nominal: '3/4"',   id: 0.824,  od: 1.050  },
@@ -30,12 +29,10 @@ function getStandardPipe(idRequired: number) {
   return PIPE_TABLE.find((p) => p.id >= idRequired) ?? PIPE_TABLE[PIPE_TABLE.length - 1];
 }
 
-// Hazen-Williams friction loss per 100 ft (psi)
 function frictionLoss100(gpm: number, id: number, C = 150): number {
   return 10.44 * Math.pow(gpm, 1.85) / (Math.pow(C, 1.85) * Math.pow(id, 4.87));
 }
 
-// C-factors for Hazen-Williams by material
 const MATERIAL_C: Record<string, number> = {
   Copper: 150,
   'Steel (new)': 140,
@@ -46,7 +43,6 @@ const MATERIAL_C: Record<string, number> = {
   'Stainless Steel': 150,
 };
 
-// Velocity guidelines per pipe application type
 const VELOCITY_GUIDE: Record<string, { min: number; max: number; note: string }> = {
   'Chilled Water (main)': { min: 3, max: 8, note: 'IS 659 / ASHRAE 90.1' },
   'Chilled Water (branch)': { min: 2, max: 5, note: 'Noise-sensitive — keep ≤ 4 FPS' },
@@ -61,7 +57,7 @@ const VELOCITY_GUIDE: Record<string, { min: number; max: number; note: string }>
 export default function PipeSizer() {
   const [gpm, setGpm] = useState(20);
   const [maxVelocity, setMaxVelocity] = useState(5);
-  const [pipeLength, setPipeLength] = useState(100); // ft
+  const [pipeLength, setPipeLength] = useState(100);
   const [material, setMaterial] = useState('Copper');
   const [fluidType, setFluidType] = useState('Chilled Water (main)');
 
@@ -114,16 +110,16 @@ export default function PipeSizer() {
 
   const velocityStatus = (() => {
     const v = result.actualVelocity;
-    if (v > guide.max) return { label: 'Too High', color: 'text-red-600 bg-red-50 border-red-200' };
-    if (v < guide.min) return { label: 'Below Recommended', color: 'text-amber-600 bg-amber-50 border-amber-200' };
-    return { label: 'Acceptable', color: 'text-green-700 bg-green-50 border-green-200' };
+    if (v > guide.max) return { label: 'Too High', color: 'text-red-600 bg-red-50 dark:bg-red-950/30 border-red-200 dark:border-red-900' };
+    if (v < guide.min) return { label: 'Below Recommended', color: 'text-amber-600 bg-amber-50 dark:bg-amber-950/30 border-amber-200 dark:border-amber-900' };
+    return { label: 'Acceptable', color: 'text-green-700 bg-green-50 dark:bg-green-950/30 border-green-200 dark:border-green-900' };
   })();
 
   return (
     <div className="space-y-6 max-w-5xl mx-auto">
       <div>
-        <h2 className="text-2xl font-bold text-gray-900">Hydronic Pipe Sizer</h2>
-        <p className="text-gray-500 text-sm mt-1">
+        <h2 className="text-2xl font-bold text-gray-900 dark:text-slate-100">Hydronic Pipe Sizer</h2>
+        <p className="text-gray-500 dark:text-slate-400 text-sm mt-1">
           Hazen-Williams equation · IS 1239 / ASHRAE 90.1 · Standard pipe schedule
         </p>
       </div>
@@ -140,7 +136,7 @@ export default function PipeSizer() {
           <CardContent className="space-y-4">
             <div className="grid grid-cols-2 gap-3">
               <div className="space-y-1">
-                <Label className="text-xs font-medium text-gray-600">Flow Rate (GPM)</Label>
+                <Label className="text-xs font-medium text-gray-600 dark:text-slate-400">Flow Rate (GPM)</Label>
                 <Input
                   type="number"
                   value={gpm}
@@ -150,7 +146,7 @@ export default function PipeSizer() {
                 />
               </div>
               <div className="space-y-1">
-                <Label className="text-xs font-medium text-gray-600">Max Velocity (FPS)</Label>
+                <Label className="text-xs font-medium text-gray-600 dark:text-slate-400">Max Velocity (FPS)</Label>
                 <Input
                   type="number"
                   step="0.5"
@@ -161,7 +157,7 @@ export default function PipeSizer() {
                 />
               </div>
               <div className="space-y-1">
-                <Label className="text-xs font-medium text-gray-600">Pipe Length (ft)</Label>
+                <Label className="text-xs font-medium text-gray-600 dark:text-slate-400">Pipe Length (ft)</Label>
                 <Input
                   type="number"
                   step="10"
@@ -172,7 +168,7 @@ export default function PipeSizer() {
                 />
               </div>
               <div className="space-y-1">
-                <Label className="text-xs font-medium text-gray-600">Pipe Material</Label>
+                <Label className="text-xs font-medium text-gray-600 dark:text-slate-400">Pipe Material</Label>
                 <Select value={material} onValueChange={setMaterial}>
                   <SelectTrigger className="text-sm">
                     <SelectValue />
@@ -187,7 +183,7 @@ export default function PipeSizer() {
             </div>
 
             <div className="space-y-1">
-              <Label className="text-xs font-medium text-gray-600">Fluid / Application Type</Label>
+              <Label className="text-xs font-medium text-gray-600 dark:text-slate-400">Fluid / Application Type</Label>
               <Select value={fluidType} onValueChange={setFluidType}>
                 <SelectTrigger className="text-sm">
                   <SelectValue />
@@ -200,7 +196,6 @@ export default function PipeSizer() {
               </Select>
             </div>
 
-            {/* Velocity guide for selected application */}
             <div className={`p-3 rounded-lg border text-xs ${velocityStatus.color}`}>
               <div className="flex justify-between items-center mb-1">
                 <span className="font-semibold">{fluidType}</span>
@@ -211,7 +206,7 @@ export default function PipeSizer() {
           </CardContent>
         </Card>
 
-        {/* Results */}
+        {/* Results — coloured panel, works in both modes */}
         <Card className="border-none shadow-sm bg-cyan-600 text-white overflow-hidden">
           <CardHeader>
             <CardTitle className="text-cyan-100 text-sm font-medium uppercase tracking-wider">
@@ -279,29 +274,29 @@ export default function PipeSizer() {
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
               <thead>
-                <tr className="border-b border-gray-200">
-                  <th className="text-left py-2 px-3 text-xs font-semibold text-gray-500 uppercase">Nominal</th>
-                  <th className="text-right py-2 px-3 text-xs font-semibold text-gray-500 uppercase">ID (in)</th>
-                  <th className="text-right py-2 px-3 text-xs font-semibold text-gray-500 uppercase">OD (in)</th>
-                  <th className="text-right py-2 px-3 text-xs font-semibold text-gray-500 uppercase">Flow @ {maxVelocity} FPS (GPM)</th>
-                  <th className="text-right py-2 px-3 text-xs font-semibold text-gray-500 uppercase">ΔP/100ft @ {gpm} GPM (psi)</th>
+                <tr className="border-b border-gray-200 dark:border-slate-700">
+                  <th className="text-left py-2 px-3 text-xs font-semibold text-gray-500 dark:text-slate-400 uppercase">Nominal</th>
+                  <th className="text-right py-2 px-3 text-xs font-semibold text-gray-500 dark:text-slate-400 uppercase">ID (in)</th>
+                  <th className="text-right py-2 px-3 text-xs font-semibold text-gray-500 dark:text-slate-400 uppercase">OD (in)</th>
+                  <th className="text-right py-2 px-3 text-xs font-semibold text-gray-500 dark:text-slate-400 uppercase">Flow @ {maxVelocity} FPS (GPM)</th>
+                  <th className="text-right py-2 px-3 text-xs font-semibold text-gray-500 dark:text-slate-400 uppercase">ΔP/100ft @ {gpm} GPM (psi)</th>
                 </tr>
               </thead>
-              <tbody className="divide-y divide-gray-100">
+              <tbody className="divide-y divide-gray-100 dark:divide-slate-700">
                 {PIPE_TABLE.map((p) => {
                   const maxGpm = 2.45 * p.id * p.id * maxVelocity;
                   const dp = frictionLoss100(gpm, p.id, C);
                   const isSelected = p.nominal === result.pipe.nominal;
                   return (
-                    <tr key={p.nominal} className={isSelected ? 'bg-cyan-50 font-semibold' : ''}>
-                      <td className="py-2 px-3">
+                    <tr key={p.nominal} className={isSelected ? 'bg-cyan-50 dark:bg-cyan-950/30 font-semibold' : ''}>
+                      <td className="py-2 px-3 dark:text-slate-300">
                         {p.nominal}
-                        {isSelected && <span className="ml-2 text-xs text-cyan-700 font-bold">← Selected</span>}
+                        {isSelected && <span className="ml-2 text-xs text-cyan-700 dark:text-cyan-400 font-bold">← Selected</span>}
                       </td>
-                      <td className="py-2 px-3 text-right font-mono">{p.id.toFixed(3)}</td>
-                      <td className="py-2 px-3 text-right font-mono">{p.od.toFixed(3)}</td>
-                      <td className="py-2 px-3 text-right font-mono">{maxGpm.toFixed(1)}</td>
-                      <td className="py-2 px-3 text-right font-mono">{dp.toFixed(3)}</td>
+                      <td className="py-2 px-3 text-right font-mono dark:text-slate-400">{p.id.toFixed(3)}</td>
+                      <td className="py-2 px-3 text-right font-mono dark:text-slate-400">{p.od.toFixed(3)}</td>
+                      <td className="py-2 px-3 text-right font-mono dark:text-slate-400">{maxGpm.toFixed(1)}</td>
+                      <td className="py-2 px-3 text-right font-mono dark:text-slate-400">{dp.toFixed(3)}</td>
                     </tr>
                   );
                 })}
@@ -312,15 +307,15 @@ export default function PipeSizer() {
       </Card>
 
       {/* Technical notes */}
-      <Card className="border-none shadow-sm bg-gray-50">
+      <Card className="border-none shadow-sm bg-gray-50 dark:bg-slate-800/50">
         <CardContent className="p-5 flex gap-3 items-start">
-          <Info className="w-5 h-5 text-gray-400 shrink-0 mt-0.5" />
-          <div className="space-y-3 text-sm text-gray-700">
-            <p className="font-semibold text-gray-900">Technical Notes & Pipe Type Selection Guide</p>
+          <Info className="w-5 h-5 text-gray-400 dark:text-slate-500 shrink-0 mt-0.5" />
+          <div className="space-y-3 text-sm text-gray-700 dark:text-slate-400">
+            <p className="font-semibold text-gray-900 dark:text-slate-200">Technical Notes & Pipe Type Selection Guide</p>
 
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               <div>
-                <p className="font-semibold text-gray-800 mb-1">Pipe Material Selection</p>
+                <p className="font-semibold text-gray-800 dark:text-slate-300 mb-1">Pipe Material Selection</p>
                 <ul className="space-y-1 list-disc list-inside text-xs">
                   <li><strong>Copper (Type L/M):</strong> Chilled water, hot water ≤93°C. Smooth bore, low corrosion, highest C-factor (150). IS 2502.</li>
                   <li><strong>GI / MS Steel:</strong> General HVAC, condenser water, fire protection. IS 1239 (light/medium/heavy). C = 120–140.</li>
@@ -331,7 +326,7 @@ export default function PipeSizer() {
                 </ul>
               </div>
               <div>
-                <p className="font-semibold text-gray-800 mb-1">Design Velocity Guidelines</p>
+                <p className="font-semibold text-gray-800 dark:text-slate-300 mb-1">Design Velocity Guidelines</p>
                 <ul className="space-y-1 list-disc list-inside text-xs">
                   <li><strong>Chilled/HW mains:</strong> 3–8 FPS (ASHRAE 90.1)</li>
                   <li><strong>Chilled/HW branches:</strong> 2–4 FPS (noise concern above 4)</li>
@@ -339,7 +334,7 @@ export default function PipeSizer() {
                   <li><strong>Domestic cold water:</strong> 2–8 FPS (IS 1239 / NBC)</li>
                   <li><strong>Pressure drop target:</strong> 1–4 ft hd per 100 ft for mains (≈ 0.43–1.73 psi/100 ft)</li>
                 </ul>
-                <p className="font-semibold text-gray-800 mt-2 mb-1">IS Code References</p>
+                <p className="font-semibold text-gray-800 dark:text-slate-300 mt-2 mb-1">IS Code References</p>
                 <ul className="space-y-1 list-disc list-inside text-xs">
                   <li><strong>IS 1239:</strong> Steel tubes (water, gas, sanitation) — Part 1 (Plain end), Part 2 (Socket end)</li>
                   <li><strong>IS 659:</strong> Specification for hydronic piping systems</li>
@@ -350,7 +345,7 @@ export default function PipeSizer() {
               </div>
             </div>
 
-            <p className="text-xs text-gray-500">
+            <p className="text-xs text-gray-500 dark:text-slate-500">
               Friction loss computed using Hazen-Williams equation.
               For more accurate results at low flow or high-viscosity fluids, use Darcy-Weisbach with Moody chart.
               Add 20–30% equivalent length for fittings as a rule of thumb; confirm with actual fitting loss coefficients.

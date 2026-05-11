@@ -197,24 +197,32 @@ function ZoneSummaryBar({
   const requiredTR = governingTR * 1.10;
   const achGovernsAirflow = governingCfmTR >= governingLoadTR;
 
+  const zoneRoomIdSet = new Set(zoneRooms.map((r: any) => r.id));
   const installedForZone = (equipSystems ?? []).reduce<{ tr: number; cfm: number }>(
     (acc, sys) => {
-      const eqZones = (sys.zones ?? []) as any[];
-      const eZone = eqZones.find((z: any) => z.id === zoneId);
-      if (eZone) {
-        if (eZone.unitSelections?.length) {
-          acc.tr  += (eZone.unitSelections as any[]).reduce((s: number, u: any) => s + (u.trCapacity ?? 0) * (u.quantity ?? 1), 0);
-          acc.cfm += (eZone.unitSelections as any[]).reduce((s: number, u: any) => s + (u.cfmRated  ?? 0) * (u.quantity ?? 1), 0);
-        } else if (eZone.selection) {
-          acc.tr  += (eZone.selection.trCapacity ?? 0) * (eZone.selection.quantity ?? 1);
-          acc.cfm += (eZone.selection.cfmRated  ?? 0) * (eZone.selection.quantity ?? 1);
+      // Zone-level IDU selections: match by room membership (equipment zones use grp-* IDs, not LC zone IDs)
+      for (const eqZone of (sys.zones ?? []) as any[]) {
+        const overlaps = (eqZone.roomIds ?? []).some((rid: string) => zoneRoomIdSet.has(rid));
+        if (!overlaps) continue;
+        if (eqZone.unitSelections?.length) {
+          acc.tr  += (eqZone.unitSelections as any[]).reduce((s: number, u: any) => s + (u.trCapacity ?? 0) * (u.quantity ?? 1), 0);
+          acc.cfm += (eqZone.unitSelections as any[]).reduce((s: number, u: any) => s + (u.cfmRated  ?? 0) * (u.quantity ?? 1), 0);
+        } else if (eqZone.selection) {
+          acc.tr  += (eqZone.selection.trCapacity ?? 0) * (eqZone.selection.quantity ?? 1);
+          acc.cfm += (eqZone.selection.cfmRated  ?? 0) * (eqZone.selection.quantity ?? 1);
         }
       }
-      if (sys.roomSelections) {
-        for (const room of zoneRooms) {
-          const units = (sys.roomSelections[room.id] ?? []) as any[];
-          acc.tr  += units.reduce((s: number, u: any) => s + (u.trCapacity ?? 0), 0);
-          acc.cfm += units.reduce((s: number, u: any) => s + (u.cfmRated  ?? 0), 0);
+      // Room-level selections (Split / per-room modes)
+      for (const room of zoneRooms) {
+        const roomSel = (sys.roomSelections?.[room.id] ?? []) as any[];
+        acc.tr  += roomSel.reduce((s: number, u: any) => s + (u.trCapacity ?? 0), 0);
+        acc.cfm += roomSel.reduce((s: number, u: any) => s + (u.cfmRated  ?? 0), 0);
+        // iduSelections (legacy per-room record)
+        const iduSel = sys.iduSelections?.[room.id];
+        if (iduSel) {
+          const units = Array.isArray(iduSel) ? iduSel : [iduSel];
+          acc.tr  += (units as any[]).reduce((s: number, u: any) => s + (u.trCapacity ?? 0), 0);
+          acc.cfm += (units as any[]).reduce((s: number, u: any) => s + (u.cfmRated  ?? 0), 0);
         }
       }
       return acc;
@@ -231,12 +239,11 @@ function ZoneSummaryBar({
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div className="min-w-0 flex-1">
             <div className="flex flex-wrap items-center gap-2">
-              <span className="text-[10px] font-bold uppercase tracking-[0.16em] text-orange-700">Zone Summary</span>
               <span className="rounded-full border border-orange-200 dark:border-orange-800 bg-white dark:bg-slate-800 px-2 py-0.5 text-[10px] font-semibold text-orange-700 dark:text-orange-400">{zoneRooms.length} room{zoneRooms.length !== 1 ? 's' : ''}</span>
               <span className="rounded-full border border-slate-200 dark:border-slate-600 bg-slate-100 dark:bg-slate-700 px-2 py-0.5 text-[10px] font-semibold text-slate-700 dark:text-slate-300">AHU Basis: {peakSeason}</span>
               <span className="rounded-full border border-indigo-200 dark:border-indigo-800 bg-indigo-50 dark:bg-indigo-950/30 px-2 py-0.5 text-[10px] font-semibold text-indigo-700 dark:text-indigo-400">{governingTR === governingCfmTR ? 'CFM Gov' : 'Load Gov'}</span>
             </div>
-            <div className="mt-3 grid grid-cols-2 gap-2 md:grid-cols-5">
+            <div className="mt-3 grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-6">
               <div className="rounded-lg border border-orange-200 dark:border-orange-800 bg-white dark:bg-slate-800 px-3 py-2">
                 <p className="text-[10px] font-bold uppercase tracking-[0.14em] text-orange-700 dark:text-orange-400">Summer Cooling</p>
                 <p className="mt-1 font-mono text-lg font-bold text-orange-900 dark:text-orange-200">{summerGoverningTR.toFixed(2)} <span className="text-[11px] font-semibold text-orange-600 dark:text-orange-400">TR</span></p>
@@ -273,9 +280,15 @@ function ZoneSummaryBar({
                 {instFit === 'none' ? (
                   <p className="text-[10px] text-slate-400">No equipment selected</p>
                 ) : instFit === 'ok' ? (
-                  <p className="text-[10px] font-semibold text-green-600">{installedForZone.tr.toFixed(2)} TR installed ✓</p>
+                  <>
+                    <p className="text-[10px] font-semibold text-green-600">{installedForZone.tr.toFixed(2)} TR selected ✓</p>
+                    <p className="text-[10px] font-semibold text-green-600">{Math.round(installedForZone.cfm).toLocaleString()} CFM selected</p>
+                  </>
                 ) : (
-                  <p className="text-[10px] font-semibold text-red-500">{installedForZone.tr.toFixed(2)} TR installed ⚠ Under</p>
+                  <>
+                    <p className="text-[10px] font-semibold text-red-500">{installedForZone.tr.toFixed(2)} TR selected ⚠ Under</p>
+                    <p className="text-[10px] font-semibold text-red-500">{Math.round(installedForZone.cfm).toLocaleString()} CFM selected</p>
+                  </>
                 )}
               </div>
             </div>
@@ -376,6 +389,10 @@ const ZoneList = ({
   const isChiller = String(project?.systemType || '').toLowerCase().includes('chiller');
   const [overrideDrafts, setOverrideDrafts] = useState<Record<string, string>>({});
   const [savingZoneOverrideId, setSavingZoneOverrideId] = useState<string | null>(null);
+  const [zoneUIExpanded, setZoneUIExpanded] = useState<Record<string, { overrides: boolean; summary: boolean }>>({});
+  const getZoneUI = (id: string) => zoneUIExpanded[id] ?? { overrides: false, summary: false };
+  const toggleZoneUI = (id: string, key: 'overrides' | 'summary') =>
+    setZoneUIExpanded(prev => ({ ...prev, [id]: { ...getZoneUI(id), [key]: !getZoneUI(id)[key] } }));
 
   // ── Bulk move state ──────────────────────────────────────────────────────────
   const [bulkMoveOpen, setBulkMoveOpen] = useState(false);
@@ -627,6 +644,24 @@ const ZoneList = ({
       effectiveZone.winterIndoorTemp !== undefined ||
       effectiveZone.winterIndoorHumidity !== undefined;
 
+    const { overrides: showOverrides, summary: showSummary } = getZoneUI(zoneId);
+
+    const lcZoneRoomIds = new Set(zoneRooms.map((r: any) => r.id));
+    const zoneHasEquipment = (equipSystems ?? []).some((sys: any) => {
+      // Zone-level IDU selections matched by room membership
+      if ((sys.zones ?? []).some((eqZone: any) =>
+        (eqZone.roomIds ?? []).some((rid: string) => lcZoneRoomIds.has(rid)) &&
+        ((eqZone.unitSelections?.length ?? 0) > 0 || !!eqZone.selection)
+      )) return true;
+      // Room-level selections (Split)
+      if (zoneRooms.some((r: any) => (sys.roomSelections?.[r.id]?.length ?? 0) > 0)) return true;
+      // iduSelections (legacy per-room)
+      return zoneRooms.some((r: any) => {
+        const sel = sys.iduSelections?.[r.id];
+        return sel && (Array.isArray(sel) ? sel.length > 0 : !!sel);
+      });
+    });
+
     return (
       <ZoneDropContainer key={zoneId} zoneId={zoneId}>
         {/* Zone header row */}
@@ -675,6 +710,38 @@ const ZoneList = ({
             }`}>
               {zone.type}
             </span>
+          )}
+
+          {/* Expanded: inline toggle buttons + equipment status */}
+          {isOpen && (
+            <>
+              <button
+                type="button"
+                onClick={(e) => { e.stopPropagation(); toggleZoneUI(zoneId, 'overrides'); }}
+                className="flex items-center gap-1 text-[11px] text-slate-500 dark:text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 flex-shrink-0 border border-slate-200 dark:border-slate-600 rounded px-1.5 py-0.5 hover:bg-slate-50 dark:hover:bg-slate-700/50 transition-colors"
+              >
+                {showOverrides ? <ChevronDown className="h-2.5 w-2.5" /> : <ChevronRight className="h-2.5 w-2.5" />}
+                Inside Design Override
+                {hasZoneIndoorOverride && <span className="ml-0.5 h-1.5 w-1.5 rounded-full bg-amber-400 flex-shrink-0" />}
+              </button>
+              <button
+                type="button"
+                onClick={(e) => { e.stopPropagation(); toggleZoneUI(zoneId, 'summary'); }}
+                className="flex items-center gap-1 text-[11px] text-orange-600 dark:text-orange-400 hover:text-orange-700 dark:hover:text-orange-300 flex-shrink-0 border border-orange-200 dark:border-orange-700 rounded px-1.5 py-0.5 hover:bg-orange-50 dark:hover:bg-orange-900/20 transition-colors"
+              >
+                {showSummary ? <ChevronDown className="h-2.5 w-2.5" /> : <ChevronRight className="h-2.5 w-2.5" />}
+                Zone Summary
+              </button>
+              {zoneHasEquipment ? (
+                <span className="flex items-center gap-1 text-[11px] font-semibold text-green-600 dark:text-green-400 flex-shrink-0 border border-green-200 dark:border-green-800 rounded px-1.5 py-0.5 bg-green-50 dark:bg-green-900/20">
+                  ✓ IDU Selected
+                </span>
+              ) : (
+                <span className="text-[11px] text-slate-400 dark:text-slate-500 flex-shrink-0 border border-slate-200 dark:border-slate-600 rounded px-1.5 py-0.5">
+                  No IDU
+                </span>
+              )}
+            </>
           )}
 
           {/* Room count */}
@@ -730,44 +797,44 @@ const ZoneList = ({
         {/* Expanded: zone inside-design override + room table + zone summary */}
         {isOpen && (
           <>
-            {/* Inside design conditions for this zone */}
+            {/* Inside design conditions — shown when toggled from zone header */}
+            {showOverrides && (
             <div className="border-t border-slate-100 dark:border-slate-700 bg-slate-50/80 dark:bg-slate-800/80 px-4 py-3">
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <span className="text-[10px] font-bold uppercase tracking-wider text-slate-500">Inside Design Overrides</span>
-                {zoneOverrideDirty ? (
-                  <div className="flex items-center gap-2">
-                    <span className="text-[11px] font-medium text-amber-700">Unsaved override changes are applied live to calculations.</span>
+              {(zoneOverrideDirty || hasZoneIndoorOverride) && (
+                <div className="flex flex-wrap items-center justify-between gap-2 pb-2">
+                  <span className="text-[10px] font-bold uppercase tracking-wider text-slate-500">Inside Design Overrides</span>
+                  {zoneOverrideDirty ? (
+                    <div className="flex items-center gap-2">
+                      <span className="text-[11px] font-medium text-amber-700">Unsaved override changes are applied live to calculations.</span>
+                      <button
+                        type="button"
+                        onClick={() => clearZoneOverrideDrafts(zoneId)}
+                        className="h-7 rounded-md border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-700 px-2.5 text-[11px] font-semibold text-slate-700 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-600"
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => void handleUpdateZoneOverrides(zoneId, isSystem, systemId)}
+                        disabled={isSavingZoneOverride}
+                        className="inline-flex h-7 items-center gap-1 rounded-md border border-blue-300 bg-blue-600 px-2.5 text-[11px] font-semibold text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-60"
+                      >
+                        {isSavingZoneOverride && <Loader2 className="h-3 w-3 animate-spin" />}
+                        Update
+                      </button>
+                    </div>
+                  ) : (
                     <button
                       type="button"
-                      onClick={() => clearZoneOverrideDrafts(zoneId)}
-                      className="h-7 rounded-md border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-700 px-2.5 text-[11px] font-semibold text-slate-700 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-600"
+                      onClick={() => queueZoneDefaultsReset(zoneId)}
+                      className="text-[10px] text-red-500 hover:text-red-600 underline"
                     >
-                      Cancel
+                      Reset to project defaults
                     </button>
-                    <button
-                      type="button"
-                      onClick={() => void handleUpdateZoneOverrides(zoneId, isSystem, systemId)}
-                      disabled={isSavingZoneOverride}
-                      className="inline-flex h-7 items-center gap-1 rounded-md border border-blue-300 bg-blue-600 px-2.5 text-[11px] font-semibold text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-60"
-                    >
-                      {isSavingZoneOverride && <Loader2 className="h-3 w-3 animate-spin" />}
-                      Update
-                    </button>
-                  </div>
-                ) : hasZoneIndoorOverride ? (
-                  <button
-                    type="button"
-                    onClick={() => queueZoneDefaultsReset(zoneId)}
-                    className="text-[10px] text-red-500 hover:text-red-600 underline"
-                  >
-                    Reset to project defaults
-                  </button>
-                ) : (
-                  <span className="text-[10px] text-slate-400 italic">Using project defaults</span>
-                )}
-              </div>
-
-              <div className="mt-3 grid grid-cols-1 gap-3 lg:grid-cols-2">
+                  )}
+                </div>
+              )}
+              <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
                 <div className="rounded-lg border border-orange-200 dark:border-orange-800 bg-orange-50/70 dark:bg-orange-950/20 px-3 py-2.5">
                   <div className="mb-2 flex items-center justify-between gap-2">
                     <span className="text-[10px] font-semibold uppercase tracking-wide text-orange-700 dark:text-orange-400">Summer / Monsoon</span>
@@ -831,6 +898,7 @@ const ZoneList = ({
                 </div>
               </div>
             </div>
+            )}
 
             <div className="border-t border-gray-100 dark:border-slate-700 bg-gray-50/50 dark:bg-slate-800/50">
               <RoomTable
@@ -855,16 +923,18 @@ const ZoneList = ({
                 userId={userProfile?.uid}
               />
             </div>
-            <ZoneSummaryBar
-              zoneRooms={liveZoneRooms}
-              envelopeElements={envelopeElements}
-              dc={zoneDc}
-              isChiller={isChiller}
-              project={project}
-              zoneId={zoneId}
-              zoneName={zone.name}
-              equipSystems={equipSystems}
-            />
+            {showSummary && (
+              <ZoneSummaryBar
+                zoneRooms={liveZoneRooms}
+                envelopeElements={envelopeElements}
+                dc={zoneDc}
+                isChiller={isChiller}
+                project={project}
+                zoneId={zoneId}
+                zoneName={zone.name}
+                equipSystems={equipSystems}
+              />
+            )}
           </>
         )}
       </ZoneDropContainer>

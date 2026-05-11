@@ -20,7 +20,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '
 import {
   getAllLibraryItems, addLibraryItem, updateLibraryItem, deleteLibraryItem,
   seedLibraryFromCatalog, importFromCSV, exportToCSV, getCSVTemplate,
-  migrateFromLegacyCollections,
+  migrateFromLegacyCollections, deleteAllLegacyEquipment,
 } from '../../services/equipmentLibraryService';
 import type { EquipmentModel } from '../../constants/equipment-catalog';
 import { IDU_SUBTYPE_LABELS } from '../../constants/equipment-catalog';
@@ -31,6 +31,7 @@ import {
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { cn } from '../../lib/utils';
+import { ComboboxInput } from '../ui/combobox-input';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -70,20 +71,20 @@ function parseNum(s: string) { const n = parseFloat(s); return isNaN(n) ? undefi
 
 function TypeBadge({ type }: { type: string }) {
   const cls =
-    type === 'VRF-IDU'  ? 'bg-blue-50 text-blue-700 border-blue-200' :
-    type === 'VRF-ODU'  ? 'bg-indigo-50 text-indigo-700 border-indigo-200' :
-    type === 'Chiller'  ? 'bg-cyan-50 text-cyan-700 border-cyan-200' :
-    type === 'AHU'      ? 'bg-teal-50 text-teal-700 border-teal-200' :
-    type === 'FCU'      ? 'bg-green-50 text-green-700 border-green-200' :
-    type === 'Package'  ? 'bg-orange-50 text-orange-700 border-orange-200' :
-    'bg-slate-100 text-slate-600 border-slate-200';
+    type === 'VRF-IDU'  ? 'bg-blue-50 dark:bg-blue-950/40 text-blue-700 dark:text-blue-300 border-blue-200 dark:border-blue-800' :
+    type === 'VRF-ODU'  ? 'bg-indigo-50 dark:bg-indigo-950/40 text-indigo-700 dark:text-indigo-300 border-indigo-200 dark:border-indigo-800' :
+    type === 'Chiller'  ? 'bg-cyan-50 dark:bg-cyan-950/40 text-cyan-700 dark:text-cyan-300 border-cyan-200 dark:border-cyan-800' :
+    type === 'AHU'      ? 'bg-teal-50 dark:bg-teal-950/40 text-teal-700 dark:text-teal-300 border-teal-200 dark:border-teal-800' :
+    type === 'FCU'      ? 'bg-green-50 dark:bg-green-950/40 text-green-700 dark:text-green-300 border-green-200 dark:border-green-800' :
+    type === 'Package'  ? 'bg-orange-50 dark:bg-orange-950/40 text-orange-700 dark:text-orange-300 border-orange-200 dark:border-orange-800' :
+    'bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-300 border-slate-200 dark:border-slate-600';
   return <Badge variant="outline" className={cn('text-xs whitespace-nowrap', cls)}>{type}</Badge>;
 }
 
 // ─── Form Panel ───────────────────────────────────────────────────────────────
 
 function EquipmentForm({
-  form, setForm, onSave, onCancel, saving, isEdit,
+  form, setForm, onSave, onCancel, saving, isEdit, brandOptions, subTypeOptions,
 }: {
   form: FormState;
   setForm: React.Dispatch<React.SetStateAction<FormState>>;
@@ -91,6 +92,8 @@ function EquipmentForm({
   onCancel: () => void;
   saving: boolean;
   isEdit: boolean;
+  brandOptions: string[];
+  subTypeOptions: string[];
 }) {
   function field(key: keyof FormState) {
     return (e: React.ChangeEvent<HTMLInputElement>) =>
@@ -102,97 +105,112 @@ function EquipmentForm({
   }
 
   const isVrfOdu = form.type === 'VRF-ODU';
-  const typeValue = EQUIPMENT_TYPES.includes(form.type ?? '') ? (form.type ?? '') : '';
+
+  function F({ label, required, children }: { label: string; required?: boolean; children: React.ReactNode }) {
+    return (
+      <div className="flex flex-col gap-1.5">
+        <Label className="text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wide">
+          {label}{required && <span className="text-red-500 ml-0.5">*</span>}
+        </Label>
+        {children}
+      </div>
+    );
+  }
 
   return (
-    <div className="space-y-5">
-      {/* Basic fields */}
-      <div>
-        <p className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-3">Basic Info</p>
-        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3">
-          <div className="flex flex-col gap-1.5">
-            <Label className="text-sm text-slate-600">Type *</Label>
-            <Select value={typeValue} onValueChange={v => setForm(f => ({ ...f, type: v as any }))}>
-              <SelectTrigger className="h-9 text-sm">
-                <SelectValue placeholder="Select type…" />
-              </SelectTrigger>
-              <SelectContent>
-                {EQUIPMENT_TYPES.map(t => <SelectItem key={t} value={t}>{t}</SelectItem>)}
-              </SelectContent>
-            </Select>
-          </div>
-          <div className="flex flex-col gap-1.5">
-            <Label className="text-sm text-slate-600">Brand *</Label>
-            <Input className="h-9 text-sm" placeholder="e.g. Blue Star" value={form.brand ?? ''} onChange={field('brand')} />
-          </div>
-          <div className="flex flex-col gap-1.5">
-            <Label className="text-sm text-slate-600">Model / Series *</Label>
-            <Input className="h-9 text-sm" placeholder="e.g. WS Series HP" value={form.modelSeries ?? ''} onChange={field('modelSeries')} />
-          </div>
-          <div className="flex flex-col gap-1.5">
-            <Label className="text-sm text-slate-600">Sub-Type</Label>
-            <Input className="h-9 text-sm" placeholder="e.g. cassette-4way" value={form.subType ?? ''} onChange={field('subType')} />
-          </div>
-          <div className="flex flex-col gap-1.5">
-            <Label className="text-sm text-slate-600">Capacity (TR) *</Label>
-            <Input type="number" className="h-9 text-sm" placeholder="TR" value={numField(form.capacityTR)} onChange={numInput('capacityTR')} />
-          </div>
-          <div className="flex flex-col gap-1.5">
-            <Label className="text-sm text-slate-600">Airflow (CFM)</Label>
-            <Input type="number" className="h-9 text-sm" placeholder="CFM" value={numField(form.ratedAirflowCFM)} onChange={numInput('ratedAirflowCFM')} />
-          </div>
-          <div className="flex flex-col gap-1.5">
-            <Label className="text-sm text-slate-600">ESP (Pa)</Label>
-            <Input type="number" className="h-9 text-sm" placeholder="Pa" value={numField(form.staticPressurePa)} onChange={numInput('staticPressurePa')} />
-          </div>
-          <div className="flex flex-col gap-1.5">
-            <Label className="text-sm text-slate-600">Power (kW)</Label>
-            <Input type="number" className="h-9 text-sm" placeholder="kW" value={numField(form.powerInputKW)} onChange={numInput('powerInputKW')} />
-          </div>
+    <div className="flex flex-col gap-0">
+
+      {/* ── Section 1: Identity ─────────────────────────────────────────────── */}
+      <div className="px-6 py-5 border-b border-slate-100 dark:border-slate-800">
+        <div className="flex items-center gap-2 mb-4">
+          <div className="w-1 h-4 rounded-full bg-blue-500" />
+          <span className="text-xs font-bold text-slate-500 dark:text-slate-400 uppercase tracking-widest">Identity</span>
+        </div>
+        <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+          <F label="Type" required>
+            <ComboboxInput inputClassName="h-9 text-sm" placeholder="e.g. VRF-IDU"
+              value={form.type ?? ''} onChange={v => setForm(f => ({ ...f, type: v as any }))}
+              options={EQUIPMENT_TYPES} />
+          </F>
+          <F label="Brand" required>
+            <ComboboxInput inputClassName="h-9 text-sm" placeholder="e.g. Blue Star"
+              value={form.brand ?? ''} onChange={v => setForm(f => ({ ...f, brand: v }))}
+              options={brandOptions} />
+          </F>
+          <F label="Model / Series" required>
+            <Input className="h-9 text-sm" placeholder="e.g. VHW Hi-Wall" value={form.modelSeries ?? ''} onChange={field('modelSeries')} />
+          </F>
+          <F label="Sub-Type">
+            <ComboboxInput inputClassName="h-9 text-sm" placeholder="e.g. hi-wall"
+              value={form.subType ?? ''} onChange={v => setForm(f => ({ ...f, subType: v }))}
+              options={subTypeOptions} />
+          </F>
         </div>
       </div>
 
-      {/* Performance + Refrigerant */}
-      <div>
-        <p className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-3">Performance & Refrigerant</p>
-        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3">
-          <div className="flex flex-col gap-1.5">
-            <Label className="text-sm text-slate-600">EER</Label>
+      {/* ── Section 2: Specifications ───────────────────────────────────────── */}
+      <div className="px-6 py-5 border-b border-slate-100 dark:border-slate-800">
+        <div className="flex items-center gap-2 mb-4">
+          <div className="w-1 h-4 rounded-full bg-emerald-500" />
+          <span className="text-xs font-bold text-slate-500 dark:text-slate-400 uppercase tracking-widest">Specifications</span>
+        </div>
+        <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+          <F label="Capacity (TR)" required>
+            <Input type="number" className="h-9 text-sm" placeholder="e.g. 1.5" value={numField(form.capacityTR)} onChange={numInput('capacityTR')} />
+          </F>
+          <F label="Airflow (CFM)">
+            <Input type="number" className="h-9 text-sm" placeholder="e.g. 600" value={numField(form.ratedAirflowCFM)} onChange={numInput('ratedAirflowCFM')} />
+          </F>
+          <F label="Static Pressure (Pa)">
+            <Input type="number" className="h-9 text-sm" placeholder="e.g. 80" value={numField(form.staticPressurePa)} onChange={numInput('staticPressurePa')} />
+          </F>
+          <F label="Power Input (kW)">
+            <Input type="number" className="h-9 text-sm" placeholder="e.g. 1.2" value={numField(form.powerInputKW)} onChange={numInput('powerInputKW')} />
+          </F>
+        </div>
+      </div>
+
+      {/* ── Section 3: Performance ──────────────────────────────────────────── */}
+      <div className="px-6 py-5 border-b border-slate-100 dark:border-slate-800">
+        <div className="flex items-center gap-2 mb-4">
+          <div className="w-1 h-4 rounded-full bg-violet-500" />
+          <span className="text-xs font-bold text-slate-500 dark:text-slate-400 uppercase tracking-widest">Performance & Refrigerant</span>
+        </div>
+        <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+          <F label="EER">
             <Input type="number" className="h-9 text-sm" placeholder="e.g. 11.8" value={numField(form.eer)} onChange={numInput('eer')} />
-          </div>
-          <div className="flex flex-col gap-1.5">
-            <Label className="text-sm text-slate-600">COP</Label>
+          </F>
+          <F label="COP">
             <Input type="number" className="h-9 text-sm" placeholder="e.g. 3.5" value={numField(form.cop)} onChange={numInput('cop')} />
-          </div>
-          <div className="flex flex-col gap-1.5">
-            <Label className="text-sm text-slate-600">Refrigerant</Label>
+          </F>
+          <F label="Refrigerant">
             <Input className="h-9 text-sm" placeholder="e.g. R32" value={form.refrigerant ?? ''} onChange={field('refrigerant')} />
-          </div>
-          <div className="flex flex-col gap-1.5">
-            <Label className="text-sm text-slate-600">Description</Label>
+          </F>
+          <F label="Description">
             <Input className="h-9 text-sm" placeholder="Optional notes" value={form.description ?? ''} onChange={field('description')} />
-          </div>
+          </F>
         </div>
       </div>
 
-      {/* VRF-ODU specifics */}
+      {/* ── Section 4: VRF-ODU specifics (conditional) ─────────────────────── */}
       {isVrfOdu && (
-        <div>
-          <p className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-3">VRF ODU Details</p>
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-            <div className="flex flex-col gap-1.5">
-              <Label className="text-sm text-slate-600">Discharge</Label>
+        <div className="px-6 py-5 border-b border-slate-100 dark:border-slate-800">
+          <div className="flex items-center gap-2 mb-4">
+            <div className="w-1 h-4 rounded-full bg-amber-500" />
+            <span className="text-xs font-bold text-slate-500 dark:text-slate-400 uppercase tracking-widest">VRF ODU Details</span>
+          </div>
+          <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+            <F label="Discharge Type">
               <Select value={form.dischargeType ?? ''} onValueChange={v => setForm(f => ({ ...f, dischargeType: v as any || undefined }))}>
                 <SelectTrigger className="h-9 text-sm"><SelectValue placeholder="Select…" /></SelectTrigger>
                 <SelectContent>
                   <SelectItem value="">—</SelectItem>
-                  <SelectItem value="top">Top</SelectItem>
-                  <SelectItem value="side">Side</SelectItem>
+                  <SelectItem value="top">Top Discharge</SelectItem>
+                  <SelectItem value="side">Side Discharge</SelectItem>
                 </SelectContent>
               </Select>
-            </div>
-            <div className="flex flex-col gap-1.5">
-              <Label className="text-sm text-slate-600">Compressor</Label>
+            </F>
+            <F label="Compressor Type">
               <Select value={form.compressorType ?? ''} onValueChange={v => setForm(f => ({ ...f, compressorType: v as any || undefined }))}>
                 <SelectTrigger className="h-9 text-sm"><SelectValue placeholder="Select…" /></SelectTrigger>
                 <SelectContent>
@@ -201,26 +219,29 @@ function EquipmentForm({
                   <SelectItem value="cooling-only">Cooling Only</SelectItem>
                 </SelectContent>
               </Select>
-            </div>
-            <div className="flex flex-col gap-1.5">
-              <Label className="text-sm text-slate-600">Min Conn %</Label>
+            </F>
+            <F label="Min Connection %">
               <Input type="number" className="h-9 text-sm" placeholder="e.g. 50" value={numField(form.minConnectionPct)} onChange={numInput('minConnectionPct')} />
-            </div>
-            <div className="flex flex-col gap-1.5">
-              <Label className="text-sm text-slate-600">Max Conn %</Label>
+            </F>
+            <F label="Max Connection %">
               <Input type="number" className="h-9 text-sm" placeholder="e.g. 130" value={numField(form.maxConnectionPct)} onChange={numInput('maxConnectionPct')} />
-            </div>
+            </F>
           </div>
         </div>
       )}
 
-      <div className="flex gap-2 pt-1">
-        <Button className="gap-1.5" onClick={onSave} disabled={saving}>
-          {saving ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Plus className="w-4 h-4" />}
-          {isEdit ? 'Save Changes' : 'Add to Library'}
-        </Button>
-        <Button variant="ghost" onClick={onCancel} disabled={saving}>Cancel</Button>
+      {/* ── Footer ──────────────────────────────────────────────────────────── */}
+      <div className="px-6 py-4 flex items-center justify-between bg-slate-50/60 dark:bg-slate-800/40">
+        <p className="text-xs text-slate-400"><span className="text-red-500">*</span> Required fields</p>
+        <div className="flex gap-2">
+          <Button variant="outline" onClick={onCancel} disabled={saving}>Cancel</Button>
+          <Button className="gap-1.5 bg-blue-600 hover:bg-blue-700" onClick={onSave} disabled={saving}>
+            {saving ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Plus className="w-4 h-4" />}
+            {isEdit ? 'Save Changes' : 'Add to Library'}
+          </Button>
+        </div>
       </div>
+
     </div>
   );
 }
@@ -268,7 +289,14 @@ export default function GlobalEquipmentLibrary() {
     }
   }
 
-  useEffect(() => { loadItems(); }, []);
+  useEffect(() => {
+    loadItems();
+    // Migrate any user-created equipment from legacy collections into the Global Library
+    // so it is preserved and available across all projects, then remove the old collections.
+    migrateFromLegacyCollections()
+      .then(() => deleteAllLegacyEquipment())
+      .catch(() => {});
+  }, []);
 
   // ── Migrate legacy ──────────────────────────────────────────────────────────
   async function handleMigrate() {
@@ -557,13 +585,13 @@ export default function GlobalEquipmentLibrary() {
       {/* Stats header */}
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
         {[
-          { label: 'Total Equipment', value: stats.total, color: 'text-blue-700', bg: 'bg-blue-50 border-blue-100' },
-          { label: 'Brands', value: stats.brands, color: 'text-indigo-700', bg: 'bg-indigo-50 border-indigo-100' },
-          { label: 'From Catalog', value: stats.catalog, color: 'text-teal-700', bg: 'bg-teal-50 border-teal-100' },
-          { label: 'User Added', value: stats.userAdded, color: 'text-violet-700', bg: 'bg-violet-50 border-violet-100' },
+          { label: 'Total Equipment', value: stats.total, color: 'text-blue-700 dark:text-blue-300', bg: 'bg-blue-50 dark:bg-blue-950/40 border-blue-100 dark:border-blue-900' },
+          { label: 'Brands', value: stats.brands, color: 'text-indigo-700 dark:text-indigo-300', bg: 'bg-indigo-50 dark:bg-indigo-950/40 border-indigo-100 dark:border-indigo-900' },
+          { label: 'From Catalog', value: stats.catalog, color: 'text-teal-700 dark:text-teal-300', bg: 'bg-teal-50 dark:bg-teal-950/40 border-teal-100 dark:border-teal-900' },
+          { label: 'User Added', value: stats.userAdded, color: 'text-violet-700 dark:text-violet-300', bg: 'bg-violet-50 dark:bg-violet-950/40 border-violet-100 dark:border-violet-900' },
         ].map(s => (
           <div key={s.label} className={cn('rounded-xl border p-4', s.bg)}>
-            <p className="text-xs text-slate-500 font-medium">{s.label}</p>
+            <p className="text-xs text-slate-500 dark:text-slate-400 font-medium">{s.label}</p>
             <p className={cn('text-2xl font-bold mt-0.5', s.color)}>
               {loading ? '…' : s.value.toLocaleString()}
             </p>
@@ -573,30 +601,30 @@ export default function GlobalEquipmentLibrary() {
 
       {/* Seed banner — shown when library is empty and not loading */}
       {!loading && items.length === 0 && (
-        <div className="rounded-xl border-2 border-dashed border-amber-200 bg-amber-50 p-5 space-y-4">
+        <div className="rounded-xl border-2 border-dashed border-amber-200 dark:border-amber-800 bg-amber-50 dark:bg-amber-950/30 p-5 space-y-4">
           <div className="flex items-start gap-4">
             <Database className="w-8 h-8 text-amber-500 shrink-0 mt-0.5" />
             <div className="flex-1">
-              <p className="text-sm font-bold text-amber-800">Library is empty</p>
-              <p className="text-xs text-amber-600 mt-0.5">
+              <p className="text-sm font-bold text-amber-800 dark:text-amber-300">Library is empty</p>
+              <p className="text-xs text-amber-600 dark:text-amber-400 mt-0.5">
                 Choose one or both options below to populate the library.
               </p>
             </div>
           </div>
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             {/* Option 1 — Migrate previously added equipment */}
-            <div className="flex flex-col gap-2 rounded-lg border border-amber-200 bg-white p-4">
-              <p className="text-sm font-semibold text-slate-800">Migrate existing equipment</p>
-              <p className="text-xs text-slate-500">Copies all equipment you previously added (across projects) into this global library.</p>
-              <Button onClick={handleMigrate} disabled={migrating} variant="outline" className="gap-2 self-start border-amber-300 text-amber-700 hover:bg-amber-50">
+            <div className="flex flex-col gap-2 rounded-lg border border-amber-200 dark:border-amber-800 bg-white dark:bg-slate-800 p-4">
+              <p className="text-sm font-semibold text-slate-800 dark:text-slate-100">Migrate existing equipment</p>
+              <p className="text-xs text-slate-500 dark:text-slate-400">Copies all equipment you previously added (across projects) into this global library.</p>
+              <Button onClick={handleMigrate} disabled={migrating} variant="outline" className="gap-2 self-start border-amber-300 text-amber-700 hover:bg-amber-50 dark:border-amber-700 dark:text-amber-400 dark:hover:bg-amber-950/40">
                 {migrating ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Package className="w-4 h-4" />}
                 {migrating ? 'Migrating…' : 'Migrate from Old Catalog'}
               </Button>
             </div>
             {/* Option 2 — Seed built-in catalog */}
-            <div className="flex flex-col gap-2 rounded-lg border border-amber-200 bg-white p-4">
-              <p className="text-sm font-semibold text-slate-800">Seed built-in catalog</p>
-              <p className="text-xs text-slate-500">Loads the 448-item catalog (Blue Star, Samsung, Voltas, Trane…) into the library as a starting point.</p>
+            <div className="flex flex-col gap-2 rounded-lg border border-amber-200 dark:border-amber-800 bg-white dark:bg-slate-800 p-4">
+              <p className="text-sm font-semibold text-slate-800 dark:text-slate-100">Seed built-in catalog</p>
+              <p className="text-xs text-slate-500 dark:text-slate-400">Loads the 448-item catalog (Blue Star, Samsung, Voltas, Trane…) into the library as a starting point.</p>
               <Button onClick={handleSeed} disabled={seeding} className="bg-amber-600 hover:bg-amber-700 text-white gap-2 self-start">
                 {seeding ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Database className="w-4 h-4" />}
                 {seeding ? 'Seeding…' : 'Seed from Catalog'}
@@ -660,14 +688,14 @@ export default function GlobalEquipmentLibrary() {
       </div>
 
       {/* ── Filter strip ── */}
-      <div className="flex flex-wrap items-end gap-3 rounded-xl border border-slate-200 bg-slate-50/70 px-4 py-3">
+      <div className="flex flex-wrap items-end gap-3 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50/70 dark:bg-slate-800/50 px-4 py-3">
         <Filter className="w-4 h-4 text-slate-400 shrink-0 mt-1 self-center" />
 
         {/* Brand */}
         <div className="flex flex-col gap-1">
-          <span className="text-xs font-medium text-slate-500 pl-0.5">Brand</span>
+          <span className="text-xs font-medium text-slate-500 dark:text-slate-400 pl-0.5">Brand</span>
           <Select value={filterBrand} onValueChange={setFilterBrand}>
-            <SelectTrigger className="h-9 text-sm w-[145px] bg-white">
+            <SelectTrigger className="h-9 text-sm w-[145px] bg-white dark:bg-slate-900">
               <SelectValue placeholder="All" />
             </SelectTrigger>
             <SelectContent>
@@ -679,9 +707,9 @@ export default function GlobalEquipmentLibrary() {
 
         {/* Type */}
         <div className="flex flex-col gap-1">
-          <span className="text-xs font-medium text-slate-500 pl-0.5">Type</span>
+          <span className="text-xs font-medium text-slate-500 dark:text-slate-400 pl-0.5">Type</span>
           <Select value={filterType} onValueChange={setFilterType}>
-            <SelectTrigger className="h-9 text-sm w-[140px] bg-white">
+            <SelectTrigger className="h-9 text-sm w-[140px] bg-white dark:bg-slate-900">
               <SelectValue placeholder="All" />
             </SelectTrigger>
             <SelectContent>
@@ -693,9 +721,9 @@ export default function GlobalEquipmentLibrary() {
 
         {/* Sub-Type */}
         <div className="flex flex-col gap-1">
-          <span className="text-xs font-medium text-slate-500 pl-0.5">Sub-Type</span>
+          <span className="text-xs font-medium text-slate-500 dark:text-slate-400 pl-0.5">Sub-Type</span>
           <Select value={filterSubType} onValueChange={setFilterSubType}>
-            <SelectTrigger className="h-9 text-sm w-[165px] bg-white">
+            <SelectTrigger className="h-9 text-sm w-[165px] bg-white dark:bg-slate-900">
               <SelectValue placeholder="All" />
             </SelectTrigger>
             <SelectContent>
@@ -711,9 +739,9 @@ export default function GlobalEquipmentLibrary() {
 
         {/* Refrigerant */}
         <div className="flex flex-col gap-1">
-          <span className="text-xs font-medium text-slate-500 pl-0.5">Refrigerant</span>
+          <span className="text-xs font-medium text-slate-500 dark:text-slate-400 pl-0.5">Refrigerant</span>
           <Select value={filterRefrigerant} onValueChange={setFilterRefrigerant}>
-            <SelectTrigger className="h-9 text-sm w-[120px] bg-white">
+            <SelectTrigger className="h-9 text-sm w-[120px] bg-white dark:bg-slate-900">
               <SelectValue placeholder="All" />
             </SelectTrigger>
             <SelectContent>
@@ -725,13 +753,13 @@ export default function GlobalEquipmentLibrary() {
 
         {/* Capacity range */}
         <div className="flex flex-col gap-1">
-          <span className="text-xs font-medium text-slate-500 pl-0.5">
+          <span className="text-xs font-medium text-slate-500 dark:text-slate-400 pl-0.5">
             Capacity TR{trRange ? <span className="font-normal text-slate-400 ml-1">({trRange.min}–{trRange.max})</span> : ''}
           </span>
           <div className="flex items-center gap-1.5">
             <Input
               type="number"
-              className="h-9 text-sm w-[72px] bg-white"
+              className="h-9 text-sm w-[72px] bg-white dark:bg-slate-900"
               placeholder={trRange ? String(trRange.min) : 'Min'}
               value={filterMinTR}
               onChange={e => setFilterMinTR(e.target.value)}
@@ -739,7 +767,7 @@ export default function GlobalEquipmentLibrary() {
             <span className="text-slate-400 text-xs">—</span>
             <Input
               type="number"
-              className="h-9 text-sm w-[72px] bg-white"
+              className="h-9 text-sm w-[72px] bg-white dark:bg-slate-900"
               placeholder={trRange ? String(trRange.max) : 'Max'}
               value={filterMaxTR}
               onChange={e => setFilterMaxTR(e.target.value)}
@@ -749,9 +777,9 @@ export default function GlobalEquipmentLibrary() {
 
         {/* Source */}
         <div className="flex flex-col gap-1">
-          <span className="text-xs font-medium text-slate-500 pl-0.5">Source</span>
+          <span className="text-xs font-medium text-slate-500 dark:text-slate-400 pl-0.5">Source</span>
           <Select value={filterSource} onValueChange={setFilterSource}>
-            <SelectTrigger className="h-9 text-sm w-[130px] bg-white">
+            <SelectTrigger className="h-9 text-sm w-[130px] bg-white dark:bg-slate-900">
               <SelectValue placeholder="All" />
             </SelectTrigger>
             <SelectContent>
@@ -776,7 +804,7 @@ export default function GlobalEquipmentLibrary() {
       {/* Import result / error banner */}
       {importResult && (
         <div className={cn('flex items-start gap-3 rounded-xl border p-4 text-sm',
-          importResult.added > 0 ? 'bg-green-50 border-green-200 text-green-800' : 'bg-amber-50 border-amber-200 text-amber-800',
+          importResult.added > 0 ? 'bg-green-50 dark:bg-green-950/30 border-green-200 dark:border-green-900 text-green-800 dark:text-green-300' : 'bg-amber-50 dark:bg-amber-950/30 border-amber-200 dark:border-amber-900 text-amber-800 dark:text-amber-300',
         )}>
           {importResult.added > 0
             ? <CheckCircle2 className="w-5 h-5 shrink-0 mt-0.5 text-green-600" />
@@ -797,24 +825,33 @@ export default function GlobalEquipmentLibrary() {
 
       {/* Add / Edit Modal */}
       <Dialog open={showForm} onOpenChange={open => { if (!open) closeForm(); }}>
-        <DialogContent className="max-w-3xl max-h-[90vh] overflow-y-auto">
-          <DialogHeader>
-            <DialogTitle className="text-lg font-bold">
+        <DialogContent className="sm:max-w-5xl max-h-[92vh] flex flex-col p-0 gap-0 dark:bg-slate-900 overflow-hidden">
+          {/* Header */}
+          <DialogHeader className="px-6 py-4 border-b border-slate-200 dark:border-slate-700 bg-gradient-to-r from-blue-50 to-slate-50 dark:from-blue-950/30 dark:to-slate-900 shrink-0">
+            <DialogTitle className="text-base font-bold flex items-center gap-2.5 dark:text-slate-100">
               {editingId
-                ? <>Edit: <span className="text-blue-700">{form.brand} {form.modelSeries}</span></>
-                : 'Add Equipment to Library'}
+                ? <><Pencil className="w-4 h-4 text-blue-500" />Edit — <span className="text-blue-600 dark:text-blue-400">{form.brand} {form.modelSeries}</span></>
+                : <><Plus className="w-4 h-4 text-blue-500" />Add Equipment to Library</>}
             </DialogTitle>
+            <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
+              {editingId ? 'Update the specs for this equipment entry.' : 'New equipment is saved to the Global Library and available across all projects.'}
+            </p>
           </DialogHeader>
-          {/* key forces a full remount each time a different item is opened for edit */}
-          <EquipmentForm
-            key={editingId ?? '__new__'}
-            form={form}
-            setForm={setForm}
-            onSave={handleSave}
-            onCancel={closeForm}
-            saving={saving}
-            isEdit={!!editingId}
-          />
+          {/* Scrollable body */}
+          <div className="overflow-y-auto flex-1 min-h-0">
+            {/* key forces a full remount each time a different item is opened for edit */}
+            <EquipmentForm
+              key={editingId ?? '__new__'}
+              form={form}
+              setForm={setForm}
+              onSave={handleSave}
+              onCancel={closeForm}
+              saving={saving}
+              isEdit={!!editingId}
+              brandOptions={brands}
+              subTypeOptions={[...new Set([...Object.keys(IDU_SUBTYPE_LABELS), ...subTypes])].sort()}
+            />
+          </div>
         </DialogContent>
       </Dialog>
 
@@ -825,7 +862,7 @@ export default function GlobalEquipmentLibrary() {
           <span className="text-sm">Loading library…</span>
         </div>
       ) : filtered.length === 0 ? (
-        <div className="flex flex-col items-center justify-center py-16 text-slate-400 gap-2 rounded-xl border-2 border-dashed border-slate-200">
+        <div className="flex flex-col items-center justify-center py-16 text-slate-400 dark:text-slate-500 gap-2 rounded-xl border-2 border-dashed border-slate-200 dark:border-slate-700">
           <BookOpen className="w-10 h-10 opacity-20" />
           <p className="text-sm font-medium">
             {items.length === 0 ? 'Library is empty' : 'No items match your search'}
@@ -839,7 +876,7 @@ export default function GlobalEquipmentLibrary() {
       ) : (
         <>
           {/* Result count */}
-          <div className="flex items-center justify-between text-xs text-slate-500">
+          <div className="flex items-center justify-between text-xs text-slate-500 dark:text-slate-400">
             <span>
               Showing {page * PAGE_SIZE + 1}–{Math.min((page + 1) * PAGE_SIZE, filtered.length)} of {filtered.length} items
               {filtered.length < items.length && ` (filtered from ${items.length})`}
@@ -859,10 +896,10 @@ export default function GlobalEquipmentLibrary() {
             )}
           </div>
 
-          <div className="rounded-xl border border-slate-200 overflow-hidden bg-white">
+          <div className="rounded-xl border border-slate-200 dark:border-slate-700 overflow-hidden bg-white dark:bg-slate-900">
             <Table>
               <TableHeader>
-                <TableRow className="bg-slate-100 text-xs uppercase tracking-wider">
+                <TableRow className="bg-slate-100 dark:bg-slate-800 text-xs uppercase tracking-wider">
                   <TableHead className="py-3">Type</TableHead>
                   <TableHead className="py-3">Brand</TableHead>
                   <TableHead className="py-3">Model / Series</TableHead>
@@ -879,35 +916,35 @@ export default function GlobalEquipmentLibrary() {
               </TableHeader>
               <TableBody>
                 {pageItems.map(item => (
-                  <TableRow key={item.id} className="text-sm hover:bg-slate-50/60">
+                  <TableRow key={item.id} className="text-sm hover:bg-slate-50/60 dark:hover:bg-slate-800/60">
                     <TableCell className="py-3">
                       <TypeBadge type={item.type} />
                     </TableCell>
-                    <TableCell className="py-3 font-semibold text-slate-800">{item.brand}</TableCell>
-                    <TableCell className="py-3 font-medium">{item.modelSeries}</TableCell>
-                    <TableCell className="py-3 text-slate-500 text-xs">
+                    <TableCell className="py-3 font-semibold text-slate-800 dark:text-slate-100">{item.brand}</TableCell>
+                    <TableCell className="py-3 font-medium dark:text-slate-200">{item.modelSeries}</TableCell>
+                    <TableCell className="py-3 text-slate-500 dark:text-slate-400 text-xs">
                       {IDU_SUBTYPE_LABELS[item.subType ?? ''] ?? item.subType ?? '—'}
                     </TableCell>
-                    <TableCell className="py-3 text-right font-mono font-bold text-slate-800">
+                    <TableCell className="py-3 text-right font-mono font-bold text-slate-800 dark:text-slate-100">
                       {item.capacityTR}
                     </TableCell>
-                    <TableCell className="py-3 text-right font-mono text-slate-600">
+                    <TableCell className="py-3 text-right font-mono text-slate-600 dark:text-slate-400">
                       {item.ratedAirflowCFM ? item.ratedAirflowCFM.toLocaleString() : '—'}
                     </TableCell>
-                    <TableCell className="py-3 text-right font-mono text-orange-700">
+                    <TableCell className="py-3 text-right font-mono text-orange-700 dark:text-orange-400">
                       {item.staticPressurePa ?? '—'}
                     </TableCell>
-                    <TableCell className="py-3 text-right font-mono text-slate-500">
+                    <TableCell className="py-3 text-right font-mono text-slate-500 dark:text-slate-400">
                       {item.powerInputKW ?? '—'}
                     </TableCell>
-                    <TableCell className="py-3 text-right font-mono text-green-700">
+                    <TableCell className="py-3 text-right font-mono text-green-700 dark:text-green-400">
                       {item.eer ?? '—'}
                     </TableCell>
-                    <TableCell className="py-3 text-slate-500 text-xs">{item.refrigerant ?? '—'}</TableCell>
+                    <TableCell className="py-3 text-slate-500 dark:text-slate-400 text-xs">{item.refrigerant ?? '—'}</TableCell>
                     <TableCell className="py-3 text-center">
                       {(item as any).source === 'user'
-                        ? <span className="text-xs px-2 py-0.5 rounded-full bg-violet-100 text-violet-700 font-medium">User</span>
-                        : <span className="text-xs px-2 py-0.5 rounded-full bg-slate-100 text-slate-500">Catalog</span>
+                        ? <span className="text-xs px-2 py-0.5 rounded-full bg-violet-100 dark:bg-violet-950/50 text-violet-700 dark:text-violet-300 font-medium">User</span>
+                        : <span className="text-xs px-2 py-0.5 rounded-full bg-slate-100 dark:bg-slate-700 text-slate-500 dark:text-slate-400">Catalog</span>
                       }
                     </TableCell>
                     <TableCell className="py-3">

@@ -654,7 +654,11 @@ export const generatePDFReport = (
       ['System Type',    String(project?.systemType|| '-')],
       ['Altitude',       alt  ? `${n0(alt)} ft`  : '-'],
       ['Coordinates',    lat  ? `${n1(lat)}° N, ${n1(Math.abs(lon))}° ${lon >= 0 ? 'E' : 'W'}` : '-'],
-      ['Design Basis',   includeMonsoon ? 'Summer + Monsoon + Winter' : 'Summer + Winter'],
+      ['Design Basis',   [
+        'Summer',
+        ...(includeMonsoon ? ['Monsoon'] : []),
+        ...(includeWinter  ? ['Winter']  : []),
+      ].join(' + ')],
       ['Report Date',    new Date().toLocaleDateString('en-GB', { day: '2-digit', month: 'long', year: 'numeric' })],
       ['Prepared By',    'HVAC Load Master – Automated Calculation Engine'],
     ],
@@ -798,14 +802,17 @@ export const generatePDFReport = (
   y = (doc as any).lastAutoTable.finalY + 5;
 
   // Season summary table
-  const sumHead = ['Season', 'Load TR', 'CFM TR', 'Governing TR', 'Design CFM', 'Winter Heat BTU/h'];
+  const sumHead = [
+    'Season', 'Load TR', 'CFM TR', 'Governing TR', 'Design CFM',
+    ...(includeWinter ? ['Winter Heat BTU/h'] : []),
+  ];
   const sumBody = projectSeasonTotals.map((s) => [
     s.season,
     s.key === 'winter' ? '—' : n2(s.loadTr),
     s.key === 'winter' ? '—' : n2(s.cfmTr),
     s.key === 'winter' ? '—' : n2(s.governingTr),
     s.key === 'winter' ? '—' : n0(s.cfm),
-    s.key === 'winter' ? n0(s.heating) : '—',
+    ...(includeWinter ? [s.key === 'winter' ? n0(s.heating) : '—'] : []),
   ]);
 
   autoTable(doc, {
@@ -833,14 +840,18 @@ export const generatePDFReport = (
   y = sectionBanner(doc, '3.  SYSTEM / ZONE SUMMARY SCHEDULE', y, C);
   y += 2;
 
-  const summaryHead = includeMonsoon
-    ? ['Type', 'Parent System', 'Entity Name', 'Rooms', 'Summer TR', 'Monsoon TR', 'Design CFM', 'Winter BTU/h', 'Gov. TR', 'Inst. TR', 'Inst. CFM']
-    : ['Type', 'Parent System', 'Entity Name', 'Rooms', 'Summer TR', 'Design CFM', 'Winter BTU/h', 'Gov. TR', 'Inst. TR', 'Inst. CFM'];
+  const summaryHead = [
+    'Type', 'Parent System', 'Entity Name', 'Rooms', 'Summer TR',
+    ...(includeMonsoon ? ['Monsoon TR'] : []),
+    'Design CFM',
+    ...(includeWinter ? ['Winter BTU/h'] : []),
+    'Gov. TR', 'Inst. TR', 'Inst. CFM',
+  ];
 
   const colCount = summaryHead.length;
-  const instTrColIdx  = includeMonsoon ? 9  : 8;
-  const instCfmColIdx = includeMonsoon ? 10 : 9;
-  const govTrIdx      = includeMonsoon ? 8  : 7;
+  const govTrIdx      = 6 + (includeMonsoon ? 1 : 0) + (includeWinter ? 1 : 0);
+  const instTrColIdx  = govTrIdx + 1;
+  const instCfmColIdx = govTrIdx + 2;
 
   // Helper: build one zone row for the summary table
   const buildZoneRow = (entity: EntityRecord, parentName: string, sysType?: string): any[] => {
@@ -867,7 +878,9 @@ export const generatePDFReport = (
     const inst = getInstalledTrCfm(entity.id, effectiveEquipSystems, entity.rooms.map(r => r.id));
     const row: any[] = [entity.type, parentName, entity.name, n0(entity.rooms.length), n2(sumGovTR)];
     if (includeMonsoon) row.push(n2(monGovTR));
-    row.push(n0(govCfm), n0(winHeat), n2(govTr));
+    row.push(n0(govCfm));
+    if (includeWinter) row.push(n0(winHeat));
+    row.push(n2(govTr));
     row.push(inst.tr > 0 ? n2(inst.tr) : '—', inst.cfm > 0 ? n0(inst.cfm) : '—');
     return row;
   };
@@ -896,7 +909,9 @@ export const generatePDFReport = (
         if (!entity || entity.rooms.length === 0) {
           const emptyRow: any[] = ['Zone', sys.name || '—', `  ${zone.name || zone.id}`, '0', '—'];
           if (includeMonsoon) emptyRow.push('—');
-          emptyRow.push('—', '—', '—', '—', '—');
+          emptyRow.push('—');
+          if (includeWinter) emptyRow.push('—');
+          emptyRow.push('—', '—', '—');
           summaryBody.push(emptyRow);
         } else {
           const row = buildZoneRow(entity, sys.name || '—', sys.type);
@@ -980,9 +995,13 @@ export const generatePDFReport = (
     y = subBanner(doc, 'Room Schedule', y, C);
     y += 1;
 
-    const rscHead = includeMonsoon
-      ? ['Room', 'Floor', 'Area ft²', 'Summer TR', 'Monsoon TR', 'Design CFM', 'Winter BTU/h', 'Gov TR', 'Inst. TR', 'Inst. CFM']
-      : ['Room', 'Floor', 'Area ft²', 'Summer TR', 'Design CFM', 'Winter BTU/h', 'Gov TR', 'Inst. TR', 'Inst. CFM'];
+    const rscHead = [
+      'Room', 'Floor', 'Area ft²', 'Summer TR',
+      ...(includeMonsoon ? ['Monsoon TR'] : []),
+      'Design CFM',
+      ...(includeWinter ? ['Winter BTU/h'] : []),
+      'Gov TR', 'Inst. TR', 'Inst. CFM',
+    ];
 
     const sumDcE = resolveEntityDC(entity, summer, project);
     const monDcE = monsoon ? resolveEntityDC(entity, monsoon, project) : null;
@@ -1005,9 +1024,9 @@ export const generatePDFReport = (
       const rInst = getRoomInstalledTrCfm(room.id, effectiveEquipSystems);
       const row: any[] = [room.name || '—', room.floor || '—', n0(sm.area), n2(sm.governingTr)];
       if (includeMonsoon) row.push(n2(mm?.governingTr ?? 0));
+      row.push(n0(cfm));
+      if (includeWinter) row.push(n0(wm?.designHeatingLoad ?? 0));
       row.push(
-        n0(cfm),
-        includeWinter ? n0(wm?.designHeatingLoad ?? 0) : '—',
         n2(govTR),
         rInst.tr  > 0 ? n2(rInst.tr)  : '—',
         rInst.cfm > 0 ? n0(rInst.cfm) : '—',
@@ -1031,9 +1050,9 @@ export const generatePDFReport = (
       { content: n2(totSumTR), styles: { fontStyle: 'bold' as const, fillColor: C.total } },
     ];
     if (includeMonsoon) totRow.push({ content: n2(totMonTR), styles: { fontStyle: 'bold' as const, fillColor: C.total } });
+    totRow.push({ content: n0(totCFM), styles: { fontStyle: 'bold' as const, fillColor: C.total } });
+    if (includeWinter) totRow.push({ content: n0(totWinHeat), styles: { fontStyle: 'bold' as const, fillColor: C.total } });
     totRow.push(
-      { content: n0(totCFM),     styles: { fontStyle: 'bold' as const, fillColor: C.total } },
-      { content: n0(totWinHeat), styles: { fontStyle: 'bold' as const, fillColor: C.total } },
       { content: n2(totGovTR),   styles: { fontStyle: 'bold' as const, fillColor: C.total } },
       { content: instTRStr,  styles: { fontStyle: 'bold' as const, fillColor: C.grandBg, textColor: C.grandFg, halign: 'right' as const } },
       { content: instCFMStr, styles: { fontStyle: 'bold' as const, fillColor: C.grandBg, textColor: C.grandFg, halign: 'right' as const } },
@@ -1041,8 +1060,8 @@ export const generatePDFReport = (
     rscBody.push(totRow);
 
     const rscColStyles: Record<number, any> = { 0: { fontStyle: 'bold', cellWidth: 30 } };
-    const rInstTRIdx  = includeMonsoon ? 8 : 7;
-    const rInstCFMIdx = includeMonsoon ? 9 : 8;
+    const rInstTRIdx  = 6 + (includeMonsoon ? 1 : 0) + (includeWinter ? 1 : 0);
+    const rInstCFMIdx = 7 + (includeMonsoon ? 1 : 0) + (includeWinter ? 1 : 0);
     rscColStyles[rInstTRIdx]  = { halign: 'right', cellWidth: 15 };
     rscColStyles[rInstCFMIdx] = { halign: 'right', cellWidth: 15 };
 
@@ -1218,7 +1237,7 @@ export const generatePDFReport = (
           ['RSHF',          n2(m.rshf)],
           ['Design CFM',    `${n0(m.designCfm)} CFM`],
           ['Governing TR',  `${n2(m.governingTr)} TR`],
-          ['Winter Load',   `${n0(m.designHeatingLoad)} BTU/h`],
+          ...(includeWinter ? [['Winter Load', `${n0(m.designHeatingLoad)} BTU/h`]] : []),
         ];
 
         autoTable(doc, {

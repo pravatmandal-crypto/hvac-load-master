@@ -1114,9 +1114,9 @@ function RoomDetail({
         </div>
       </div>
 
-      <div className="mt-3 rounded-xl border border-indigo-100 bg-indigo-50/20 p-4">
+      <div className="mt-3 rounded-xl border border-indigo-100 dark:border-indigo-900 bg-indigo-50/20 dark:bg-indigo-950/20 p-4">
         <div className="mb-3 flex items-center justify-between gap-3">
-          <h4 className="text-xs font-bold text-indigo-700 uppercase tracking-widest">{title} Psychrometric Review</h4>
+          <h4 className="text-xs font-bold text-indigo-700 dark:text-indigo-300 uppercase tracking-widest">{title} Psychrometric Review</h4>
           <button
             type="button"
             onClick={() => setPsychroChartsOpen((prev) => ({ ...prev, [title.toLowerCase().includes('monsoon') ? 'monsoon' : 'summer']: !prev[title.toLowerCase().includes('monsoon') ? 'monsoon' : 'summer'] }))}
@@ -1326,7 +1326,7 @@ function RoomDetail({
             ['inputs',   'Step 1: Inputs'],
             ['envelope', 'Step 2: Envelope'],
             ['cooling',  'Step 3: Cooling'],
-            ['heating',  'Step 4: Heating'],
+            ...(project?.includeWinter ?? project?.data?.includeWinter ? [['heating', 'Step 4: Heating'] as const] : []),
             ['moisture', 'Step 5: Moisture'],
           ] as const).map(([step, label]) => (
             <button

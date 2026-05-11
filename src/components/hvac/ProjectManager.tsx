@@ -6,7 +6,7 @@ import { Button } from '../ui/button';
 import { Input } from '../ui/input';
 import { Label } from '../ui/label';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../ui/select';
-import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogTrigger, DialogFooter } from '../ui/dialog';
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogFooter } from '../ui/dialog';
 import { db, auth, handleFirestoreError, OperationType } from '../../lib/firebase';
 import { collection, addDoc, query, where, onSnapshot, serverTimestamp, deleteDoc, doc, updateDoc } from 'firebase/firestore';
 import { toast } from 'sonner';
@@ -23,6 +23,7 @@ interface Project {
   longitude?: number;
   altitude?: number;
   includeMonsoon?: boolean;
+  includeWinter?: boolean;
   summerDesignTemp?: number;
   summerDesignHumidity?: number;
   monsoonDesignTemp?: number;
@@ -61,6 +62,7 @@ export default function ProjectManager({ onSelectProject, userProfile }: { onSel
     longitude: 0,
     altitude: 0,
     includeMonsoon: false,
+    includeWinter: false,
     summerDesignTemp: 95,
     summerDesignHumidity: 50,
     monsoonDesignTemp: 85,
@@ -93,6 +95,7 @@ export default function ProjectManager({ onSelectProject, userProfile }: { onSel
         longitude: editingProject.longitude || 0,
         altitude: editingProject.altitude || 0,
         includeMonsoon: editingProject.includeMonsoon ?? false,
+        includeWinter: editingProject.includeWinter ?? false,
         summerDesignTemp: editingProject.summerDesignTemp || 95,
         summerDesignHumidity: editingProject.summerDesignHumidity || 50,
         monsoonDesignTemp: editingProject.monsoonDesignTemp || 85,
@@ -123,6 +126,7 @@ export default function ProjectManager({ onSelectProject, userProfile }: { onSel
         longitude: 0,
         altitude: 0,
         includeMonsoon: false,
+        includeWinter: false,
         summerDesignTemp: 95,
         summerDesignHumidity: 50,
         monsoonDesignTemp: 85,
@@ -198,6 +202,7 @@ export default function ProjectManager({ onSelectProject, userProfile }: { onSel
       const payload = {
         ...newProject,
         includeMonsoon: newProject.includeMonsoon,
+        includeWinter: newProject.includeWinter,
         insideSummerTemp: newProject.insideSummerTemp,
         insideSummerHumidity: newProject.insideSummerHumidity,
         insideMonsoonTemp: newProject.insideMonsoonTemp,
@@ -300,13 +305,20 @@ export default function ProjectManager({ onSelectProject, userProfile }: { onSel
         </div>
         
         {canCreate && (
-          <Dialog open={isModalOpen} onOpenChange={(open) => {
+          <Button
+            className="gap-2 bg-orange-600 hover:bg-orange-700"
+            onClick={() => { setEditingProject(null); setIsModalOpen(true); }}
+          >
+            <Plus className="w-4 h-4" /> New Project
+          </Button>
+        )}
+      </div>
+
+      {canCreate && (
+        <Dialog open={isModalOpen} onOpenChange={(open) => {
           setIsModalOpen(open);
           if (!open) setEditingProject(null);
         }}>
-          <DialogTrigger render={<Button className="gap-2 bg-orange-600 hover:bg-orange-700" />}>
-            <Plus className="w-4 h-4" /> New Project
-          </DialogTrigger>
           <DialogContent className="sm:max-w-[425px]">
             <DialogHeader>
               <DialogTitle>{editingProject ? 'Edit Project' : 'Create New Project'}</DialogTitle>
@@ -481,26 +493,39 @@ export default function ProjectManager({ onSelectProject, userProfile }: { onSel
                 </div>
               </div>
 
-              <div className="grid grid-cols-2 gap-4">
-                <div className="grid gap-2">
-                  <Label htmlFor="winterTemp">Winter Temp (°F)</Label>
-                  <Input 
-                    id="winterTemp" 
-                    type="number"
-                    value={newProject.winterDesignTemp}
-                    onChange={(e) => setNewProject({ ...newProject, winterDesignTemp: parseFloat(e.target.value) || 0 })}
-                  />
-                </div>
-                <div className="grid gap-2">
-                  <Label htmlFor="winterHum">Winter RH (%)</Label>
-                  <Input 
-                    id="winterHum" 
-                    type="number"
-                    value={newProject.winterDesignHumidity}
-                    onChange={(e) => setNewProject({ ...newProject, winterDesignHumidity: parseFloat(e.target.value) || 0 })}
-                  />
-                </div>
+              <div className="flex items-center justify-between rounded-md border border-blue-200 bg-blue-50 dark:bg-blue-950/20 dark:border-blue-800 px-3 py-2">
+                <Label htmlFor="includeWinter" className="font-medium text-blue-700 dark:text-blue-300">Include Winter Heating Calculation</Label>
+                <input
+                  id="includeWinter"
+                  type="checkbox"
+                  checked={newProject.includeWinter}
+                  onChange={(e) => setNewProject({ ...newProject, includeWinter: e.target.checked })}
+                  className="h-4 w-4"
+                />
               </div>
+
+              {newProject.includeWinter && (
+                <div className="grid grid-cols-2 gap-4">
+                  <div className="grid gap-2">
+                    <Label htmlFor="winterTemp">Winter Temp (°F)</Label>
+                    <Input
+                      id="winterTemp"
+                      type="number"
+                      value={newProject.winterDesignTemp}
+                      onChange={(e) => setNewProject({ ...newProject, winterDesignTemp: parseFloat(e.target.value) || 0 })}
+                    />
+                  </div>
+                  <div className="grid gap-2">
+                    <Label htmlFor="winterHum">Winter RH (%)</Label>
+                    <Input
+                      id="winterHum"
+                      type="number"
+                      value={newProject.winterDesignHumidity}
+                      onChange={(e) => setNewProject({ ...newProject, winterDesignHumidity: parseFloat(e.target.value) || 0 })}
+                    />
+                  </div>
+                </div>
+              )}
 
               <div className="flex items-center justify-between rounded-md border border-teal-200 bg-teal-50 px-3 py-2">
                 <Label htmlFor="includeMonsoon" className="font-medium text-teal-700">Include Monsoon Calculation</Label>
@@ -580,26 +605,28 @@ export default function ProjectManager({ onSelectProject, userProfile }: { onSel
                 </div>
               )}
 
-              <div className="grid grid-cols-2 gap-4">
-                <div className="grid gap-2">
-                  <Label htmlFor="winterIndoorTemp">Inside Winter Temp (°F)</Label>
-                  <Input 
-                    id="winterIndoorTemp" 
-                    type="number"
-                    value={newProject.insideWinterTemp}
-                    onChange={(e) => setNewProject({ ...newProject, insideWinterTemp: parseFloat(e.target.value) || 0 })}
-                  />
+              {newProject.includeWinter && (
+                <div className="grid grid-cols-2 gap-4">
+                  <div className="grid gap-2">
+                    <Label htmlFor="winterIndoorTemp">Inside Winter Temp (°F)</Label>
+                    <Input
+                      id="winterIndoorTemp"
+                      type="number"
+                      value={newProject.insideWinterTemp}
+                      onChange={(e) => setNewProject({ ...newProject, insideWinterTemp: parseFloat(e.target.value) || 0 })}
+                    />
+                  </div>
+                  <div className="grid gap-2">
+                    <Label htmlFor="winterIndoorHum">Inside Winter RH (%)</Label>
+                    <Input
+                      id="winterIndoorHum"
+                      type="number"
+                      value={newProject.insideWinterHumidity}
+                      onChange={(e) => setNewProject({ ...newProject, insideWinterHumidity: parseFloat(e.target.value) || 0 })}
+                    />
+                  </div>
                 </div>
-                <div className="grid gap-2">
-                  <Label htmlFor="winterIndoorHum">Inside Winter RH (%)</Label>
-                  <Input 
-                    id="winterIndoorHum" 
-                    type="number"
-                    value={newProject.insideWinterHumidity}
-                    onChange={(e) => setNewProject({ ...newProject, insideWinterHumidity: parseFloat(e.target.value) || 0 })}
-                  />
-                </div>
-              </div>
+              )}
             </div>
             <DialogFooter>
               <Button variant="outline" onClick={() => {
@@ -612,8 +639,7 @@ export default function ProjectManager({ onSelectProject, userProfile }: { onSel
             </DialogFooter>
           </DialogContent>
         </Dialog>
-        )}
-      </div>
+      )}
 
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
         {projects.length === 0 ? (
@@ -647,22 +673,26 @@ export default function ProjectManager({ onSelectProject, userProfile }: { onSel
                       <Building2 className="w-5 h-5 text-orange-600" />
                     </div>
                     <div className="flex gap-1 opacity-0 group-hover:opacity-100 transition-all">
-                      <Button 
-                        variant="ghost" 
-                        size="icon" 
-                        className="text-gray-400 hover:text-orange-600"
-                        onClick={(e) => handleEditProject(e, project)}
-                      >
-                        <Edit2 className="w-4 h-4" />
-                      </Button>
-                      <Button 
-                        variant="ghost" 
-                        size="icon" 
-                        className="text-gray-400 hover:text-red-500"
-                        onClick={(e) => handleDeleteProject(e, project.id)}
-                      >
-                        <Trash2 className="w-4 h-4" />
-                      </Button>
+                      {(userProfile?.role === 'Super' || project.userId === auth.currentUser?.uid) && canCreate && (
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          className="text-gray-400 hover:text-orange-600"
+                          onClick={(e) => handleEditProject(e, project)}
+                        >
+                          <Edit2 className="w-4 h-4" />
+                        </Button>
+                      )}
+                      {(userProfile?.role === 'Super' || project.userId === auth.currentUser?.uid) && (
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          className="text-gray-400 hover:text-red-500"
+                          onClick={(e) => handleDeleteProject(e, project.id)}
+                        >
+                          <Trash2 className="w-4 h-4" />
+                        </Button>
+                      )}
                     </div>
                   </div>
                   <CardTitle className="mt-4 text-xl">{project.name}</CardTitle>

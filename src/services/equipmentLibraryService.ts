@@ -35,6 +35,39 @@ export async function getAllLibraryItems(): Promise<EquipmentModel[]> {
   return items;
 }
 
+/**
+ * Fetch library items for one or more equipment types.
+ * Falls back to the static EQUIPMENT_CATALOG if the library is empty (not seeded yet).
+ */
+export async function getLibraryItemsByType(types: string | string[]): Promise<EquipmentModel[]> {
+  const typeSet = new Set(Array.isArray(types) ? types : [types]);
+  const snap = await getDocs(collection(db, GLOBAL_LIB_COLLECTION));
+  if (snap.empty) {
+    return EQUIPMENT_CATALOG.filter(m => typeSet.has(m.type as string));
+  }
+  const raw = snap.docs
+    .map(d => ({ id: d.id, ...d.data() } as EquipmentModel))
+    .filter(m => typeSet.has(m.type as string));
+
+  // Deduplicate: if the library was seeded multiple times, identical models get
+  // multiple Firestore docs. Keep the first occurrence per natural key.
+  const seen = new Set<string>();
+  const deduped: EquipmentModel[] = [];
+  for (const item of raw) {
+    const key = `${item.brand.toLowerCase()}|${String(item.type).toLowerCase()}|${(item.subType ?? '').toLowerCase()}|${item.modelSeries.toLowerCase()}|${item.capacityTR ?? ''}`;
+    if (!seen.has(key)) { seen.add(key); deduped.push(item); }
+  }
+
+  deduped.sort((a, b) => {
+    const brandCmp = a.brand.localeCompare(b.brand);
+    if (brandCmp !== 0) return brandCmp;
+    const subCmp = (a.subType ?? '').localeCompare(b.subType ?? '');
+    if (subCmp !== 0) return subCmp;
+    return (a.capacityTR ?? 0) - (b.capacityTR ?? 0);
+  });
+  return deduped;
+}
+
 // ─── Seed ─────────────────────────────────────────────────────────────────────
 
 /**
@@ -287,6 +320,36 @@ export async function migrateFromLegacyCollections(
   }
 
   return { migrated, skipped: existingSnap.docs.length, errors };
+}
+
+// ─── Legacy Cleanup ──────────────────────────────────────────────────────────
+
+/**
+ * Deletes all documents from the two legacy equipment collections.
+ * Call only after migrating any items you want to keep.
+ * Returns { deleted } count.
+ */
+export async function deleteAllLegacyEquipment(): Promise<{ deleted: number }> {
+  const LEGACY_COLLECTIONS = ['customEquipmentCatalog', 'customEquipment'];
+  const BATCH_SIZE = 400;
+  let deleted = 0;
+
+  for (const col of LEGACY_COLLECTIONS) {
+    let snap;
+    try {
+      snap = await getDocs(collection(db, col));
+    } catch {
+      continue;
+    }
+    const docs = snap.docs;
+    for (let i = 0; i < docs.length; i += BATCH_SIZE) {
+      const batch = writeBatch(db);
+      docs.slice(i, i + BATCH_SIZE).forEach(d => batch.delete(d.ref));
+      await batch.commit();
+      deleted += docs.slice(i, i + BATCH_SIZE).length;
+    }
+  }
+  return { deleted };
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────

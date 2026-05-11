@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
-import { db, auth, handleFirestoreError, OperationType } from '../../lib/firebase';
+import { db, auth, storage, handleFirestoreError, OperationType } from '../../lib/firebase';
+import { ref as storageRef, uploadBytesResumable, getDownloadURL } from 'firebase/storage';
 import {
   collection, addDoc, onSnapshot, doc, getDoc, getDocs, updateDoc, deleteDoc, setDoc,
   serverTimestamp, arrayUnion, arrayRemove, deleteField, query, where, orderBy,
@@ -20,6 +21,8 @@ import {
 } from '../../constants/equipment-catalog';
 import type { EquipmentModel } from '../../constants/equipment-catalog';
 import GlobalEquipmentLibrary from './GlobalEquipmentLibrary';
+import { getLibraryItemsByType, GLOBAL_LIB_COLLECTION } from '../../services/equipmentLibraryService';
+import { ComboboxInput } from '../ui/combobox-input';
 import { calculateCoilParameters, calculatePsychrometrics, EZ_OPTIONS, calcZoneVentilation, calcSystemVentilation62, calculateEnvelopeGain, calculateInternalGains, calculateVentilationLoad, calculateParasiticGains, getRecommendedAch } from '../../lib/hvac';
 import { calculateRoomVolume } from '../../lib/hvac/geometry';
 import SpecSheet from './SpecSheet';
@@ -147,17 +150,17 @@ function IDUPickerDialog({
   onSelect: (sel: IDUSelection) => void;
 }) {
   const [search, setSearch] = useState('');
-  const [filterSubType, setFilterSubType] = useState('all');
   const [filterBrand, setFilterBrand] = useState(lockedBrand ?? 'all');
-  const [extraBrands, setExtraBrands] = useState<string[]>([]);
-  const [addingBrand, setAddingBrand] = useState(false);
-  const [newBrandInput, setNewBrandInput] = useState('');
+  const [filterType, setFilterType] = useState('VRF-IDU');
+  const [filterSubType, setFilterSubType] = useState('all');
+  const [extraBrands] = useState<string[]>([]);
 
   // Custom creation form state
   const [showCustomForm, setShowCustomForm] = useState(false);
   const [savingCustomIDU, setSavingCustomIDU] = useState(false);
+  const [customType, setCustomType] = useState('VRF-IDU');
   const [customBrand, setCustomBrand] = useState('');
-  const [customSubType, setCustomSubType] = useState('Cassette');
+  const [customSubType, setCustomSubType] = useState('hi-wall');
   const [customModel, setCustomModel] = useState('');
   const [customTR, setCustomTR] = useState('');
   const [customCFM, setCustomCFM] = useState('');
@@ -167,44 +170,51 @@ function IDUPickerDialog({
   useEffect(() => {
     if (open) {
       setShowCustomForm(false);
+      setCustomType('VRF-IDU');
       setCustomBrand(lockedBrand ?? (filterBrand !== 'all' ? filterBrand : ''));
+      setCustomSubType('hi-wall');
       setCustomModel(''); setCustomTR(''); setCustomCFM(''); setCustomStaticPa('');
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
 
-  const [catalogCustomItems, setCatalogCustomItems] = useState<EquipmentModel[]>([]);
+  const [libraryIDUItems, setLibraryIDUItems] = useState<EquipmentModel[]>([]);
   useEffect(() => {
-    if (!open) { setCatalogCustomItems([]); return; }
-    getDocs(collection(db, 'customEquipmentCatalog')).then(snap => {
-      setCatalogCustomItems(
-        snap.docs
-          .map(d => ({ id: d.id, ...d.data() } as EquipmentModel))
-          .filter(m => m.type === 'VRF-IDU')
-      );
-    }).catch(() => {});
+    if (!open) return;
+    // Fetch all IDU-relevant types so the Type filter works just like the Global Library
+    getLibraryItemsByType(['VRF-IDU', 'FCU', 'AHU', 'DuctableSplit', 'Split'])
+      .then(items => setLibraryIDUItems(items.map(m => ({ ...m, subType: m.subType?.toLowerCase() }))))
+      .catch(() => {
+        setLibraryIDUItems(
+          EQUIPMENT_CATALOG.filter(m => ['VRF-IDU', 'FCU', 'AHU', 'DuctableSplit', 'Split'].includes(m.type as string))
+            .map(m => ({ ...m, subType: m.subType?.toLowerCase() }))
+        );
+      });
   }, [open]);
 
-  // Preferred brands first, then any others from catalog, then user-added
-  const catalogBrands = [...new Set(EQUIPMENT_CATALOG.filter(m => m.type === 'VRF-IDU').map(m => m.brand))];
+  // ── Cascading filter option lists (mirrors Global Equipment Library) ──────
+  // Brand list: preferred brands first, then library brands
+  const brandFilteredItems = libraryIDUItems;
+  const libraryBrands = [...new Set(brandFilteredItems.map(m => m.brand))];
   const allBrands = [
-    ...VRF_DEFAULT_BRANDS,
-    ...catalogBrands.filter(b => !VRF_DEFAULT_BRANDS.includes(b)),
-    ...extraBrands.filter(b => !VRF_DEFAULT_BRANDS.includes(b) && !catalogBrands.includes(b)),
+    ...VRF_DEFAULT_BRANDS.filter(b => libraryBrands.includes(b)),
+    ...libraryBrands.filter(b => !VRF_DEFAULT_BRANDS.includes(b)),
+    ...extraBrands.filter(b => !libraryBrands.includes(b)),
   ];
 
-  const addBrand = () => {
-    const b = newBrandInput.trim();
-    if (b && !allBrands.includes(b)) setExtraBrands(prev => [...prev, b]);
-    if (b) setFilterBrand(b);
-    setNewBrandInput('');
-    setAddingBrand(false);
-  };
+  // Type list: derived from items matching the selected brand
+  const afterBrandItems = libraryIDUItems
+    .filter(m => lockedBrand ? m.brand === lockedBrand : (filterBrand === 'all' || m.brand === filterBrand));
+  const allTypes = [...new Set(afterBrandItems.map(m => String(m.type)).filter(Boolean))].sort();
 
-  const allCatalogItems = [...EQUIPMENT_CATALOG.filter(m => m.type === 'VRF-IDU'), ...catalogCustomItems];
+  // Sub-type list: derived from items matching brand + type
+  const afterTypeItems = afterBrandItems
+    .filter(m => filterType === 'all' || String(m.type) === filterType);
+  const allSubTypes = [...new Set(afterTypeItems.map(m => m.subType).filter(Boolean))].sort((a, b) =>
+    (IDU_SUBTYPE_LABELS[a!] ?? a!).localeCompare(IDU_SUBTYPE_LABELS[b!] ?? b!));
 
-  const items = allCatalogItems
-    .filter(m => lockedBrand ? m.brand === lockedBrand : (filterBrand === 'all' || m.brand === filterBrand))
+  // Final visible items
+  const items = afterTypeItems
     .filter(m => filterSubType === 'all' || m.subType === filterSubType)
     .filter(m => !search || m.modelSeries.toLowerCase().includes(search.toLowerCase()) || m.brand.toLowerCase().includes(search.toLowerCase()))
     .sort((a, b) => {
@@ -213,8 +223,6 @@ function IDUPickerDialog({
            - order[getFitStatus(b.capacityTR, b.ratedAirflowCFM, requiredTR, designCFM)];
     });
 
-  const allSubTypes = [...new Set(allCatalogItems.map(m => m.subType).filter(Boolean))];
-
   const submitCustom = async () => {
     const tr = parseFloat(customTR);
     if (!customBrand.trim() || !customModel.trim() || !tr || tr <= 0) return;
@@ -222,7 +230,7 @@ function IDUPickerDialog({
     try {
       const payload: Record<string, any> = {
         brand: customBrand.trim(),
-        type: 'VRF-IDU',
+        type: customType.trim() || 'VRF-IDU',
         subType: customSubType,
         modelSeries: customModel.trim(),
         capacityTR: tr,
@@ -235,8 +243,12 @@ function IDUPickerDialog({
       const esp = parseFloat(customStaticPa);
       if (!isNaN(esp) && esp > 0) payload.staticPressurePa = esp;
 
-      const docRef = await addDoc(collection(db, 'customEquipmentCatalog'), payload);
-      toast.success(`${payload.brand} ${payload.modelSeries} saved to catalog`);
+      const docRef = await addDoc(collection(db, GLOBAL_LIB_COLLECTION), {
+        ...payload,
+        source: 'user',
+        addedBy: auth.currentUser?.uid ?? null,
+      });
+      toast.success(`${payload.brand} ${payload.modelSeries} saved to Global Library`);
       onSelect({
         modelId: docRef.id,
         brand: payload.brand,
@@ -247,7 +259,7 @@ function IDUPickerDialog({
       });
       onClose();
     } catch (err) {
-      handleFirestoreError(err, OperationType.WRITE, 'customEquipmentCatalog');
+      handleFirestoreError(err, OperationType.WRITE, GLOBAL_LIB_COLLECTION);
     } finally {
       setSavingCustomIDU(false);
     }
@@ -255,7 +267,7 @@ function IDUPickerDialog({
 
   return (
     <Dialog open={open} onOpenChange={v => { if (!v) onClose(); }}>
-      <DialogContent className="max-w-4xl max-h-[88vh] flex flex-col p-0 dark:bg-slate-900">
+      <DialogContent className="sm:max-w-5xl max-h-[88vh] flex flex-col p-0 dark:bg-slate-900">
         <DialogHeader className="px-6 pt-5 pb-4 border-b dark:border-slate-700 bg-slate-50/60 dark:bg-slate-800/60">
           <DialogTitle className="text-base font-bold flex items-center gap-2 dark:text-slate-100">
             Select IDU — <span className="text-blue-600 dark:text-blue-400">{roomName}</span>
@@ -275,44 +287,38 @@ function IDUPickerDialog({
               <Input className="pl-9 h-9 text-sm" placeholder="Search model…" value={search} onChange={e => setSearch(e.target.value)} />
             </div>
             {!lockedBrand && (
-              <div className="flex items-center gap-2">
-                <Select value={filterBrand} onValueChange={v => setFilterBrand(v ?? 'all')}>
-                  <SelectTrigger className="h-9 w-40 text-sm"><SelectValue placeholder="Brand" /></SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="all">All Brands</SelectItem>
-                    {allBrands.map(b => <SelectItem key={b} value={b}>{b}</SelectItem>)}
-                  </SelectContent>
-                </Select>
-                {addingBrand ? (
-                  <div className="flex items-center gap-1">
-                    <Input autoFocus className="h-8 w-28 text-xs" placeholder="Brand name…"
-                      value={newBrandInput} onChange={e => setNewBrandInput(e.target.value)}
-                      onKeyDown={e => { if (e.key === 'Enter') addBrand(); if (e.key === 'Escape') setAddingBrand(false); }} />
-                    <Button size="sm" className="h-8 px-2 text-xs" onClick={addBrand}>Add</Button>
-                  </div>
-                ) : (
-                  <Button size="sm" variant="outline" className="h-8 px-2 text-xs whitespace-nowrap"
-                    onClick={() => setAddingBrand(true)}>+ Brand</Button>
-                )}
-              </div>
+              <Select value={filterBrand} onValueChange={v => { setFilterBrand(v ?? 'all'); setFilterType('VRF-IDU'); setFilterSubType('all'); }}>
+                <SelectTrigger className="h-9 w-40 text-sm"><SelectValue placeholder="All Brands" /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all">All Brands</SelectItem>
+                  {allBrands.map(b => <SelectItem key={b} value={b}>{b}</SelectItem>)}
+                </SelectContent>
+              </Select>
             )}
-            <Select value={filterSubType} onValueChange={v => setFilterSubType(v ?? 'all')}>
-              <SelectTrigger className="h-8 w-40 text-xs"><SelectValue placeholder="Type" /></SelectTrigger>
+            <Select value={filterType} onValueChange={v => { setFilterType(v ?? 'all'); setFilterSubType('all'); }}>
+              <SelectTrigger className="h-9 w-36 text-sm"><SelectValue placeholder="All Types" /></SelectTrigger>
               <SelectContent>
                 <SelectItem value="all">All Types</SelectItem>
+                {allTypes.map(t => <SelectItem key={t} value={t}>{t}</SelectItem>)}
+              </SelectContent>
+            </Select>
+            <Select value={filterSubType} onValueChange={v => setFilterSubType(v ?? 'all')}>
+              <SelectTrigger className="h-9 w-48 text-sm"><SelectValue placeholder="All Sub-Types" /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">All Sub-Types</SelectItem>
                 {allSubTypes.map(s => <SelectItem key={s} value={s!}>{IDU_SUBTYPE_LABELS[s!] ?? s}</SelectItem>)}
               </SelectContent>
             </Select>
           </div>
         </DialogHeader>
 
-        <div className="overflow-y-auto flex-1">
-          <Table>
+        <div className="overflow-y-auto flex-1 min-h-0">
+          <Table containerClassName="overflow-x-clip">
             <TableHeader className="sticky top-0 bg-white dark:bg-slate-900 z-10 shadow-sm">
               <TableRow className="bg-slate-100 dark:bg-slate-700 text-xs font-semibold uppercase tracking-wide">
                 <TableHead className="py-3">Brand</TableHead>
-                <TableHead className="py-3">Type</TableHead>
-                <TableHead className="py-3">Model</TableHead>
+                <TableHead className="py-3 hidden sm:table-cell">Type</TableHead>
+                <TableHead className="py-3 hidden sm:table-cell">Model</TableHead>
                 <TableHead className="text-right py-3">TR</TableHead>
                 <TableHead className="text-right py-3">CFM</TableHead>
                 <TableHead className="text-center py-3">Fit</TableHead>
@@ -328,8 +334,8 @@ function IDUPickerDialog({
                 return (
                   <TableRow key={item.id} className={cn('hover:bg-blue-50/40 dark:hover:bg-blue-950/20', fit === 'ok' && 'bg-emerald-50/30 dark:bg-emerald-950/20', fit === 'undersized' && 'opacity-60')}>
                     <TableCell className="font-bold text-sm py-3">{item.brand}</TableCell>
-                    <TableCell className="text-sm text-slate-500 dark:text-slate-400 py-3">{IDU_SUBTYPE_LABELS[item.subType ?? ''] ?? item.subType}</TableCell>
-                    <TableCell className="font-medium text-sm py-3">{item.modelSeries}</TableCell>
+                    <TableCell className="text-sm text-slate-500 dark:text-slate-400 py-3 hidden sm:table-cell">{IDU_SUBTYPE_LABELS[item.subType ?? ''] ?? item.subType}</TableCell>
+                    <TableCell className="font-medium text-sm py-3 hidden sm:table-cell">{item.modelSeries}</TableCell>
                     <TableCell className="text-right font-mono text-sm py-3">{item.capacityTR}</TableCell>
                     <TableCell className="text-right font-mono text-sm py-3">{item.ratedAirflowCFM ? Math.round(item.ratedAirflowCFM).toLocaleString() : '—'}</TableCell>
                     <TableCell className="text-center py-3"><FitBadge status={fit} /></TableCell>
@@ -368,21 +374,36 @@ function IDUPickerDialog({
               <p className="text-xs text-slate-400 dark:text-slate-500">Enter model specs — this selection is saved to the project equipment schedule.</p>
               <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
                 <div className="space-y-1">
-                  <label className="text-sm font-semibold text-slate-600 dark:text-slate-400">Brand *</label>
-                  <Input className="h-8 text-xs" placeholder="e.g. Blue Star" value={customBrand} onChange={e => setCustomBrand(e.target.value)} />
+                  <label className="text-sm font-semibold text-slate-600 dark:text-slate-400">Type *</label>
+                  <ComboboxInput
+                    inputClassName="h-8 text-xs"
+                    placeholder="e.g. VRF-IDU"
+                    value={customType}
+                    onChange={setCustomType}
+                    options={['VRF-IDU', 'FCU', 'AHU', 'DuctableSplit', 'Split']}
+                  />
                 </div>
                 <div className="space-y-1">
-                  <label className="text-sm font-semibold text-slate-600 dark:text-slate-400">Sub-Type *</label>
-                  <Select value={customSubType} onValueChange={setCustomSubType}>
-                    <SelectTrigger className="h-8 text-xs"><SelectValue /></SelectTrigger>
-                    <SelectContent>
-                      {Object.entries(IDU_SUBTYPE_LABELS).map(([k, v]) => (
-                        <SelectItem key={k} value={k}>{v}</SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
+                  <label className="text-sm font-semibold text-slate-600 dark:text-slate-400">Brand *</label>
+                  <ComboboxInput
+                    inputClassName="h-8 text-xs"
+                    placeholder="e.g. Blue Star"
+                    value={customBrand}
+                    onChange={setCustomBrand}
+                    options={allBrands}
+                  />
                 </div>
-                <div className="space-y-1 col-span-2 sm:col-span-1">
+                <div className="space-y-1">
+                  <label className="text-sm font-semibold text-slate-600 dark:text-slate-400">Sub-Type</label>
+                  <ComboboxInput
+                    inputClassName="h-8 text-xs"
+                    placeholder="e.g. hi-wall"
+                    value={customSubType}
+                    onChange={setCustomSubType}
+                    options={[...new Set([...Object.keys(IDU_SUBTYPE_LABELS), ...allSubTypes])].sort()}
+                  />
+                </div>
+                <div className="space-y-1">
                   <label className="text-sm font-semibold text-slate-600 dark:text-slate-400">Model / Series *</label>
                   <Input className="h-8 text-xs" placeholder="e.g. BI18DB" value={customModel} onChange={e => setCustomModel(e.target.value)} />
                 </div>
@@ -428,17 +449,16 @@ function ODUPickerDialog({
 }) {
   const [search, setSearch] = useState('');
   const [filterBrand, setFilterBrand] = useState(lockedBrand ?? 'all');
+  const [filterType, setFilterType] = useState('VRF-ODU');
   const [filterDischarge, setFilterDischarge] = useState('all');
   const [filterCompressor, setFilterCompressor] = useState('all');
-  const [extraBrands, setExtraBrands] = useState<string[]>([]);
-  const [addingBrand, setAddingBrand] = useState(false);
-  const [newBrandInput, setNewBrandInput] = useState('');
   const [moduleCount, setModuleCount] = useState<Record<string, number>>({});
   const [combination, setCombination] = useState<ODUCombinationUnit[]>([]);
 
   // Custom ODU form
   const [showCustomODU, setShowCustomODU] = useState(false);
   const [savingCustomODU, setSavingCustomODU] = useState(false);
+  const [customODUType, setCustomODUType] = useState('VRF-ODU');
   const [customODUBrand, setCustomODUBrand] = useState('');
   const [customODUModel, setCustomODUModel] = useState('');
   const [customODUTR, setCustomODUTR] = useState('');
@@ -451,22 +471,19 @@ function ODUPickerDialog({
       setModuleCount({});
       setCombination([]);
       setShowCustomODU(false);
+      setCustomODUType('VRF-ODU');
       setCustomODUBrand(lockedBrand ?? '');
       setCustomODUModel(''); setCustomODUTR('');
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
 
-  const [catalogCustomODUs, setCatalogCustomODUs] = useState<EquipmentModel[]>([]);
+  const [libraryODUItems, setLibraryODUItems] = useState<EquipmentModel[]>([]);
   useEffect(() => {
-    if (!open) { setCatalogCustomODUs([]); return; }
-    getDocs(collection(db, 'customEquipmentCatalog')).then(snap => {
-      setCatalogCustomODUs(
-        snap.docs
-          .map(d => ({ id: d.id, ...d.data() } as EquipmentModel))
-          .filter(m => m.type === 'VRF-ODU')
-      );
-    }).catch(() => {});
+    if (!open) return;
+    getLibraryItemsByType(['VRF-ODU', 'Chiller', 'CoolingTower']).then(setLibraryODUItems).catch(() => {
+      setLibraryODUItems(EQUIPMENT_CATALOG.filter(m => m.type === 'VRF-ODU'));
+    });
   }, [open]);
 
   const comboTotalUnits = combination.reduce((s, u) => s + u.quantity, 0);
@@ -513,23 +530,21 @@ function ODUPickerDialog({
     onClose();
   };
 
-  const catalogBrands = [...new Set(EQUIPMENT_CATALOG.filter(m => m.type === 'VRF-ODU').map(m => m.brand))];
+  // ── Cascading filter option lists (mirrors Global Equipment Library) ──────
+  const oduLibraryBrands = [...new Set(libraryODUItems.map(m => m.brand))];
   const allBrands = [
-    ...VRF_DEFAULT_BRANDS,
-    ...catalogBrands.filter(b => !VRF_DEFAULT_BRANDS.includes(b)),
-    ...extraBrands.filter(b => !VRF_DEFAULT_BRANDS.includes(b) && !catalogBrands.includes(b)),
+    ...VRF_DEFAULT_BRANDS.filter(b => oduLibraryBrands.includes(b)),
+    ...oduLibraryBrands.filter(b => !VRF_DEFAULT_BRANDS.includes(b)),
   ];
 
-  const addBrand = () => {
-    const b = newBrandInput.trim();
-    if (b && !allBrands.includes(b)) setExtraBrands(prev => [...prev, b]);
-    if (b) setFilterBrand(b);
-    setNewBrandInput('');
-    setAddingBrand(false);
-  };
+  // Type list: derived from items matching the selected brand
+  const afterBrandItems = libraryODUItems
+    .filter(m => lockedBrand ? m.brand === lockedBrand : (filterBrand === 'all' || m.brand === filterBrand));
+  const allODUTypes = [...new Set(afterBrandItems.map(m => String(m.type)).filter(Boolean))].sort();
 
-  const items = [...EQUIPMENT_CATALOG.filter(m => m.type === 'VRF-ODU'), ...catalogCustomODUs]
-    .filter(m => lockedBrand ? m.brand === lockedBrand : (filterBrand === 'all' || m.brand === filterBrand))
+  // Final visible items: brand → type → discharge → compressor → search
+  const items = afterBrandItems
+    .filter(m => filterType === 'all' || String(m.type) === filterType)
     .filter(m => filterDischarge === 'all' || m.dischargeType === filterDischarge)
     .filter(m => filterCompressor === 'all' || m.compressorType === filterCompressor)
     .filter(m => !search || m.modelSeries.toLowerCase().includes(search.toLowerCase()))
@@ -550,7 +565,7 @@ function ODUPickerDialog({
     try {
       const payload: Record<string, any> = {
         brand: customODUBrand.trim(),
-        type: 'VRF-ODU',
+        type: customODUType.trim() || 'VRF-ODU',
         modelSeries: customODUModel.trim(),
         capacityTR: tr,
         capacityBTU: Math.round(tr * 12000),
@@ -559,8 +574,12 @@ function ODUPickerDialog({
         userId: auth.currentUser?.uid ?? null,
         createdAt: serverTimestamp(),
       };
-      const docRef = await addDoc(collection(db, 'customEquipmentCatalog'), payload);
-      toast.success(`${payload.brand} ${payload.modelSeries} saved to catalog`);
+      const docRef = await addDoc(collection(db, GLOBAL_LIB_COLLECTION), {
+        ...payload,
+        source: 'user',
+        addedBy: auth.currentUser?.uid ?? null,
+      });
+      toast.success(`${payload.brand} ${payload.modelSeries} saved to Global Library`);
       onSelect({
         modelId: docRef.id,
         brand: payload.brand,
@@ -571,7 +590,7 @@ function ODUPickerDialog({
       });
       onClose();
     } catch (err) {
-      handleFirestoreError(err, OperationType.WRITE, 'customEquipmentCatalog');
+      handleFirestoreError(err, OperationType.WRITE, GLOBAL_LIB_COLLECTION);
     } finally {
       setSavingCustomODU(false);
     }
@@ -579,7 +598,7 @@ function ODUPickerDialog({
 
   return (
     <Dialog open={open} onOpenChange={v => { if (!v) onClose(); }}>
-      <DialogContent className="max-w-3xl max-h-[85vh] flex flex-col p-0 dark:bg-slate-900">
+      <DialogContent className="sm:max-w-5xl max-h-[85vh] flex flex-col p-0 dark:bg-slate-900">
         <DialogHeader className="px-5 pt-5 pb-3 border-b dark:border-slate-700">
           <DialogTitle className="text-sm font-bold dark:text-slate-100">
             Select ODU
@@ -596,27 +615,21 @@ function ODUPickerDialog({
               <Input className="pl-8 h-8 text-xs" placeholder="Search model…" value={search} onChange={e => setSearch(e.target.value)} />
             </div>
             {!lockedBrand && (
-              <div className="flex items-center gap-1.5">
-                <Select value={filterBrand} onValueChange={v => setFilterBrand(v ?? 'all')}>
-                  <SelectTrigger className="h-8 w-36 text-xs"><SelectValue placeholder="Brand" /></SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="all">All Brands</SelectItem>
-                    {allBrands.map(b => <SelectItem key={b} value={b}>{b}</SelectItem>)}
-                  </SelectContent>
-                </Select>
-                {addingBrand ? (
-                  <div className="flex items-center gap-1">
-                    <Input autoFocus className="h-8 w-28 text-xs" placeholder="Brand name…"
-                      value={newBrandInput} onChange={e => setNewBrandInput(e.target.value)}
-                      onKeyDown={e => { if (e.key === 'Enter') addBrand(); if (e.key === 'Escape') setAddingBrand(false); }} />
-                    <Button size="sm" className="h-8 px-2 text-xs" onClick={addBrand}>Add</Button>
-                  </div>
-                ) : (
-                  <Button size="sm" variant="outline" className="h-8 px-2 text-xs whitespace-nowrap"
-                    onClick={() => setAddingBrand(true)}>+ Brand</Button>
-                )}
-              </div>
+              <Select value={filterBrand} onValueChange={v => { setFilterBrand(v ?? 'all'); setFilterType('VRF-ODU'); }}>
+                <SelectTrigger className="h-8 w-36 text-xs"><SelectValue placeholder="All Brands" /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all">All Brands</SelectItem>
+                  {allBrands.map(b => <SelectItem key={b} value={b}>{b}</SelectItem>)}
+                </SelectContent>
+              </Select>
             )}
+            <Select value={filterType} onValueChange={v => setFilterType(v ?? 'all')}>
+              <SelectTrigger className="h-8 w-32 text-xs"><SelectValue placeholder="All Types" /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">All Types</SelectItem>
+                {allODUTypes.map(t => <SelectItem key={t} value={t}>{t}</SelectItem>)}
+              </SelectContent>
+            </Select>
             <Select value={filterDischarge} onValueChange={v => setFilterDischarge(v ?? 'all')}>
               <SelectTrigger className="h-8 w-36 text-xs"><SelectValue placeholder="Discharge" /></SelectTrigger>
               <SelectContent>
@@ -680,18 +693,18 @@ function ODUPickerDialog({
           </div>
         )}
 
-        <div className="overflow-y-auto flex-1">
-          <Table>
+        <div className="overflow-y-auto flex-1 min-h-0">
+          <Table containerClassName="overflow-x-clip">
             <TableHeader className="sticky top-0 bg-white dark:bg-slate-900 z-10">
               <TableRow className="bg-slate-50 dark:bg-slate-800 text-xs uppercase">
                 <TableHead>Brand</TableHead>
-                <TableHead>Model</TableHead>
-                <TableHead>Discharge</TableHead>
-                <TableHead>Type</TableHead>
+                <TableHead className="hidden sm:table-cell">Model</TableHead>
+                <TableHead className="hidden sm:table-cell">Discharge</TableHead>
+                <TableHead className="hidden sm:table-cell">Type</TableHead>
                 <TableHead className="text-right">TR/Unit</TableHead>
                 <TableHead className="text-center">Modules</TableHead>
                 <TableHead className="text-right">Eff. TR</TableHead>
-                <TableHead className="text-right">EER</TableHead>
+                <TableHead className="text-right hidden sm:table-cell">EER</TableHead>
                 <TableHead className="w-28"></TableHead>
               </TableRow>
             </TableHeader>
@@ -708,7 +721,7 @@ function ODUPickerDialog({
                 return (
                   <TableRow key={item.id} className={cn('hover:bg-blue-50/30 dark:hover:bg-blue-950/20', sufficient && 'bg-emerald-50/20 dark:bg-emerald-950/20', !sufficient && 'opacity-50')}>
                     <TableCell className="font-bold text-xs">{item.brand}</TableCell>
-                    <TableCell className="font-medium text-xs">
+                    <TableCell className="font-medium text-xs hidden sm:table-cell">
                       {item.modelSeries}
                       {item.isModular && (
                         <span className="ml-1.5 text-sm font-bold px-1 py-0.5 rounded bg-purple-100 dark:bg-purple-900/30 text-purple-700 dark:text-purple-300 border border-purple-200 dark:border-purple-700">
@@ -716,8 +729,8 @@ function ODUPickerDialog({
                         </span>
                       )}
                     </TableCell>
-                    <TableCell className="text-xs capitalize">{item.dischargeType ?? '—'}</TableCell>
-                    <TableCell className="text-xs">{item.compressorType === 'heat-pump' ? 'Heat Pump' : 'Cooling Only'}</TableCell>
+                    <TableCell className="text-xs capitalize hidden sm:table-cell">{item.dischargeType ?? '—'}</TableCell>
+                    <TableCell className="text-xs hidden sm:table-cell">{item.compressorType === 'heat-pump' ? 'Heat Pump' : 'Cooling Only'}</TableCell>
                     <TableCell className="text-right font-mono text-sm">{item.capacityTR}</TableCell>
                     <TableCell className="text-center py-1">
                       {item.isModular ? (
@@ -739,11 +752,11 @@ function ODUPickerDialog({
                     <TableCell className={cn('text-right font-mono text-sm font-bold', sufficient ? 'text-emerald-700' : '')}>
                       {mods > 1 ? `${mods}×${item.capacityTR}=${effectiveTR}` : item.capacityTR}
                     </TableCell>
-                    <TableCell className="text-right font-mono text-sm">{item.eer ?? '—'}</TableCell>
+                    <TableCell className="text-right font-mono text-sm hidden sm:table-cell">{item.eer ?? '—'}</TableCell>
                     <TableCell>
                       <div className="flex items-center gap-1">
                         <Button size="sm" variant={sufficient ? 'default' : 'outline'} className="h-8 text-sm px-2"
-                          disabled={!sufficient || combination.length > 0}
+                          disabled={combination.length > 0}
                           onClick={() => {
                             const sel: ODUSelection = {
                               modelId: item.id, brand: item.brand, modelSeries: item.modelSeries,
@@ -754,7 +767,7 @@ function ODUPickerDialog({
                             onSelect(sel);
                             onClose();
                           }}>
-                          Select
+                          {sufficient ? 'Select' : '⚠ Select Anyway'}
                         </Button>
                         <Button size="sm" variant="outline"
                           className={cn('h-8 text-sm px-2', inCombo ? 'border-purple-400 text-purple-700 bg-purple-50 dark:bg-purple-950/20 dark:border-purple-700 dark:text-purple-300' : 'border-slate-300 dark:border-slate-600 text-slate-600 dark:text-slate-400')}
@@ -790,8 +803,24 @@ function ODUPickerDialog({
               <p className="text-xs text-slate-400 dark:text-slate-500">Enter ODU specs — saved to the project equipment schedule.</p>
               <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
                 <div className="space-y-1">
+                  <label className="text-sm font-semibold text-slate-600 dark:text-slate-400">Type *</label>
+                  <ComboboxInput
+                    inputClassName="h-8 text-xs"
+                    placeholder="e.g. VRF-ODU"
+                    value={customODUType}
+                    onChange={setCustomODUType}
+                    options={['VRF-ODU', 'Chiller', 'CoolingTower', 'Boiler']}
+                  />
+                </div>
+                <div className="space-y-1">
                   <label className="text-sm font-semibold text-slate-600 dark:text-slate-400">Brand *</label>
-                  <Input className="h-8 text-xs" placeholder="e.g. Blue Star" value={customODUBrand} onChange={e => setCustomODUBrand(e.target.value)} />
+                  <ComboboxInput
+                    inputClassName="h-8 text-xs"
+                    placeholder="e.g. Blue Star"
+                    value={customODUBrand}
+                    onChange={setCustomODUBrand}
+                    options={allBrands}
+                  />
                 </div>
                 <div className="space-y-1 col-span-2 sm:col-span-1">
                   <label className="text-sm font-semibold text-slate-600 dark:text-slate-400">Model / Series *</label>
@@ -914,16 +943,21 @@ function UnitPickerDialog({
   const isAHU     = systemType === 'AHU';
   const isChiller = systemType === 'Chiller';
 
-  const subTypes = [...new Set(
-    EQUIPMENT_CATALOG.filter(m => m.type === systemType).map(m => m.subType).filter(Boolean)
-  )];
+  const [libraryPkgItems, setLibraryPkgItems] = useState<EquipmentModel[]>([]);
+  useEffect(() => {
+    if (!open) return;
+    getLibraryItemsByType(systemType).then(setLibraryPkgItems).catch(() => {
+      setLibraryPkgItems(EQUIPMENT_CATALOG.filter(m => m.type === systemType));
+    });
+  }, [open, systemType]);
 
-  const matchedCustom = customItems
+  const subTypes = [...new Set(libraryPkgItems.map(m => m.subType).filter(Boolean))];
+
+  const matchedCustom = (customItems ?? [])
     .filter(m => m.type === systemType)
     .filter(m => !search || m.modelSeries.toLowerCase().includes(search.toLowerCase()) || m.brand.toLowerCase().includes(search.toLowerCase()));
 
-  const items = EQUIPMENT_CATALOG
-    .filter(m => m.type === systemType)
+  const items = libraryPkgItems
     .filter(m => systemType !== 'Package' || !packageSubType || packageSubType === 'all' || m.subType === packageSubType)
     .filter(m => filterSubType === 'all' || m.subType === filterSubType)
     .filter(m => !search || m.modelSeries.toLowerCase().includes(search.toLowerCase()) || m.brand.toLowerCase().includes(search.toLowerCase()))
@@ -946,7 +980,7 @@ function UnitPickerDialog({
 
   return (
     <Dialog open={open} onOpenChange={v => { if (!v) onClose(); }}>
-      <DialogContent className="max-w-4xl max-h-[85vh] flex flex-col p-0 dark:bg-slate-900">
+      <DialogContent className="sm:max-w-5xl max-h-[85vh] flex flex-col p-0 dark:bg-slate-900">
         <DialogHeader className="px-5 pt-5 pb-3 border-b dark:border-slate-700">
           <DialogTitle className="text-sm font-bold dark:text-slate-100">{dialogTitle}</DialogTitle>
           {requiredTR > 0 && (
@@ -1071,16 +1105,16 @@ function UnitPickerDialog({
           </div>
         )}
 
-        <div className="overflow-y-auto flex-1">
-          <Table>
+        <div className="overflow-y-auto flex-1 min-h-0">
+          <Table containerClassName="overflow-x-clip">
             <TableHeader className="sticky top-0 bg-white dark:bg-slate-900 z-10">
               <TableRow className="bg-slate-50 dark:bg-slate-800 text-xs uppercase">
                 <TableHead>Brand</TableHead>
-                <TableHead>Model</TableHead>
-                <TableHead>Sub-Type</TableHead>
+                <TableHead className="hidden sm:table-cell">Model</TableHead>
+                <TableHead className="hidden sm:table-cell">Sub-Type</TableHead>
                 <TableHead className="text-right">TR</TableHead>
                 {!isChiller && <TableHead className="text-right">CFM</TableHead>}
-                {isAHU && <TableHead className="text-right">ESP Pa</TableHead>}
+                {isAHU && <TableHead className="text-right hidden sm:table-cell">ESP Pa</TableHead>}
                 {!isChiller && <TableHead className="text-center">Fit</TableHead>}
                 <TableHead className="w-16"></TableHead>
               </TableRow>
@@ -1102,18 +1136,17 @@ function UnitPickerDialog({
                 return (
                   <TableRow key={item.id} className={cn('bg-violet-50/30 dark:bg-violet-950/20 hover:bg-violet-50 dark:hover:bg-violet-950/30', !sufficient && 'opacity-55')}>
                     <TableCell className="font-bold text-xs text-violet-700 dark:text-violet-300">{item.brand}</TableCell>
-                    <TableCell className="font-medium text-xs">
+                    <TableCell className="font-medium text-xs hidden sm:table-cell">
                       {item.modelSeries}
                       <Badge className="ml-1.5 text-xs px-1 py-0 bg-violet-100 dark:bg-violet-900/30 text-violet-700 dark:text-violet-300 border-violet-200 dark:border-violet-700">Custom</Badge>
                     </TableCell>
-                    <TableCell className="text-xs text-slate-500 dark:text-slate-400 capitalize">{item.subType ?? '—'}</TableCell>
+                    <TableCell className="text-xs text-slate-500 dark:text-slate-400 capitalize hidden sm:table-cell">{item.subType ?? '—'}</TableCell>
                     <TableCell className="text-right font-mono text-sm font-semibold">{item.capacityTR}</TableCell>
                     {!isChiller && <TableCell className="text-right font-mono text-sm">{item.ratedAirflowCFM ? Math.round(item.ratedAirflowCFM).toLocaleString() : '—'}</TableCell>}
-                    {isAHU && <TableCell className="text-right font-mono text-sm text-orange-700 font-semibold">{(item as any).staticPressurePa ?? '—'}</TableCell>}
+                    {isAHU && <TableCell className="text-right font-mono text-sm text-orange-700 font-semibold hidden sm:table-cell">{(item as any).staticPressurePa ?? '—'}</TableCell>}
                     {!isChiller && <TableCell className="text-center"><FitBadge status={fit} /></TableCell>}
                     <TableCell>
                       <Button size="sm" variant={sufficient ? 'default' : 'outline'} className="h-8 text-sm px-2"
-                        disabled={!sufficient}
                         onClick={() => {
                           const sel: SingleUnitSelection = {
                             modelId: item.id, brand: item.brand, modelSeries: item.modelSeries,
@@ -1123,7 +1156,7 @@ function UnitPickerDialog({
                           onSelect(sel);
                           onClose();
                         }}>
-                        Select
+                        {sufficient ? 'Select' : '⚠ Select Anyway'}
                       </Button>
                     </TableCell>
                   </TableRow>
@@ -1151,15 +1184,14 @@ function UnitPickerDialog({
                     !sufficient && 'opacity-55',
                   )}>
                     <TableCell className="font-bold text-xs">{item.brand}</TableCell>
-                    <TableCell className="font-medium text-xs">{item.modelSeries}</TableCell>
-                    <TableCell className="text-xs text-slate-500 dark:text-slate-400 capitalize">{item.subType ?? '—'}</TableCell>
+                    <TableCell className="font-medium text-xs hidden sm:table-cell">{item.modelSeries}</TableCell>
+                    <TableCell className="text-xs text-slate-500 dark:text-slate-400 capitalize hidden sm:table-cell">{item.subType ?? '—'}</TableCell>
                     <TableCell className="text-right font-mono text-sm font-semibold">{item.capacityTR}</TableCell>
                     {!isChiller && <TableCell className="text-right font-mono text-sm">{item.ratedAirflowCFM ? Math.round(item.ratedAirflowCFM).toLocaleString() : '—'}</TableCell>}
-                    {isAHU && <TableCell className="text-right font-mono text-sm text-orange-700 font-semibold">{(item as any).staticPressurePa ?? '—'}</TableCell>}
+                    {isAHU && <TableCell className="text-right font-mono text-sm text-orange-700 font-semibold hidden sm:table-cell">{(item as any).staticPressurePa ?? '—'}</TableCell>}
                     {!isChiller && <TableCell className="text-center"><FitBadge status={fit} /></TableCell>}
                     <TableCell>
                       <Button size="sm" variant={sufficient ? 'default' : 'outline'} className="h-8 text-sm px-2"
-                        disabled={!sufficient}
                         onClick={() => {
                           const sel: SingleUnitSelection = {
                             modelId: item.id, brand: item.brand, modelSeries: item.modelSeries,
@@ -1169,7 +1201,7 @@ function UnitPickerDialog({
                           onSelect(sel);
                           onClose();
                         }}>
-                        Select
+                        {sufficient ? 'Select' : '⚠ Select Anyway'}
                       </Button>
                     </TableCell>
                   </TableRow>
@@ -1398,11 +1430,9 @@ export default function EquipmentSelection({
   // Active tab — controlled so Summary tab can jump back to System Design
   const [activeTab, setActiveTab] = useState('systems');
 
-  // Mock drawings
-  const drawings = [
-    { id: '1', name: 'Ground Floor Civil Layout', type: 'Civil', format: 'PDF', version: 'V1.0' },
-    { id: '2', name: 'HVAC Ducting Layout - Zone A', type: 'HVAC', format: 'DWG', version: 'V2.1' },
-  ];
+  const [drawings, setDrawings] = useState<{ id: string; name: string; type: string; format: string; version: string; downloadURL: string; uploadedAt?: any }[]>([]);
+  const [uploadingDrawing, setUploadingDrawing] = useState(false);
+  const drawingFileRef = useRef<HTMLInputElement>(null);
 
   // ── Firestore listeners ────────────────────────────────────────────────────
 
@@ -1537,6 +1567,25 @@ export default function EquipmentSelection({
     return () => unsubZones();
   }, [project?.id]);
 
+  // Drawings listener — no orderBy to avoid needing a Firestore index; sort in memory
+  useEffect(() => {
+    if (!project?.id) return;
+    const unsub = onSnapshot(
+      collection(db, 'projects', project.id, 'drawings'),
+      snap => {
+        const docs = snap.docs.map(d => ({ id: d.id, ...d.data() } as any));
+        docs.sort((a, b) => {
+          const ta = a.uploadedAt?.toMillis?.() ?? 0;
+          const tb = b.uploadedAt?.toMillis?.() ?? 0;
+          return tb - ta;
+        });
+        setDrawings(docs);
+      },
+      err => handleFirestoreError(err, OperationType.LIST, `projects/${project.id}/drawings`),
+    );
+    return () => unsub();
+  }, [project?.id]);
+
   // Custom equipment library — only load when the library panel is open
   useEffect(() => {
     if (!showCustomLibrary) { setCustomEquipment([]); return; }
@@ -1546,6 +1595,56 @@ export default function EquipmentSelection({
     );
     return () => unsub();
   }, [showCustomLibrary]);
+
+  // ── Drawing upload ─────────────────────────────────────────────────────────
+  const handleDrawingUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file || !project?.id) return;
+    e.target.value = '';
+    setUploadingDrawing(true);
+    try {
+      const ext = file.name.split('.').pop()?.toUpperCase() ?? '';
+      const path = `projects/${project.id}/drawings/${Date.now()}_${file.name}`;
+      const sRef = storageRef(storage, path);
+      const task = uploadBytesResumable(sRef, file);
+      await new Promise<void>((resolve, reject) => {
+        task.on('state_changed', null, reject, resolve);
+      });
+      const downloadURL = await getDownloadURL(sRef);
+      await addDoc(collection(db, 'projects', project.id, 'drawings'), {
+        name: file.name.replace(/\.[^.]+$/, ''),
+        type: 'General',
+        format: ext,
+        version: 'V1.0',
+        downloadURL,
+        storagePath: path,
+        uploadedAt: serverTimestamp(),
+      });
+      toast.success(`"${file.name}" uploaded`);
+    } catch (err) {
+      toast.error('Upload failed');
+      console.error(err);
+    } finally {
+      setUploadingDrawing(false);
+    }
+  };
+
+  const handleDrawingDelete = async (drawing: { id: string; name: string; storagePath?: string }) => {
+    if (!project?.id) return;
+    if (!window.confirm(`Delete "${drawing.name}"? This cannot be undone.`)) return;
+    try {
+      if (drawing.storagePath) {
+        await import('firebase/storage').then(({ deleteObject }) =>
+          deleteObject(storageRef(storage, drawing.storagePath!))
+        ).catch(() => {});
+      }
+      await deleteDoc(doc(db, 'projects', project.id, 'drawings', drawing.id));
+      toast.success(`"${drawing.name}" deleted`);
+    } catch (err) {
+      toast.error('Delete failed');
+      console.error(err);
+    }
+  };
 
   // ── System CRUD ────────────────────────────────────────────────────────────
 
@@ -5267,36 +5366,55 @@ export default function EquipmentSelection({
         <TabsContent value="drawings" className="space-y-4">
           <div className="flex items-center justify-between">
             <h3 className="text-lg font-semibold text-slate-800 dark:text-slate-100">Project Drawings & Documents</h3>
-            <Button variant="outline" className="gap-2" disabled><Upload className="w-4 h-4" /> Upload Drawing</Button>
+            <Button variant="outline" className="gap-2" disabled={uploadingDrawing} onClick={() => drawingFileRef.current?.click()}>
+              {uploadingDrawing ? <><Upload className="w-4 h-4 animate-bounce" /> Uploading…</> : <><Upload className="w-4 h-4" /> Upload Drawing</>}
+            </Button>
+            <input ref={drawingFileRef} type="file" accept=".pdf,.dwg,.dxf,.png,.jpg,.jpeg,.xlsx,.docx" className="hidden" onChange={handleDrawingUpload} />
           </div>
           <Card>
             <CardContent className="p-0">
-              <Table>
-                <TableHeader>
-                  <TableRow className="bg-slate-50/50 dark:bg-slate-800/50 text-xs uppercase">
-                    <TableHead>Name</TableHead>
-                    <TableHead>Type</TableHead>
-                    <TableHead>Format</TableHead>
-                    <TableHead>Version</TableHead>
-                    <TableHead className="text-right">Action</TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {drawings.map(d => (
-                    <TableRow key={d.id}>
-                      <TableCell className="font-medium">{d.name}</TableCell>
-                      <TableCell><Badge variant="outline" className="text-xs">{d.type}</Badge></TableCell>
-                      <TableCell className="text-sm text-slate-500">{d.format}</TableCell>
-                      <TableCell className="text-sm text-slate-500">{d.version}</TableCell>
-                      <TableCell className="text-right">
-                        <a href="#" className="inline-flex items-center gap-1.5 h-8 px-3 text-sm text-blue-600 hover:text-blue-800">
-                          <ExternalLink className="w-3.5 h-3.5" /> View
-                        </a>
-                      </TableCell>
+              {drawings.length === 0 ? (
+                <div className="flex flex-col items-center justify-center py-16 text-slate-400 dark:text-slate-500 gap-2">
+                  <FileText className="w-10 h-10 opacity-20" />
+                  <p className="text-sm">No drawings uploaded yet</p>
+                  <p className="text-xs">Click "Upload Drawing" to add files</p>
+                </div>
+              ) : (
+                <Table>
+                  <TableHeader>
+                    <TableRow className="bg-slate-50/50 dark:bg-slate-800/50 text-xs uppercase">
+                      <TableHead>Name</TableHead>
+                      <TableHead>Type</TableHead>
+                      <TableHead>Format</TableHead>
+                      <TableHead>Version</TableHead>
+                      <TableHead className="text-right">Action</TableHead>
                     </TableRow>
-                  ))}
-                </TableBody>
-              </Table>
+                  </TableHeader>
+                  <TableBody>
+                    {drawings.map(d => (
+                      <TableRow key={d.id}>
+                        <TableCell className="font-medium dark:text-slate-200">{d.name}</TableCell>
+                        <TableCell><Badge variant="outline" className="text-xs">{d.type}</Badge></TableCell>
+                        <TableCell className="text-sm text-slate-500 dark:text-slate-400">{d.format}</TableCell>
+                        <TableCell className="text-sm text-slate-500 dark:text-slate-400">{d.version}</TableCell>
+                        <TableCell className="text-right">
+                          <div className="flex items-center justify-end gap-1">
+                            <a href={d.downloadURL} target="_blank" rel="noopener noreferrer"
+                              className="inline-flex items-center gap-1.5 h-8 px-3 text-sm text-blue-600 dark:text-blue-400 hover:text-blue-800 dark:hover:text-blue-300">
+                              <ExternalLink className="w-3.5 h-3.5" /> View
+                            </a>
+                            <Button size="sm" variant="ghost"
+                              className="h-8 w-8 p-0 text-slate-400 hover:text-red-600 dark:hover:text-red-400"
+                              onClick={() => handleDrawingDelete(d)}>
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </Button>
+                          </div>
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              )}
             </CardContent>
           </Card>
         </TabsContent>

@@ -186,6 +186,7 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
     latitude: '',
     altitude: '',
     includeMonsoon: false,
+    includeWinter: false,
     summerDesignTemp: '',
     summerDesignHumidity: '',
     monsoonDesignTemp: '',
@@ -223,6 +224,7 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
   const projectLatitude = project.latitude ?? (project.data?.latitude ?? undefined);
   const projectLongitude = project.longitude ?? (project.data?.longitude ?? undefined);
   const includeMonsoon = project.includeMonsoon ?? project.data?.includeMonsoon ?? false;
+  const includeWinter  = project.includeWinter  ?? project.data?.includeWinter  ?? false;
   const summerDesignTemp = project.summerDesignTemp ?? (project.data?.summerDesignTemp ?? 95);
   const summerDesignHumidity = project.summerDesignHumidity ?? (project.data?.summerDesignHumidity ?? 50);
   const monsoonDesignTemp = project.monsoonDesignTemp ?? (project.data?.monsoonDesignTemp ?? 85);
@@ -250,10 +252,12 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
     winterOutdoorHumidity: winterDesignHumidity,
     winterIndoorTemp: insideWinterTemp,
     winterIndoorHumidity: insideWinterHumidity,
+    includeWinter,
   }), [
     summerDesignTemp, insideSummerTemp, summerDesignHumidity, insideSummerHumidity,
     projectAltitude, projectLatitude, projectLongitude,
     winterDesignTemp, winterDesignHumidity, insideWinterTemp, insideWinterHumidity,
+    includeWinter,
   ]);
 
   const getRoomRef = (_zoneId: string, roomId: string, _systemId?: string) => {
@@ -272,6 +276,7 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
       longitude: projectLongitude,
       winterOutdoorTemp: winterDesignTemp,
       winterOutdoorHumidity: winterDesignHumidity,
+      includeWinter,
     };
   };
 
@@ -1776,6 +1781,7 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
       const currentWinterTemp = project.winterDesignTemp ?? project.data?.winterDesignTemp ?? 30;
       const currentWinterRH = project.winterDesignHumidity ?? project.data?.winterDesignHumidity ?? 30;
       const currentIncludeMonsoon = project.includeMonsoon ?? project.data?.includeMonsoon ?? false;
+      const currentIncludeWinter  = project.includeWinter  ?? project.data?.includeWinter  ?? false;
       const currentInsideSummerTemp = project.insideSummerTemp ?? project.data?.insideSummerTemp ?? 75;
       const currentInsideSummerRH = project.insideSummerHumidity ?? project.data?.insideSummerHumidity ?? 50;
       const currentInsideMonsoonTemp = project.insideMonsoonTemp ?? project.data?.insideMonsoonTemp ?? currentInsideSummerTemp;
@@ -1789,6 +1795,7 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
       const resolvedLatitude = editData.latitude === '' ? currentLatitude : Number(editData.latitude);
       const resolvedAltitude = editData.altitude === '' ? currentAltitude : Number(editData.altitude);
       const resolvedIncludeMonsoon = editData.includeMonsoon ?? currentIncludeMonsoon;
+      const resolvedIncludeWinter  = editData.includeWinter  ?? currentIncludeWinter;
       const resolvedSummerTemp = editData.summerDesignTemp === '' ? currentSummerTemp : Number(editData.summerDesignTemp);
       const resolvedSummerRH = editData.summerDesignHumidity === '' ? currentSummerRH : Number(editData.summerDesignHumidity);
       const resolvedMonsoonTemp = editData.monsoonDesignTemp === '' ? currentMonsoonTemp : Number(editData.monsoonDesignTemp);
@@ -1806,6 +1813,7 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
         name: resolvedName,
         location: resolvedLocation,
         includeMonsoon: resolvedIncludeMonsoon,
+        includeWinter: resolvedIncludeWinter,
         summerDesignTemp: resolvedSummerTemp,
         summerDesignHumidity: resolvedSummerRH,
         monsoonDesignTemp: resolvedMonsoonTemp,
@@ -1824,6 +1832,7 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
           latitude: resolvedLatitude,
           altitude: resolvedAltitude,
           includeMonsoon: resolvedIncludeMonsoon,
+          includeWinter: resolvedIncludeWinter,
           summerDesignTemp: resolvedSummerTemp,
           summerDesignHumidity: resolvedSummerRH,
           monsoonDesignTemp: resolvedMonsoonTemp,
@@ -1847,6 +1856,7 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
         latitude: '',
         altitude: '',
         includeMonsoon: false,
+        includeWinter: false,
         summerDesignTemp: '',
         summerDesignHumidity: '',
         monsoonDesignTemp: '',
@@ -1980,6 +1990,7 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
                 latitude:             String(p.latitude            ?? pd.latitude            ?? ''),
                 altitude:             String(p.altitude            ?? pd.altitude            ?? ''),
                 includeMonsoon:       p.includeMonsoon             ?? pd.includeMonsoon      ?? false,
+                includeWinter:        p.includeWinter              ?? pd.includeWinter       ?? false,
                 summerDesignTemp:     String(p.summerDesignTemp    ?? pd.summerDesignTemp    ?? 95),
                 summerDesignHumidity: String(p.summerDesignHumidity ?? pd.summerDesignHumidity ?? 50),
                 monsoonDesignTemp:    String(p.monsoonDesignTemp   ?? pd.monsoonDesignTemp   ?? 85),
@@ -2083,48 +2094,49 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
               </div>
             </div>
 
-            <div className="border-t border-slate-200/80 dark:border-slate-700/80 bg-white/70 dark:bg-slate-800/70 px-5 py-4">
-              {projectTotals.includeMonsoon ? (
-                <div className="grid grid-cols-1 gap-2 lg:grid-cols-4">
-                  <div className="rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 px-3 py-2">
-                    <p className="text-[10px] uppercase tracking-wider font-semibold text-slate-500 dark:text-slate-400">Seasonal Comparison</p>
-                    <p className="mt-1 text-xs font-semibold text-slate-700 dark:text-slate-300">
-                      <span className="font-mono text-orange-700">S {projectTotals.summer.governingTR.toFixed(2)} TR</span>
-                      <span className="mx-1 text-slate-300">vs</span>
-                      <span className="font-mono text-teal-700">M {projectTotals.monsoon.governingTR.toFixed(2)} TR</span>
+            <div className="border-t border-slate-200/80 dark:border-slate-700/80 bg-white/70 dark:bg-slate-800/70 px-5 py-3">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div className="flex-1 min-w-0">
+                  {projectTotals.includeMonsoon ? (
+                    <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-4">
+                      <div className="rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 px-3 py-2">
+                        <p className="text-[10px] uppercase tracking-wider font-semibold text-slate-500 dark:text-slate-400">Seasonal Comparison</p>
+                        <p className="mt-1 text-xs font-semibold text-slate-700 dark:text-slate-300">
+                          <span className="font-mono text-orange-700">S {projectTotals.summer.governingTR.toFixed(2)} TR</span>
+                          <span className="mx-1 text-slate-300">vs</span>
+                          <span className="font-mono text-teal-700">M {projectTotals.monsoon.governingTR.toFixed(2)} TR</span>
+                        </p>
+                      </div>
+                      <div className="rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 px-3 py-2">
+                        <p className="text-[10px] uppercase tracking-wider font-semibold text-slate-500 dark:text-slate-400">Delta</p>
+                        <p className="mt-1 font-mono text-sm font-bold text-slate-800 dark:text-slate-200">{Math.abs(projectTotals.monsoon.governingTR - projectTotals.summer.governingTR).toFixed(2)} TR</p>
+                      </div>
+                      <div className="rounded-lg border border-blue-200 dark:border-blue-800 bg-blue-50 dark:bg-blue-950/20 px-3 py-2">
+                        <p className="text-[10px] uppercase tracking-wider font-semibold text-blue-600 dark:text-blue-400">Load Governor</p>
+                        <p className="mt-1 text-sm font-semibold text-blue-800 dark:text-blue-300">{projectTotals.governingLoadSeason} <span className="font-mono">{projectTotals.governingLoadTR.toFixed(2)} TR</span></p>
+                      </div>
+                      <div className="rounded-lg border border-emerald-200 dark:border-emerald-800 bg-emerald-50 dark:bg-emerald-950/20 px-3 py-2">
+                        <p className="text-[10px] uppercase tracking-wider font-semibold text-emerald-600 dark:text-emerald-400">Airflow Governor</p>
+                        <p className="mt-1 text-sm font-semibold text-emerald-800 dark:text-emerald-300">{projectTotals.governingAirflowSeason} <span className="font-mono">{projectTotals.governingCfmTR.toFixed(2)} TR</span></p>
+                      </div>
+                    </div>
+                  ) : (
+                    <p className="text-xs text-slate-600 dark:text-slate-400">
+                      Monsoon comparison is blank because Include Monsoon Calculation is OFF. Governing cooling currently follows Summer.
                     </p>
-                  </div>
-                  <div className="rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 px-3 py-2">
-                    <p className="text-[10px] uppercase tracking-wider font-semibold text-slate-500 dark:text-slate-400">Delta</p>
-                    <p className="mt-1 font-mono text-sm font-bold text-slate-800 dark:text-slate-200">{Math.abs(projectTotals.monsoon.governingTR - projectTotals.summer.governingTR).toFixed(2)} TR</p>
-                  </div>
-                  <div className="rounded-lg border border-blue-200 dark:border-blue-800 bg-blue-50 dark:bg-blue-950/20 px-3 py-2">
-                    <p className="text-[10px] uppercase tracking-wider font-semibold text-blue-600 dark:text-blue-400">Load Governor</p>
-                    <p className="mt-1 text-sm font-semibold text-blue-800 dark:text-blue-300">{projectTotals.governingLoadSeason} <span className="font-mono">{projectTotals.governingLoadTR.toFixed(2)} TR</span></p>
-                  </div>
-                  <div className="rounded-lg border border-emerald-200 dark:border-emerald-800 bg-emerald-50 dark:bg-emerald-950/20 px-3 py-2">
-                    <p className="text-[10px] uppercase tracking-wider font-semibold text-emerald-600 dark:text-emerald-400">Airflow Governor</p>
-                    <p className="mt-1 text-sm font-semibold text-emerald-800 dark:text-emerald-300">{projectTotals.governingAirflowSeason} <span className="font-mono">{projectTotals.governingCfmTR.toFixed(2)} TR</span></p>
-                  </div>
+                  )}
                 </div>
-              ) : (
-                <p className="text-xs text-slate-600 dark:text-slate-400">
-                  Monsoon comparison is blank because Include Monsoon Calculation is OFF. Governing cooling currently follows Summer.
-                </p>
-              )}
-            </div>
-
-            <div className="border-t border-slate-200/80 dark:border-slate-700/80 bg-white/70 dark:bg-slate-800/70 px-5 py-3 flex justify-end">
-              <Button
-                type="button"
-                size="sm"
-                variant="outline"
-                onClick={() => setProjectPsychroOpen((prev) => !prev)}
-                aria-expanded={projectPsychroOpen}
-                className="text-xs h-8"
-              >
-                {projectPsychroOpen ? 'Hide Project Psychrometric' : 'Show Project Psychrometric'}
-              </Button>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  onClick={() => setProjectPsychroOpen((prev) => !prev)}
+                  aria-expanded={projectPsychroOpen}
+                  className="text-xs h-8 shrink-0"
+                >
+                  {projectPsychroOpen ? 'Hide Project Psychrometric' : 'Show Project Psychrometric'}
+                </Button>
+              </div>
             </div>
 
             {projectPsychroOpen && (
@@ -2370,6 +2382,16 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
                 className="h-4 w-4"
               />
             </div>
+            <div className="flex items-center justify-between rounded-md border border-blue-200 dark:border-blue-800 bg-blue-50 dark:bg-blue-950/20 px-3 py-2">
+              <Label htmlFor="edit-include-winter" className="font-semibold text-blue-700 dark:text-blue-300">Include Winter Heating</Label>
+              <input
+                id="edit-include-winter"
+                type="checkbox"
+                checked={editData.includeWinter}
+                onChange={(e) => setEditData({ ...editData, includeWinter: e.target.checked })}
+                className="h-4 w-4"
+              />
+            </div>
             <Separator />
             <div className="space-y-2">
               <Label className="font-semibold">Summer Design Conditions</Label>
@@ -2427,6 +2449,7 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
                 </div>
               </div>
             )}
+            {editData.includeWinter && (
             <div className="space-y-2">
               <Label className="font-semibold">Winter Design Conditions</Label>
               <div className="grid grid-cols-2 gap-4">
@@ -2454,6 +2477,7 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
                 </div>
               </div>
             </div>
+            )}
             <Separator />
             <div className="space-y-2">
               <Label className="font-semibold">Inside Design Conditions</Label>
@@ -2507,6 +2531,7 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
                   </div>
                 </div>
               )}
+              {editData.includeWinter && (
               <div className="grid grid-cols-2 gap-4">
                 <div className="space-y-2">
                   <Label htmlFor="edit-inside-winter-temp">Winter Temp (°F)</Label>
@@ -2531,6 +2556,7 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
                   />
                 </div>
               </div>
+              )}
             </div>
           </div>
           <DialogFooter>
@@ -2544,6 +2570,7 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
                   latitude: '',
                   altitude: '',
                   includeMonsoon: false,
+                  includeWinter: false,
                   summerDesignTemp: '',
                   summerDesignHumidity: '',
                   monsoonDesignTemp: '',

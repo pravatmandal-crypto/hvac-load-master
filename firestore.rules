@@ -190,6 +190,14 @@ service cloud.firestore {
         allow delete: if isAdminA() || isSuper();
       }
 
+      // Project drawings & documents
+      match /drawings/{drawingId} {
+        allow read: if isEmployee();
+        allow create: if isDesignTeam() || isAdminA();
+        allow update: if isDesignTeam() || isAdminA();
+        allow delete: if isDesignTeam() || isAdminA() || isSuper();
+      }
+
       // Flat rooms (new unified path — all project types)
       match /rooms/{roomId} {
         allow read: if isEmployee();

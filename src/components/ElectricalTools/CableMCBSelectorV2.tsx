@@ -546,31 +546,31 @@ export function CableMCBSelectorV2() {
       <div className="flex items-center gap-3">
         <Zap className="h-7 w-7 text-blue-600" />
         <div>
-          <h1 className="text-2xl font-bold text-slate-900">Cable & MCB Sizing Tool</h1>
-          <p className="text-slate-500 text-sm">Indian Standard Voltage & IS code aligned cable/MCB recommendation</p>
+          <h1 className="text-2xl font-bold text-slate-900 dark:text-slate-100">Cable & MCB Sizing Tool</h1>
+          <p className="text-slate-500 dark:text-slate-400 text-sm">Indian Standard Voltage & IS code aligned cable/MCB recommendation</p>
         </div>
       </div>
 
       {/* Name of Work (always at top) */}
-      <Card className="border-blue-200 bg-blue-50">
+      <Card className="border-blue-200 dark:border-blue-900 bg-blue-50 dark:bg-blue-950/30">
         <CardContent className="pt-4 pb-4">
           <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
             <div className="space-y-1">
-              <Label className="text-sm font-semibold text-blue-800">Name of Work / Project *</Label>
+              <Label className="text-sm font-semibold text-blue-800 dark:text-blue-300">Name of Work / Project *</Label>
               <Input
                 value={nameOfWork}
                 onChange={(e) => setNameOfWork(e.target.value)}
                 placeholder="e.g. AHU-3 Power Supply, Ground Floor Office Building"
-                className="bg-white"
+                className="bg-white dark:bg-slate-900"
               />
             </div>
             <div className="space-y-1">
-              <Label className="text-sm font-semibold text-blue-800">Circuit Reference / Panel ID</Label>
+              <Label className="text-sm font-semibold text-blue-800 dark:text-blue-300">Circuit Reference / Panel ID</Label>
               <Input
                 value={circuitRef}
                 onChange={(e) => setCircuitRef(e.target.value)}
                 placeholder="e.g. MCC-1 / F1-CB-07"
-                className="bg-white"
+                className="bg-white dark:bg-slate-900"
               />
             </div>
           </div>
@@ -638,8 +638,8 @@ export function CableMCBSelectorV2() {
               </div>
 
               {/* Current OR kW — dual input */}
-              <div className="p-3 bg-slate-50 rounded-lg border border-slate-200 space-y-3">
-                <p className="text-xs font-semibold text-slate-600 uppercase tracking-wide">Load — enter either</p>
+              <div className="p-3 bg-slate-50 dark:bg-slate-800/50 rounded-lg border border-slate-200 dark:border-slate-700 space-y-3">
+                <p className="text-xs font-semibold text-slate-600 dark:text-slate-400 uppercase tracking-wide">Load — enter either</p>
                 <div className="space-y-1">
                   <Label className="text-xs font-medium">Rated Current (A)</Label>
                   <Input
@@ -714,10 +714,10 @@ export function CableMCBSelectorV2() {
 
               {/* Cable type recommendation */}
               {placementInfo && (
-                <div className="p-2.5 bg-amber-50 border border-amber-200 rounded-lg text-xs space-y-1">
-                  <p className="font-semibold text-amber-800">{placementInfo.standard}</p>
-                  <p className="text-amber-700"><strong>Recommended:</strong> {placementInfo.type}</p>
-                  <p className="text-amber-600 italic">{placementInfo.note}</p>
+                <div className="p-2.5 bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-900 rounded-lg text-xs space-y-1">
+                  <p className="font-semibold text-amber-800 dark:text-amber-300">{placementInfo.standard}</p>
+                  <p className="text-amber-700 dark:text-amber-400"><strong>Recommended:</strong> {placementInfo.type}</p>
+                  <p className="text-amber-600 dark:text-amber-500 italic">{placementInfo.note}</p>
                 </div>
               )}
 
@@ -765,10 +765,10 @@ export function CableMCBSelectorV2() {
               </div>
 
               {/* Starting method note */}
-              <div className="p-3 bg-blue-50 border border-blue-200 rounded-lg space-y-1">
-                <p className="text-xs font-semibold text-blue-800">Starting Method</p>
-                <p className="text-xs text-blue-700">{appProfile.startingMethod}</p>
-                <p className="text-[10px] text-blue-600">
+              <div className="p-3 bg-blue-50 dark:bg-blue-950/30 border border-blue-200 dark:border-blue-900 rounded-lg space-y-1">
+                <p className="text-xs font-semibold text-blue-800 dark:text-blue-300">Starting Method</p>
+                <p className="text-xs text-blue-700 dark:text-blue-400">{appProfile.startingMethod}</p>
+                <p className="text-[10px] text-blue-600 dark:text-blue-500">
                   {useStartingProtection ? 'Starting protection is considered in calculation (Soft-Starter / VFD effect).' : 'DOL/direct profile considered in calculation.'}
                 </p>
               </div>
@@ -779,27 +779,27 @@ export function CableMCBSelectorV2() {
         {/* Results Panel */}
         <div className="lg:col-span-2 space-y-4">
           {/* Power summary */}
-          <Card className="bg-gradient-to-r from-blue-50 to-indigo-50">
+          <Card className="bg-gradient-to-r from-blue-50 to-indigo-50 dark:from-blue-950/40 dark:to-indigo-950/40">
             <CardContent className="pt-5">
               <div className="grid grid-cols-4 gap-3">
-                <div className="text-center p-3 bg-white rounded-lg border border-blue-200">
-                  <p className="text-xs text-slate-600">Rated Power</p>
-                  <p className="text-2xl font-bold text-blue-600">{powerKW.toFixed(2)}<span className="text-sm ml-1">kW</span></p>
-                  <p className="text-xs text-slate-500">{isThreePhaseVoltage(systemVoltage) ? '3-Phase' : '1-Phase'}</p>
+                <div className="text-center p-3 bg-white dark:bg-slate-800 rounded-lg border border-blue-200 dark:border-blue-900">
+                  <p className="text-xs text-slate-600 dark:text-slate-400">Rated Power</p>
+                  <p className="text-2xl font-bold text-blue-600 dark:text-blue-400">{powerKW.toFixed(2)}<span className="text-sm ml-1">kW</span></p>
+                  <p className="text-xs text-slate-500 dark:text-slate-400">{isThreePhaseVoltage(systemVoltage) ? '3-Phase' : '1-Phase'}</p>
                 </div>
-                <div className="text-center p-3 bg-white rounded-lg border border-slate-200">
-                  <p className="text-xs text-slate-600">Rated Current</p>
-                  <p className="text-2xl font-bold text-slate-700">{loadCurrent.toFixed(1)}<span className="text-sm ml-1">A</span></p>
+                <div className="text-center p-3 bg-white dark:bg-slate-800 rounded-lg border border-slate-200 dark:border-slate-700">
+                  <p className="text-xs text-slate-600 dark:text-slate-400">Rated Current</p>
+                  <p className="text-2xl font-bold text-slate-700 dark:text-slate-200">{loadCurrent.toFixed(1)}<span className="text-sm ml-1">A</span></p>
                 </div>
-                <div className="text-center p-3 bg-orange-50 rounded-lg border border-orange-200">
-                  <p className="text-xs text-orange-600">Peak Inrush</p>
-                  <p className="text-2xl font-bold text-orange-600">{inrushCurrent.toFixed(0)}<span className="text-sm ml-1">A</span></p>
-                  <p className="text-xs text-orange-500">{loadCurrent > 0 ? (inrushCurrent / loadCurrent).toFixed(1) : '—'}×</p>
+                <div className="text-center p-3 bg-orange-50 dark:bg-orange-950/30 rounded-lg border border-orange-200 dark:border-orange-900">
+                  <p className="text-xs text-orange-600 dark:text-orange-400">Peak Inrush</p>
+                  <p className="text-2xl font-bold text-orange-600 dark:text-orange-400">{inrushCurrent.toFixed(0)}<span className="text-sm ml-1">A</span></p>
+                  <p className="text-xs text-orange-500 dark:text-orange-500">{loadCurrent > 0 ? (inrushCurrent / loadCurrent).toFixed(1) : '—'}×</p>
                 </div>
-                <div className="text-center p-3 bg-amber-50 rounded-lg border border-amber-200">
-                  <p className="text-xs text-amber-700">Inrush Duration</p>
-                  <p className="text-2xl font-bold text-amber-700">{appProfile.inrushDuration}<span className="text-sm ml-1">ms</span></p>
-                  <p className="text-xs text-amber-600">{appProfile.startingMethod}</p>
+                <div className="text-center p-3 bg-amber-50 dark:bg-amber-950/30 rounded-lg border border-amber-200 dark:border-amber-900">
+                  <p className="text-xs text-amber-700 dark:text-amber-400">Inrush Duration</p>
+                  <p className="text-2xl font-bold text-amber-700 dark:text-amber-400">{appProfile.inrushDuration}<span className="text-sm ml-1">ms</span></p>
+                  <p className="text-xs text-amber-600 dark:text-amber-500">{appProfile.startingMethod}</p>
                 </div>
               </div>
             </CardContent>
@@ -808,7 +808,7 @@ export function CableMCBSelectorV2() {
           {result ? (
             <>
               {/* Compliance */}
-              <Card className={result.isCompliant ? 'border-green-200 bg-green-50' : 'border-red-200 bg-red-50'}>
+              <Card className={result.isCompliant ? 'border-green-200 dark:border-green-900 bg-green-50 dark:bg-green-950/30' : 'border-red-200 dark:border-red-900 bg-red-50 dark:bg-red-950/30'}>
                 <CardHeader>
                   <div className="flex items-center justify-between">
                     <CardTitle className="text-base">Compliance Status</CardTitle>
@@ -820,13 +820,13 @@ export function CableMCBSelectorV2() {
                 </CardHeader>
                 <CardContent>
                   {result.warnings.map((w, i) => (
-                    <div key={i} className="flex items-start gap-2 text-red-700 text-sm">
+                    <div key={i} className="flex items-start gap-2 text-red-700 dark:text-red-400 text-sm">
                       <AlertTriangle className="h-4 w-4 mt-0.5 shrink-0" />
                       <p>{w}</p>
                     </div>
                   ))}
                   {result.isCompliant && (
-                    <p className="text-sm text-green-700 flex items-center gap-2">
+                    <p className="text-sm text-green-700 dark:text-green-400 flex items-center gap-2">
                       <CheckCircle2 className="h-4 w-4" /> All parameters within IS / IEC limits
                     </p>
                   )}
@@ -856,57 +856,57 @@ export function CableMCBSelectorV2() {
                   <div className="overflow-x-auto">
                     <table className="w-full text-sm border-collapse">
                       <tbody>
-                        <tr className="border-b border-gray-100">
-                          <td className="py-2 pr-4 text-xs font-semibold text-gray-500 uppercase w-40">Parameter</td>
-                          <td className="py-2 font-semibold">Value</td>
-                          <td className="py-2 text-xs text-gray-500">Remarks</td>
+                        <tr className="border-b border-gray-100 dark:border-slate-700">
+                          <td className="py-2 pr-4 text-xs font-semibold text-gray-500 dark:text-slate-400 uppercase w-40">Parameter</td>
+                          <td className="py-2 font-semibold dark:text-slate-200">Value</td>
+                          <td className="py-2 text-xs text-gray-500 dark:text-slate-400">Remarks</td>
                         </tr>
-                        <tr className="border-b border-gray-100 bg-blue-50">
-                          <td className="py-2 pr-4 text-xs text-gray-500">Cable Size</td>
-                          <td className="py-2 font-bold text-blue-700">{result.selectedCable.description}</td>
-                          <td className="py-2 text-xs text-gray-500">{result.selectedCable.metric} mm²</td>
+                        <tr className="border-b border-gray-100 dark:border-slate-700 bg-blue-50 dark:bg-blue-950/30">
+                          <td className="py-2 pr-4 text-xs text-gray-500 dark:text-slate-400">Cable Size</td>
+                          <td className="py-2 font-bold text-blue-700 dark:text-blue-400">{result.selectedCable.description}</td>
+                          <td className="py-2 text-xs text-gray-500 dark:text-slate-400">{result.selectedCable.metric} mm²</td>
                         </tr>
-                        <tr className="border-b border-gray-100">
-                          <td className="py-2 pr-4 text-xs text-gray-500">Cable Type</td>
-                          <td className="py-2 font-medium">{phaseAwareCableType}</td>
-                          <td className="py-2 text-xs text-gray-500">{placementInfo?.standard}</td>
+                        <tr className="border-b border-gray-100 dark:border-slate-700">
+                          <td className="py-2 pr-4 text-xs text-gray-500 dark:text-slate-400">Cable Type</td>
+                          <td className="py-2 font-medium dark:text-slate-200">{phaseAwareCableType}</td>
+                          <td className="py-2 text-xs text-gray-500 dark:text-slate-400">{placementInfo?.standard}</td>
                         </tr>
-                        <tr className="border-b border-gray-100">
-                          <td className="py-2 pr-4 text-xs text-gray-500">Conductor</td>
-                          <td className="py-2 font-medium capitalize">{cableMaterial}</td>
-                          <td className="py-2 text-xs text-gray-500">IS 8130</td>
+                        <tr className="border-b border-gray-100 dark:border-slate-700">
+                          <td className="py-2 pr-4 text-xs text-gray-500 dark:text-slate-400">Conductor</td>
+                          <td className="py-2 font-medium capitalize dark:text-slate-200">{cableMaterial}</td>
+                          <td className="py-2 text-xs text-gray-500 dark:text-slate-400">IS 8130</td>
                         </tr>
-                        <tr className="border-b border-gray-100">
-                          <td className="py-2 pr-4 text-xs text-gray-500">Base Ampacity</td>
-                          <td className="py-2 font-medium">{result.selectedAmpacity.ampacity} A</td>
-                          <td className="py-2 text-xs text-gray-500">@ {result.selectedAmpacity.temperature}°C</td>
+                        <tr className="border-b border-gray-100 dark:border-slate-700">
+                          <td className="py-2 pr-4 text-xs text-gray-500 dark:text-slate-400">Base Ampacity</td>
+                          <td className="py-2 font-medium dark:text-slate-200">{result.selectedAmpacity.ampacity} A</td>
+                          <td className="py-2 text-xs text-gray-500 dark:text-slate-400">@ {result.selectedAmpacity.temperature}°C</td>
                         </tr>
-                        <tr className="border-b border-gray-100">
-                          <td className="py-2 pr-4 text-xs text-gray-500">Safety Margin</td>
-                          <td className="py-2 font-medium">{result.safetyMargin.toFixed(1)}%</td>
-                          <td className="py-2 text-xs text-gray-500">Min 20% recommended</td>
+                        <tr className="border-b border-gray-100 dark:border-slate-700">
+                          <td className="py-2 pr-4 text-xs text-gray-500 dark:text-slate-400">Safety Margin</td>
+                          <td className="py-2 font-medium dark:text-slate-200">{result.safetyMargin.toFixed(1)}%</td>
+                          <td className="py-2 text-xs text-gray-500 dark:text-slate-400">Min 20% recommended</td>
                         </tr>
-                        <tr className="border-b border-gray-100">
-                          <td className="py-2 pr-4 text-xs text-gray-500">Voltage Drop</td>
-                          <td className={`py-2 font-bold ${((result.voltageDrop / systemVoltage) * 100) <= voltageDropLimit ? 'text-green-600' : 'text-red-600'}`}>
+                        <tr className="border-b border-gray-100 dark:border-slate-700">
+                          <td className="py-2 pr-4 text-xs text-gray-500 dark:text-slate-400">Voltage Drop</td>
+                          <td className={`py-2 font-bold ${((result.voltageDrop / systemVoltage) * 100) <= voltageDropLimit ? 'text-green-600 dark:text-green-400' : 'text-red-600 dark:text-red-400'}`}>
                             {((result.voltageDrop / normalizeVoltageForCalc(systemVoltage)) * 100).toFixed(2)}%
                           </td>
-                          <td className="py-2 text-xs text-gray-500">Limit: {voltageDropLimit}% (IS 732)</td>
+                          <td className="py-2 text-xs text-gray-500 dark:text-slate-400">Limit: {voltageDropLimit}% (IS 732)</td>
                         </tr>
-                        <tr className="border-b border-gray-100 bg-orange-50">
-                          <td className="py-2 pr-4 text-xs text-gray-500">MCB / MCCB</td>
-                          <td className="py-2 font-bold text-orange-700">{result.selectedMCB.description}</td>
-                          <td className="py-2 text-xs text-gray-500">{result.selectedMCB.poles}-pole, {result.selectedMCB.voltage}V · IS 13947</td>
+                        <tr className="border-b border-gray-100 dark:border-slate-700 bg-orange-50 dark:bg-orange-950/30">
+                          <td className="py-2 pr-4 text-xs text-gray-500 dark:text-slate-400">MCB / MCCB</td>
+                          <td className="py-2 font-bold text-orange-700 dark:text-orange-400">{result.selectedMCB.description}</td>
+                          <td className="py-2 text-xs text-gray-500 dark:text-slate-400">{result.selectedMCB.poles}-pole, {result.selectedMCB.voltage}V · IS 13947</td>
                         </tr>
-                        <tr className="border-b border-gray-100">
-                          <td className="py-2 pr-4 text-xs text-gray-500">Recommended MCB Curve</td>
-                          <td className="py-2 font-medium">{appProfile.recommendedProtection}</td>
-                          <td className="py-2 text-xs text-gray-500">IS 13947 / IEC 60898</td>
+                        <tr className="border-b border-gray-100 dark:border-slate-700">
+                          <td className="py-2 pr-4 text-xs text-gray-500 dark:text-slate-400">Recommended MCB Curve</td>
+                          <td className="py-2 font-medium dark:text-slate-200">{appProfile.recommendedProtection}</td>
+                          <td className="py-2 text-xs text-gray-500 dark:text-slate-400">IS 13947 / IEC 60898</td>
                         </tr>
                         <tr>
-                          <td className="py-2 pr-4 text-xs text-gray-500">Installation</td>
-                          <td className="py-2 font-medium">{placementInfo?.label ?? cablePlacement}</td>
-                          <td className="py-2 text-xs text-gray-500">{placementInfo?.standard}</td>
+                          <td className="py-2 pr-4 text-xs text-gray-500 dark:text-slate-400">Installation</td>
+                          <td className="py-2 font-medium dark:text-slate-200">{placementInfo?.label ?? cablePlacement}</td>
+                          <td className="py-2 text-xs text-gray-500 dark:text-slate-400">{placementInfo?.standard}</td>
                         </tr>
                       </tbody>
                     </table>
@@ -915,16 +915,16 @@ export function CableMCBSelectorV2() {
                   {coordinationCheck && (
                     <div className={`mt-3 p-3 rounded-lg border-l-4 text-sm ${
                       coordinationCheck.isCoordinated
-                        ? 'bg-green-50 border-green-400 text-green-700'
-                        : 'bg-red-50 border-red-400 text-red-700'
+                        ? 'bg-green-50 dark:bg-green-950/30 border-green-400 text-green-700 dark:text-green-400'
+                        : 'bg-red-50 dark:bg-red-950/30 border-red-400 text-red-700 dark:text-red-400'
                     }`}>
                       <p className="font-medium">Coordination Check</p>
                       <p>{coordinationCheck.message}</p>
                     </div>
                   )}
 
-                  <div className="mt-3 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
-                    <label className="flex items-center gap-2 text-sm text-slate-700">
+                  <div className="mt-3 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/50 px-3 py-2">
+                    <label className="flex items-center gap-2 text-sm text-slate-700 dark:text-slate-300">
                       <input
                         type="checkbox"
                         checked={vfdStarterEnabled}
@@ -947,7 +947,7 @@ export function CableMCBSelectorV2() {
                   <CardContent>
                     <ul className="space-y-1.5">
                       {result.notes.map((note, idx) => (
-                        <li key={idx} className="flex gap-2 text-sm text-slate-700">
+                        <li key={idx} className="flex gap-2 text-sm text-slate-700 dark:text-slate-300">
                           <span className="text-blue-600 font-bold shrink-0">•</span>
                           {note}
                         </li>
@@ -974,37 +974,37 @@ export function CableMCBSelectorV2() {
                 </CardHeader>
                 <CardContent>
                   {rowsForCurrentWork.length === 0 ? (
-                    <p className="text-sm text-slate-500">No saved selections yet. Add recommendations to build your procurement list.</p>
+                    <p className="text-sm text-slate-500 dark:text-slate-400">No saved selections yet. Add recommendations to build your procurement list.</p>
                   ) : (
                     <div className="overflow-x-auto">
                       {nameOfWork.trim() && circuitRef.trim() && (
-                        <p className="text-xs text-slate-500 mb-2">
-                          Showing list for current work/circuit: <span className="font-medium text-slate-700">{nameOfWork.trim()} / {circuitRef.trim()}</span>
+                        <p className="text-xs text-slate-500 dark:text-slate-400 mb-2">
+                          Showing list for current work/circuit: <span className="font-medium text-slate-700 dark:text-slate-200">{nameOfWork.trim()} / {circuitRef.trim()}</span>
                         </p>
                       )}
                       <table className="w-full text-sm border-collapse">
                         <thead>
-                          <tr className="border-b bg-slate-50">
-                            <th className="text-left py-2 px-2 text-xs font-semibold text-slate-600">Name of Work</th>
-                            <th className="text-left py-2 px-2 text-xs font-semibold text-slate-600">Circuit Ref</th>
-                            <th className="text-left py-2 px-2 text-xs font-semibold text-slate-600">Application</th>
-                            <th className="text-left py-2 px-2 text-xs font-semibold text-slate-600">Cable Type</th>
-                            <th className="text-left py-2 px-2 text-xs font-semibold text-slate-600">Size</th>
-                            <th className="text-left py-2 px-2 text-xs font-semibold text-slate-600">MCB</th>
-                            <th className="text-left py-2 px-2 text-xs font-semibold text-slate-600">Other Details</th>
-                            <th className="text-left py-2 px-2 text-xs font-semibold text-slate-600">Action</th>
+                          <tr className="border-b bg-slate-50 dark:bg-slate-800">
+                            <th className="text-left py-2 px-2 text-xs font-semibold text-slate-600 dark:text-slate-400">Name of Work</th>
+                            <th className="text-left py-2 px-2 text-xs font-semibold text-slate-600 dark:text-slate-400">Circuit Ref</th>
+                            <th className="text-left py-2 px-2 text-xs font-semibold text-slate-600 dark:text-slate-400">Application</th>
+                            <th className="text-left py-2 px-2 text-xs font-semibold text-slate-600 dark:text-slate-400">Cable Type</th>
+                            <th className="text-left py-2 px-2 text-xs font-semibold text-slate-600 dark:text-slate-400">Size</th>
+                            <th className="text-left py-2 px-2 text-xs font-semibold text-slate-600 dark:text-slate-400">MCB</th>
+                            <th className="text-left py-2 px-2 text-xs font-semibold text-slate-600 dark:text-slate-400">Other Details</th>
+                            <th className="text-left py-2 px-2 text-xs font-semibold text-slate-600 dark:text-slate-400">Action</th>
                           </tr>
                         </thead>
                         <tbody>
                           {rowsForCurrentWork.map((row) => (
-                            <tr key={row.id} className="border-b border-slate-100">
-                              <td className="py-2 px-2">{row.nameOfWork}</td>
-                              <td className="py-2 px-2">{row.circuitRef}</td>
-                              <td className="py-2 px-2">{row.applicationLabel}</td>
-                              <td className="py-2 px-2">{row.cableType}</td>
-                              <td className="py-2 px-2">{row.cableSize}</td>
-                              <td className="py-2 px-2">{row.mcb}</td>
-                              <td className="py-2 px-2 text-xs text-slate-500">
+                            <tr key={row.id} className="border-b border-slate-100 dark:border-slate-700">
+                              <td className="py-2 px-2 dark:text-slate-200">{row.nameOfWork}</td>
+                              <td className="py-2 px-2 dark:text-slate-200">{row.circuitRef}</td>
+                              <td className="py-2 px-2 dark:text-slate-200">{row.applicationLabel}</td>
+                              <td className="py-2 px-2 dark:text-slate-200">{row.cableType}</td>
+                              <td className="py-2 px-2 dark:text-slate-200">{row.cableSize}</td>
+                              <td className="py-2 px-2 dark:text-slate-200">{row.mcb}</td>
+                              <td className="py-2 px-2 text-xs text-slate-500 dark:text-slate-400">
                                 {row.voltage}V, {row.loadCurrent.toFixed(1)}A, {row.powerKW.toFixed(2)}kW, {row.cableLength}m, VFD {row.vfdStarterEnabled ? 'Yes' : 'No'}, Vdrop {row.voltageDropPercent.toFixed(2)}%
                               </td>
                               <td className="py-2 px-2">
@@ -1028,9 +1028,9 @@ export function CableMCBSelectorV2() {
               </Card>
             </>
           ) : (
-            <Card className="border-red-200 bg-red-50">
+            <Card className="border-red-200 dark:border-red-900 bg-red-50 dark:bg-red-950/30">
               <CardContent className="pt-6">
-                <div className="flex items-start gap-3 text-red-700">
+                <div className="flex items-start gap-3 text-red-700 dark:text-red-400">
                   <AlertCircle className="h-5 w-5 mt-1 shrink-0" />
                   <div>
                     <p className="font-semibold">No Valid Configuration</p>
@@ -1044,16 +1044,16 @@ export function CableMCBSelectorV2() {
       </div>
 
       {/* Standards Reference */}
-      <Card className="bg-slate-50 border-slate-200">
+      <Card className="bg-slate-50 dark:bg-slate-800/50 border-slate-200 dark:border-slate-700">
         <CardHeader>
           <CardTitle className="text-sm flex items-center gap-2">
             <Info className="h-4 w-4" /> IS Code & International Standards Reference
           </CardTitle>
         </CardHeader>
         <CardContent>
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-6 text-xs text-slate-700">
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-6 text-xs text-slate-700 dark:text-slate-300">
             <div>
-              <p className="font-semibold text-slate-900 mb-2">Indian Standards (IS)</p>
+              <p className="font-semibold text-slate-900 dark:text-slate-100 mb-2">Indian Standards (IS)</p>
               <ul className="space-y-1">
                 <li><strong>IS 3961 (Pt 1–5)</strong> — Current ratings for cables (PVC/XLPE/Paper)</li>
                 <li><strong>IS 732</strong> — Code of practice for electrical wiring installations</li>
@@ -1064,7 +1064,7 @@ export function CableMCBSelectorV2() {
               </ul>
             </div>
             <div>
-              <p className="font-semibold text-slate-900 mb-2">International Standards</p>
+              <p className="font-semibold text-slate-900 dark:text-slate-100 mb-2">International Standards</p>
               <ul className="space-y-1">
                 <li><strong>IEC 60364-5-52</strong> — Cable selection and installation</li>
                 <li><strong>IEC 60898</strong> — MCB for household/similar</li>
@@ -1074,7 +1074,7 @@ export function CableMCBSelectorV2() {
               </ul>
             </div>
             <div>
-              <p className="font-semibold text-slate-900 mb-2">Inrush & Protection Curves</p>
+              <p className="font-semibold text-slate-900 dark:text-slate-100 mb-2">Inrush & Protection Curves</p>
               <ul className="space-y-1">
                 <li>Motor DOL: 5–8× → <strong>Type D MCB</strong></li>
                 <li>Chiller: 5–6× → <strong>Type D / MCCB</strong></li>

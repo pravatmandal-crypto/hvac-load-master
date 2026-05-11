@@ -37,6 +37,9 @@ export interface RoomCalcDesignConditions {
   longitude?: number;
   winterOutdoorTemp: number;
   winterOutdoorHumidity: number;
+  winterIndoorTemp?: number;
+  winterIndoorHumidity?: number;
+  includeWinter?: boolean;
   monsoonOutdoorTemp?: number;
   monsoonOutdoorHumidity?: number;
 }
@@ -124,7 +127,7 @@ export async function calculateAndPersistRoom(
   const envelope = calculateEnvelopeGain(elements, dc);
   const internal = calculateInternalGains(rd);
   const vent = calculateVentilationLoad(rd, dc);
-  const heating = calculateHeatingLoad(rd, elements, dc);
+  const heating = dc.includeWinter ? calculateHeatingLoad(rd, elements, dc) : null;
 
   const erSensible = envelope.sensible + internal.sensible + vent.sensible * bf;
   const erLatent = internal.latent + vent.latent * bf;
