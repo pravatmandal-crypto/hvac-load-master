@@ -145,8 +145,9 @@ function ResultTable({ rows }: { rows: [string, string, string][] }) {
 
 export default function UserManual() {
   const toc = [
-    { id: 'quick-start',  label: 'Quick Start Workflow' },
-    { id: 'equip-guide',  label: 'Equipment Selection Guide' },
+    { id: 'quick-start',   label: 'Quick Start Workflow' },
+    { id: 'equip-library', label: 'Equipment Library' },
+    { id: 'equip-guide',   label: 'Equipment Selection Guide' },
     { id: 'vrf',          label: 'VRF System' },
     { id: 'chiller',      label: 'Chiller Plant' },
     { id: 'package',      label: 'Package Unit' },
@@ -227,6 +228,188 @@ export default function UserManual() {
           <Note>The HVAC Systems page is the master for System→Zone→Room hierarchy. Rooms assigned there are automatically visible in Load Calculator and Equipment Selection.</Note>
         </div>
       </div>
+
+      {/* ════════════════════════════════════════════════════════════════════════
+          GLOBAL EQUIPMENT LIBRARY
+      ════════════════════════════════════════════════════════════════════════ */}
+      <SectionCard
+        id="equip-library"
+        title="Global Equipment Library"
+        badge="SETUP"
+        badgeColor="bg-violet-100 text-violet-700"
+        icon={Package}
+        defaultOpen
+      >
+        <p className="text-sm text-gray-600 leading-relaxed">
+          The <strong>Global Equipment Library</strong> is the project-agnostic catalog of equipment models that
+          populates the selection dropdowns in Equipment Selection. It is shared across all projects — models added
+          here are available in every project. Access it via <strong>Equipment Library</strong> in the sidebar.
+        </p>
+
+        {/* ── Overview ── */}
+        <div className="rounded-xl border border-gray-200 bg-gray-50 p-4 space-y-2">
+          <p className="text-xs font-bold text-gray-700 uppercase tracking-wide">Library Overview</p>
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+            {[
+              { title: 'Pre-seeded Catalog', desc: 'The library ships with a built-in catalog (VRF IDUs/ODUs, Chillers, AHUs, Package units from major brands). These are loaded automatically on first use.' },
+              { title: 'Sync New Items', desc: 'When the built-in catalog is updated with new models, click "Sync New Items" to push the additions to the live library without overwriting existing or custom entries.' },
+              { title: 'Custom Models', desc: 'Add manufacturer models not in the built-in catalog — either one at a time via the Add Equipment form, or in bulk via CSV import.' },
+            ].map(({ title, desc }) => (
+              <div key={title} className="bg-white rounded-lg border border-gray-100 p-3 space-y-1">
+                <p className="text-xs font-bold text-blue-700">{title}</p>
+                <p className="text-xs text-gray-600 leading-relaxed">{desc}</p>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        {/* ── Sync New Items ── */}
+        <div className="rounded-xl border border-emerald-200 bg-emerald-50 p-4 space-y-3">
+          <p className="text-xs font-bold text-emerald-800 uppercase tracking-wide flex items-center gap-1.5">
+            <RefreshCw className="w-3.5 h-3.5" /> Sync New Items — Push Catalog Updates to the Library
+          </p>
+          <p className="text-xs text-gray-700 leading-relaxed">
+            When new equipment models are added to the app's built-in catalog (for example, Voltas ACDS chillers),
+            they do not appear automatically in the live library. Click <strong>"Sync New Items"</strong> in the
+            library toolbar to add only the new entries — existing library items and custom models are never overwritten.
+          </p>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+            <Note>Sync New Items is safe to run repeatedly. It deduplicates by natural key (brand + type + sub-type + model series + capacity) and skips models already in the library.</Note>
+            <Tip>After any app update that mentions new catalog entries, run Sync New Items so the new models are available for all users in Equipment Selection.</Tip>
+          </div>
+        </div>
+
+        {/* ── Adding Equipment Manually ── */}
+        <div className="rounded-xl border border-blue-200 bg-blue-50 p-4 space-y-3">
+          <p className="text-xs font-bold text-blue-800 uppercase tracking-wide flex items-center gap-1.5">
+            <Wrench className="w-3.5 h-3.5" /> Adding Equipment Manually — Add Equipment Form
+          </p>
+          <p className="text-xs text-gray-700 leading-relaxed">
+            Click <strong>"+ Add Equipment"</strong> in the library toolbar. The form is context-aware —
+            sub-type options and optional fields change based on the Type you select first.
+          </p>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+            <div className="bg-white rounded-lg border border-blue-100 p-3 space-y-2">
+              <p className="text-xs font-bold text-blue-700">1 — Select Type</p>
+              <p className="text-xs text-gray-600 leading-relaxed">
+                Click one of the type pills: <em>VRF-IDU, VRF-ODU, Chiller, AHU, Package, DuctableSplit, Split, DOAS, ChillerIDU, CoolingTower.</em> The sub-type list and visible fields update immediately.
+              </p>
+            </div>
+            <div className="bg-white rounded-lg border border-blue-100 p-3 space-y-2">
+              <p className="text-xs font-bold text-blue-700">2 — Select Sub-type</p>
+              <p className="text-xs text-gray-600 leading-relaxed">
+                Choose from context-filtered options. Example: VRF-IDU → Wall-mounted, 4-way Cassette, Concealed Ducted (Low / Mid / High Static). Changing Type resets the sub-type.
+              </p>
+            </div>
+            <div className="bg-white rounded-lg border border-blue-100 p-3 space-y-2">
+              <p className="text-xs font-bold text-blue-700">3 — Fill Core Fields</p>
+              <p className="text-xs text-gray-600 leading-relaxed">
+                Brand, Model Series, Model Number, Capacity (TR), Rated CFM. Units are shown inside each input field — no separate label lookup needed.
+              </p>
+            </div>
+            <div className="bg-white rounded-lg border border-blue-100 p-3 space-y-2">
+              <p className="text-xs font-bold text-blue-700">4 — Fill Type-Specific Fields</p>
+              <p className="text-xs text-gray-600 leading-relaxed">
+                <strong>External Static Pressure (Pa)</strong> appears for ducted types (AHU, Package, Ductable Split, DOAS, ChillerIDU). <strong>EER / COP</strong> appears for Chiller, Package, VRF-ODU. VRF-ODU also has Min/Max Capacity % for inverter range.
+              </p>
+            </div>
+          </div>
+          <div className="overflow-x-auto rounded-lg border border-blue-200">
+            <table className="w-full text-xs">
+              <thead><tr className="bg-blue-100">
+                <th className="px-3 py-2 text-left font-semibold text-blue-800">Field</th>
+                <th className="px-3 py-2 text-center font-semibold text-blue-800">Unit</th>
+                <th className="px-3 py-2 text-left font-semibold text-blue-800">Notes</th>
+              </tr></thead>
+              <tbody>
+                {[
+                  ['Capacity', 'TR', 'Nameplate cooling capacity at AHRI rated conditions'],
+                  ['Rated CFM', 'CFM', 'Supply airflow at nominal conditions (0 Pa static for wall-mounts)'],
+                  ['External Static Pressure', 'Pa', 'Rated at this static for ducted units — verify against duct design'],
+                  ['Power Input', 'kW', 'Rated electrical input; used for MCB / cable sizing'],
+                  ['EER', 'BTU/W·h', 'Energy Efficiency Ratio at rated conditions'],
+                  ['COP', '—', 'Coefficient of Performance — typically 2.8–4.2 for modern inverter units'],
+                  ['Min / Max Capacity %', '%', 'VRF-ODU only — inverter modulation range (e.g. 25%–115%)'],
+                  ['Refrigerant', '—', 'R32, R410A, R407C, R22 — select from dropdown or type custom value'],
+                ].map(([field, unit, notes], i) => (
+                  <tr key={i} className={i % 2 === 0 ? 'bg-white' : 'bg-blue-50/30'}>
+                    <td className="px-3 py-1.5 font-semibold text-gray-800">{field}</td>
+                    <td className="px-3 py-1.5 font-mono text-blue-700 text-center">{unit}</td>
+                    <td className="px-3 py-1.5 text-gray-600">{notes}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        {/* ── CSV Import ── */}
+        <div className="rounded-xl border border-orange-200 bg-orange-50 p-4 space-y-3">
+          <p className="text-xs font-bold text-orange-800 uppercase tracking-wide flex items-center gap-1.5">
+            <FileText className="w-3.5 h-3.5" /> Bulk Import via CSV — Two Supported Formats
+          </p>
+          <p className="text-xs text-gray-700 leading-relaxed">
+            Click <strong>"Upload CSV"</strong> to import multiple models at once. The importer auto-detects
+            the format by reading the header row — no manual format selection needed.
+          </p>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+            <div className="bg-white rounded-lg border border-orange-100 p-3 space-y-2">
+              <p className="text-xs font-bold text-orange-700">Format 1 — App Template</p>
+              <p className="text-xs text-gray-600 leading-relaxed">
+                Header row starts with <strong>brand</strong> as the first column. Download the template from the
+                library toolbar, fill it in, and upload. Required columns: brand, type, subType, modelSeries, modelNo,
+                capacityTR, ratedAirflowCFM, refrigerant.
+              </p>
+              <p className="text-[11px] font-mono bg-orange-50 rounded px-2 py-1 text-gray-700">brand,type,subType,modelSeries,modelNo,capacityTR,…</p>
+            </div>
+            <div className="bg-white rounded-lg border border-orange-100 p-3 space-y-2">
+              <p className="text-xs font-bold text-orange-700">Format 2 — Manufacturer Spec Sheet</p>
+              <p className="text-xs text-gray-600 leading-relaxed">
+                Use the manufacturer's own CSV export directly. The importer maps by header name (e.g.
+                <em> product_series, model_no, kw_cool, refrigerant_type</em>) and derives type/sub-type from
+                the product series name automatically.
+              </p>
+              <p className="text-[11px] font-mono bg-orange-50 rounded px-2 py-1 text-gray-700">product_series,model_no,kw_cool,refrigerant_type,…</p>
+            </div>
+          </div>
+          <div className="overflow-x-auto rounded-lg border border-orange-200">
+            <table className="w-full text-xs">
+              <thead><tr className="bg-orange-100">
+                <th className="px-3 py-2 text-left font-semibold text-orange-800">Import result message</th>
+                <th className="px-3 py-2 text-left font-semibold text-orange-800">What it means</th>
+              </tr></thead>
+              <tbody>
+                {[
+                  ['Added: N items', 'N new models were written to the library successfully.'],
+                  ['Errors: N rows', 'N rows were skipped — missing required fields (capacity, brand, or model). Check the source CSV for blank cells in those columns.'],
+                  ['Format: template / manufacturer', 'Confirms which parsing mode was used. If wrong, ensure the header row first column matches the expected label (brand for template).'],
+                  ['0 added (all duplicates)', 'All rows already exist in the library — safe to re-upload without creating duplicates.'],
+                ].map(([result, meaning], i) => (
+                  <tr key={i} className={i % 2 === 0 ? 'bg-white' : 'bg-orange-50/30'}>
+                    <td className="px-3 py-1.5 font-mono font-bold text-orange-800">{result}</td>
+                    <td className="px-3 py-1.5 text-gray-600">{meaning}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <Warn>Manufacturer-format CSVs must include at least: a product series column, a model number column, and a cooling capacity column (kW or TR). Rows missing capacity are skipped with an error count.</Warn>
+        </div>
+
+        {/* ── Filters ── */}
+        <div className="rounded-xl border border-gray-200 bg-gray-50 p-4 space-y-2">
+          <p className="text-xs font-bold text-gray-700 uppercase tracking-wide">Using the Cascading Filters</p>
+          <p className="text-xs text-gray-600 leading-relaxed">
+            The library has four cascading filters: Brand → Type → Sub-type → Refrigerant. Each dropdown is
+            filtered by the selections above it — choosing a brand first narrows the type list to only types
+            that brand offers. Use the search bar to find a specific model number across all brands.
+          </p>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+            <Tip>To review all Chiller entries across all brands, set Type = "Chiller" and leave Brand empty. The list shows only chiller models, sorted by brand then capacity.</Tip>
+            <Note>The search bar matches across all fields — searching "R32" returns all models that use R32 refrigerant regardless of brand or type.</Note>
+          </div>
+        </div>
+      </SectionCard>
 
       {/* ════════════════════════════════════════════════════════════════════════
           EQUIPMENT SELECTION — COMPLETE GUIDE

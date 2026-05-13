@@ -135,6 +135,10 @@ function systemStatusInfo(sys: EquipmentSystem, rooms: any[]) {
     if (!sys.unitSelection) return { label: 'Condensing unit missing', color: 'text-orange-600' };
     return { label: 'Complete', color: 'text-emerald-600' };
   }
+  if (sys.type === 'DOAS') {
+    if (!sys.unitSelection) return { label: 'Unit not selected', color: 'text-orange-600' };
+    return { label: 'Complete', color: 'text-emerald-600' };
+  }
   if (!sys.unitSelection) return { label: 'Unit not selected', color: 'text-orange-600' };
   return { label: 'Complete', color: 'text-emerald-600' };
 }
@@ -924,7 +928,7 @@ function UnitPickerDialog({
   systemName, onSaveToLibrary, onSelect,
 }: {
   open: boolean; onClose: () => void;
-  systemType: 'Package' | 'DuctableSplit' | 'AHU' | 'Chiller' | 'Split';
+  systemType: 'Package' | 'DuctableSplit' | 'AHU' | 'Chiller' | 'Split' | 'DOAS';
   packageSubType?: string;
   requiredTR: number; designCFM: number;
   customItems?: EquipmentModel[];
@@ -942,14 +946,25 @@ function UnitPickerDialog({
 
   const isAHU     = systemType === 'AHU';
   const isChiller = systemType === 'Chiller';
+  const isDOAS    = systemType === 'DOAS';
 
   const [libraryPkgItems, setLibraryPkgItems] = useState<EquipmentModel[]>([]);
   useEffect(() => {
     if (!open) return;
-    getLibraryItemsByType(systemType).then(setLibraryPkgItems).catch(() => {
-      setLibraryPkgItems(EQUIPMENT_CATALOG.filter(m => m.type === systemType));
-    });
-  }, [open, systemType]);
+    if (isDOAS) {
+      getLibraryItemsByType('AHU').then(items => {
+        const doasSubTypes = new Set(['ERV', 'HRV', 'DOAS-DX', 'Fresh Air HW']);
+        setLibraryPkgItems(items.filter(m => doasSubTypes.has(m.subType ?? '')));
+      }).catch(() => {
+        const doasSubTypes = new Set(['ERV', 'HRV', 'DOAS-DX', 'Fresh Air HW']);
+        setLibraryPkgItems(EQUIPMENT_CATALOG.filter(m => m.type === 'AHU' && doasSubTypes.has(m.subType ?? '')));
+      });
+    } else {
+      getLibraryItemsByType(systemType).then(setLibraryPkgItems).catch(() => {
+        setLibraryPkgItems(EQUIPMENT_CATALOG.filter(m => m.type === systemType));
+      });
+    }
+  }, [open, systemType, isDOAS]);
 
   const subTypes = [...new Set(libraryPkgItems.map(m => m.subType).filter(Boolean))];
 
@@ -976,6 +991,7 @@ function UnitPickerDialog({
   const dialogTitle =
     isAHU     ? 'Select DX Condensing Unit' :
     isChiller ? 'Select Chiller' :
+    isDOAS    ? 'Select DOAS Unit (ERV / HRV / FAHU)' :
     systemType === 'Package' ? 'Select Package Unit' : 'Select Ductable Split Unit';
 
   return (
@@ -1013,7 +1029,7 @@ function UnitPickerDialog({
           <div className="mx-5 mt-3 mb-0 rounded-lg border border-amber-200 dark:border-amber-800 bg-amber-50 dark:bg-amber-950/20 px-4 py-2.5 flex items-center justify-between gap-3">
             <div className="flex items-center gap-2">
               <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0" />
-              <p className="text-xs text-amber-800 dark:text-amber-300">No {systemType} in catalog meets <strong>{requiredTR.toFixed(1)} TR</strong> requirement.</p>
+              <p className="text-xs text-amber-800 dark:text-amber-300">No {isDOAS ? 'DOAS' : systemType} unit in catalog meets <strong>{requiredTR.toFixed(1)} TR</strong> requirement.</p>
             </div>
             <Button size="sm" className="h-8 text-sm shrink-0 bg-amber-600 hover:bg-amber-700 gap-1"
               onClick={() => { setGenSpec(generateEquipmentSpecs(systemType, requiredTR, designCFM, systemName)); setShowGenerate(true); }}>
@@ -1381,6 +1397,7 @@ export default function EquipmentSelection({
   const [iduPicker, setIduPicker] = useState<{ roomId: string; roomName: string; reqTR: number; reqCFM: number } | null>(null);
   const [oduPicker, setOduPicker] = useState(false);
   const [unitPicker, setUnitPicker] = useState(false);
+  const [humidPicker, setHumidPicker] = useState<{ zoneId: string; suggestedKgHr: number } | null>(null);
   // Zone state
   const [zoneMode, setZoneMode] = useState(false);
   const [zoneSelected, setZoneSelected] = useState<Set<string>>(new Set());
@@ -1536,7 +1553,49 @@ export default function EquipmentSelection({
       collection(db, 'projects', project.id, 'equipmentSystems'),
       snap => {
         systemsLoadedRef.current = true;
-        setEquipSystems(snap.docs.map(d => ({ id: d.id, ...d.data() } as EquipmentSystem)));
+        const raw = snap.docs.map(d => ({ id: d.id, ...d.data() } as EquipmentSystem));
+
+        // Step 1: deduplicate by Firestore document ID
+        const seenIds = new Set<string>();
+        const idDeduped = raw.filter(s => {
+          if (seenIds.has(s.id)) return false;
+          seenIds.add(s.id);
+          return true;
+        });
+
+        // Step 2: deduplicate stale docs with same type+name — keep most recently updated
+        const nameKey = (s: EquipmentSystem) =>
+          `${String(s.type || '')}|${String(s.name || s.id).toLowerCase().trim()}`;
+        const nameMap = new Map<string, EquipmentSystem[]>();
+        idDeduped.forEach(s => {
+          const k = nameKey(s);
+          if (!nameMap.has(k)) nameMap.set(k, []);
+          nameMap.get(k)!.push(s);
+        });
+        const nameDeduped = Array.from(nameMap.values()).map(group => {
+          if (group.length === 1) return group[0];
+          return group.reduce((best, s) => {
+            const tBest = (best as any).updatedAt?.seconds ?? 0;
+            const tS    = (s as any).updatedAt?.seconds    ?? 0;
+            return tS > tBest ? s : best;
+          }, group[0]);
+        });
+
+        // Step 3: if any Chiller uses zone-based setup, remove legacy unitSelection-only Chillers
+        const hasZoneBasedChiller = nameDeduped.some(s =>
+          s.type === 'Chiller' &&
+          ((s as any).zones ?? []).some((z: any) => z.selection || (z.unitSelections ?? []).length > 0)
+        );
+        const deduped = hasZoneBasedChiller
+          ? nameDeduped.filter(s => {
+              if (s.type !== 'Chiller') return true;
+              const hasZones = ((s as any).zones ?? []).some((z: any) => z.selection || (z.unitSelections ?? []).length > 0);
+              if (hasZones) return true;
+              return !((s as any).unitSelection || ((s as any).chillerUnits ?? []).length > 0);
+            })
+          : nameDeduped;
+
+        setEquipSystems(deduped);
       },
     );
     return () => unsub();
@@ -2459,6 +2518,20 @@ export default function EquipmentSelection({
     } catch (err) { handleFirestoreError(err, OperationType.WRITE, `equipmentSystems/${selectedSystem.id}`); }
   };
 
+  const handleSelectHumidifier = async (zoneId: string, item: EquipmentModel) => {
+    if (!selectedSystem || !project) return;
+    const zone = ((selectedSystem.zones ?? []) as EquipmentZone[]).find((z: EquipmentZone) => z.id === zoneId);
+    const fahu = zone?.fahu ?? { hasElectricHeater: false, electricHeaterKW: 0, hasHumidifier: false, humidifierKgHr: 0 };
+    await handleUpdateZoneFahu(zoneId, {
+      ...fahu,
+      hasHumidifier: true,
+      humidifierKgHr: item.capacityLPH ?? 0,
+      humidifierModel: `${item.brand} ${item.modelSeries}`,
+      humidifierSubType: item.subType ?? '',
+    });
+    setHumidPicker(null);
+  };
+
   const handleSetZoneRoomMode = async (zoneId: string, mode: 'single' | 'per-room') => {
     if (!selectedSystem || !project) return;
     const zones = (selectedSystem.zones ?? [] as EquipmentZone[]).map((z: EquipmentZone) => {
@@ -3174,11 +3247,15 @@ export default function EquipmentSelection({
           });
         }
         if (zone.fahu.hasHumidifier && zone.fahu.humidifierKgHr > 0) {
+          const hm = zone.fahu as any;
           rows.push({
             key: `${sys.id}-fahu-humid-${zone.id}`,
             type: 'Humidifier', systemName: sys.name, roomName: zone.name,
-            brand: 'Steam/Electric', model: `${zone.fahu.humidifierKgHr} kg/hr Humidifier`,
-            subType: 'Humidification', tr: 0, qty: 1,
+            brand: hm.humidifierModel ? hm.humidifierModel.split(' ')[0] : 'Steam/Electric',
+            model: hm.humidifierModel
+              ? `${hm.humidifierModel.split(' ').slice(1).join(' ')} · ${zone.fahu.humidifierKgHr} kg/hr`
+              : `${zone.fahu.humidifierKgHr} kg/hr Humidifier`,
+            subType: hm.humidifierSubType || 'Humidification', tr: 0, qty: 1,
           });
         }
       }
@@ -3672,6 +3749,7 @@ export default function EquipmentSelection({
                           selectedSystem.type === 'AHU'     ? 'bg-sky-100 dark:bg-sky-900/30 text-sky-700 dark:text-sky-300 border-sky-200 dark:border-sky-700' :
                           selectedSystem.type === 'Chiller' ? 'bg-indigo-100 dark:bg-indigo-900/30 text-indigo-700 dark:text-indigo-300 border-indigo-200 dark:border-indigo-700' :
                           selectedSystem.type === 'Split'   ? 'bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-300 border-amber-200 dark:border-amber-700' :
+                          selectedSystem.type === 'DOAS'    ? 'bg-teal-100 dark:bg-teal-900/30 text-teal-700 dark:text-teal-300 border-teal-200 dark:border-teal-700' :
                           'bg-emerald-100 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-300 border-emerald-200 dark:border-emerald-700')}>
                           {hvacSystemCategory || selectedSystem.type}
                           {selectedSystem.condenserType ? ` · ${selectedSystem.condenserType}` :
@@ -3719,6 +3797,119 @@ export default function EquipmentSelection({
                       </Button>
                     </div>
                   </div>
+
+                  {/* ── DOAS Section ──────────────────────────────────────── */}
+                  {selectedSystem.type === 'DOAS' && (
+                    <div className="rounded-xl border border-teal-200 dark:border-teal-800 overflow-hidden shadow-sm">
+                      <div className="bg-teal-50 dark:bg-teal-950/30 px-5 py-3 border-b border-teal-200 dark:border-teal-800 flex items-center gap-2">
+                        <Wind className="w-4 h-4 text-teal-600 dark:text-teal-400" />
+                        <span className="text-sm font-bold uppercase text-teal-700 dark:text-teal-300 tracking-wide">DOAS Configuration</span>
+                        <span className="text-xs text-teal-500 dark:text-teal-500 ml-1">Dedicated Outdoor Air System</span>
+                      </div>
+                      <div className="p-5 space-y-5">
+                        {/* OA CFM summary */}
+                        <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+                          <div className="rounded-lg border border-teal-200 dark:border-teal-800 bg-teal-50/60 dark:bg-teal-950/20 px-4 py-3">
+                            <p className="text-xs font-bold uppercase tracking-wide text-teal-600 dark:text-teal-400">OA Flow Required</p>
+                            <p className="mt-1 font-mono text-xl font-bold text-teal-900 dark:text-teal-200">{Math.round(totalSystemOACFM).toLocaleString()}</p>
+                            <p className="text-xs text-teal-500 dark:text-teal-400">CFM fresh air</p>
+                          </div>
+                          <div className="rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 px-4 py-3">
+                            <p className="text-xs font-bold uppercase tracking-wide text-slate-500 dark:text-slate-400">Rooms Served</p>
+                            <p className="mt-1 font-mono text-xl font-bold text-slate-800 dark:text-slate-200">{systemRoomIds.length}</p>
+                            <p className="text-xs text-slate-400">assigned to this DOAS</p>
+                          </div>
+                          <div className="rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 px-4 py-3">
+                            <p className="text-xs font-bold uppercase tracking-wide text-slate-500 dark:text-slate-400">Supply Condition</p>
+                            <p className="mt-1 font-mono text-sm font-bold text-slate-700 dark:text-slate-300">55°F / 90% RH</p>
+                            <p className="text-xs text-slate-400">ASHRAE DOAS target</p>
+                          </div>
+                        </div>
+
+                        {/* Linked primary systems */}
+                        <div>
+                          <p className="text-sm font-bold text-slate-700 dark:text-slate-200 mb-2">Linked Primary Systems</p>
+                          <p className="text-xs text-slate-400 dark:text-slate-500 mb-3">Select which VRF / Chiller / AHU systems this DOAS supplements for ventilation.</p>
+                          <div className="flex flex-wrap gap-2">
+                            {equipSystems.filter(s => s.id !== selectedSystem.id && s.type !== 'DOAS').map(s => {
+                              const linked = ((selectedSystem as any).doasLinkedSystemIds ?? []).includes(s.id);
+                              return (
+                                <button
+                                  key={s.id}
+                                  onClick={() => {
+                                    const current: string[] = (selectedSystem as any).doasLinkedSystemIds ?? [];
+                                    const updated = linked ? current.filter((id: string) => id !== s.id) : [...current, s.id];
+                                    void updateSystemField(selectedSystem.id, { doasLinkedSystemIds: updated });
+                                  }}
+                                  className={cn(
+                                    'inline-flex items-center gap-1.5 text-sm px-3 py-1.5 rounded-full border font-medium transition-colors',
+                                    linked
+                                      ? 'bg-teal-100 dark:bg-teal-900/40 border-teal-400 dark:border-teal-600 text-teal-800 dark:text-teal-200'
+                                      : 'bg-white dark:bg-slate-800 border-slate-200 dark:border-slate-600 text-slate-500 dark:text-slate-400 hover:border-teal-300 hover:text-teal-700',
+                                  )}>
+                                  {linked && <Check className="w-3 h-3" />}
+                                  {s.name}
+                                  <span className="text-xs opacity-60">{s.type}</span>
+                                </button>
+                              );
+                            })}
+                            {equipSystems.filter(s => s.id !== selectedSystem.id && s.type !== 'DOAS').length === 0 && (
+                              <p className="text-xs text-slate-400 italic">No other systems — create a VRF or Chiller system first.</p>
+                            )}
+                          </div>
+                        </div>
+
+                        {/* Unit selection */}
+                        <div>
+                          <p className="text-sm font-bold text-slate-700 dark:text-slate-200 mb-2">DOAS Unit Selection</p>
+                          {selectedSystem.unitSelection ? (
+                            <div className="flex items-center gap-3 rounded-lg border border-emerald-200 dark:border-emerald-800 bg-emerald-50 dark:bg-emerald-950/20 px-4 py-3">
+                              <div className="flex-1">
+                                <p className="text-sm font-semibold text-emerald-800 dark:text-emerald-300">
+                                  {selectedSystem.unitSelection.brand} {selectedSystem.unitSelection.modelSeries}
+                                  {selectedSystem.unitSelection.subType && <span className="ml-2 text-xs font-bold px-1.5 py-0.5 rounded bg-teal-100 dark:bg-teal-900/30 text-teal-700 dark:text-teal-300 border border-teal-200 dark:border-teal-700">{selectedSystem.unitSelection.subType}</span>}
+                                </p>
+                                <p className="text-xs text-emerald-600 dark:text-emerald-400 mt-0.5">
+                                  {selectedSystem.unitSelection.trCapacity > 0 && <span>{selectedSystem.unitSelection.trCapacity} TR · </span>}
+                                  {selectedSystem.unitSelection.cfmRated > 0 && <span>{Math.round(selectedSystem.unitSelection.cfmRated).toLocaleString()} CFM · </span>}
+                                  Qty: {selectedSystem.unitSelection.quantity ?? 1}
+                                </p>
+                              </div>
+                              <Button size="sm" variant="outline" className="h-8 text-sm px-3 border-emerald-300 text-emerald-700 hover:bg-emerald-50"
+                                onClick={() => setUnitPicker(true)}>
+                                Change
+                              </Button>
+                              <button className="text-slate-400 hover:text-red-500 p-1.5"
+                                onClick={() => void removeUnit(selectedSystem.id)}>
+                                <Trash2 className="w-4 h-4" />
+                              </button>
+                            </div>
+                          ) : (
+                            <div className="rounded-lg border border-dashed border-teal-300 dark:border-teal-700 bg-teal-50/40 dark:bg-teal-950/10 p-4 flex flex-col items-center gap-2 text-center">
+                              <p className="text-sm text-slate-500 dark:text-slate-400">No unit selected</p>
+                              <p className="text-xs text-slate-400 dark:text-slate-500">Pick an ERV, HRV, or FAHU sized for <strong>{Math.round(totalSystemOACFM).toLocaleString()} CFM</strong> OA</p>
+                              <Button size="sm" className="mt-1 h-8 text-sm px-4 bg-teal-600 hover:bg-teal-700"
+                                onClick={() => setUnitPicker(true)}>
+                                Select DOAS Unit
+                              </Button>
+                            </div>
+                          )}
+                        </div>
+
+                        {/* Notes */}
+                        <div>
+                          <p className="text-sm font-bold text-slate-700 dark:text-slate-200 mb-1.5">Design Notes</p>
+                          <textarea
+                            className="w-full text-sm border border-slate-200 dark:border-slate-600 rounded-lg px-3 py-2 bg-white dark:bg-slate-800 dark:text-slate-200 resize-none focus:outline-none focus:ring-1 focus:ring-teal-400"
+                            rows={2}
+                            placeholder="e.g. DOAS serves office floors 1–3; ERV with enthalpy wheel; supply at neutral air (55 °F / 90 % RH)"
+                            value={(selectedSystem as any).notes ?? ''}
+                            onChange={e => void updateSystemField(selectedSystem.id, { notes: e.target.value })}
+                          />
+                        </div>
+                      </div>
+                    </div>
+                  )}
 
                   {/* Zone Manager — Project → System → Zone → Room */}
                   <div className="rounded-xl border border-slate-200 dark:border-slate-700 overflow-hidden shadow-sm">
@@ -3958,29 +4149,42 @@ export default function EquipmentSelection({
                                         </div>
                                         {/* Humidifier — only when room(s) in zone require it */}
                                         {zoneNeedsHumidifier && (
-                                        <div className="flex items-center gap-3 flex-wrap">
-                                          <label className="flex items-center gap-1.5 cursor-pointer select-none">
-                                            <input type="checkbox"
-                                              checked={fahu.hasHumidifier}
-                                              onChange={e => void handleUpdateZoneFahu(zone.id, { ...fahu, hasHumidifier: e.target.checked })}
-                                              className="rounded border-slate-300 dark:border-slate-600" />
-                                            <span className="text-sm font-semibold text-slate-700 dark:text-slate-300">Humidifier</span>
-                                          </label>
-                                          {fahu.hasHumidifier && (
-                                            <div className="flex items-center gap-1.5 flex-wrap">
-                                              <input type="number" min={0} step={0.1}
-                                                value={fahu.humidifierKgHr || ''}
-                                                onChange={e => void handleUpdateZoneFahu(zone.id, { ...fahu, humidifierKgHr: parseFloat(e.target.value) || 0 })}
-                                                className="w-16 h-8 text-sm font-mono border border-slate-300 dark:border-slate-600 rounded px-1.5 bg-white dark:bg-slate-800 dark:text-slate-300 focus:outline-none focus:ring-1 focus:ring-blue-400"
-                                                placeholder="kg/hr" />
-                                              <span className="text-xs text-slate-500 dark:text-slate-400">kg/hr</span>
-                                              {suggestedHumidKgHr > 0 && !fahu.humidifierKgHr && (
+                                        <div className="space-y-1.5">
+                                          <div className="flex items-center gap-3 flex-wrap">
+                                            <label className="flex items-center gap-1.5 cursor-pointer select-none">
+                                              <input type="checkbox"
+                                                checked={fahu.hasHumidifier}
+                                                onChange={e => void handleUpdateZoneFahu(zone.id, { ...fahu, hasHumidifier: e.target.checked })}
+                                                className="rounded border-slate-300 dark:border-slate-600" />
+                                              <span className="text-sm font-semibold text-slate-700 dark:text-slate-300">Humidifier</span>
+                                            </label>
+                                            {fahu.hasHumidifier && (
+                                              <div className="flex items-center gap-1.5 flex-wrap">
+                                                <input type="number" min={0} step={0.1}
+                                                  value={fahu.humidifierKgHr || ''}
+                                                  onChange={e => void handleUpdateZoneFahu(zone.id, { ...fahu, humidifierKgHr: parseFloat(e.target.value) || 0 })}
+                                                  className="w-16 h-8 text-sm font-mono border border-slate-300 dark:border-slate-600 rounded px-1.5 bg-white dark:bg-slate-800 dark:text-slate-300 focus:outline-none focus:ring-1 focus:ring-blue-400"
+                                                  placeholder="kg/hr" />
+                                                <span className="text-xs text-slate-500 dark:text-slate-400">kg/hr</span>
+                                                {suggestedHumidKgHr > 0 && !fahu.humidifierKgHr && (
+                                                  <button type="button"
+                                                    className="text-xs text-blue-600 hover:underline"
+                                                    onClick={() => void handleUpdateZoneFahu(zone.id, { ...fahu, humidifierKgHr: suggestedHumidKgHr })}>
+                                                    Use est. {suggestedHumidKgHr} kg/hr
+                                                  </button>
+                                                )}
                                                 <button type="button"
-                                                  className="text-xs text-blue-600 hover:underline"
-                                                  onClick={() => void handleUpdateZoneFahu(zone.id, { ...fahu, humidifierKgHr: suggestedHumidKgHr })}>
-                                                  Use est. {suggestedHumidKgHr} kg/hr
+                                                  className="text-xs px-2 py-0.5 rounded border border-blue-300 dark:border-blue-700 text-blue-600 dark:text-blue-400 hover:bg-blue-50 dark:hover:bg-blue-900/30"
+                                                  onClick={() => setHumidPicker({ zoneId: zone.id, suggestedKgHr: fahu.humidifierKgHr || suggestedHumidKgHr })}>
+                                                  Select model
                                                 </button>
-                                              )}
+                                              </div>
+                                            )}
+                                          </div>
+                                          {fahu.humidifierModel && (
+                                            <div className="text-xs text-slate-500 dark:text-slate-400 pl-1">
+                                              Selected: <span className="font-semibold text-slate-700 dark:text-slate-300">{fahu.humidifierModel}</span>
+                                              {fahu.humidifierSubType && <span className="ml-1 text-slate-400">· {fahu.humidifierSubType}</span>}
                                             </div>
                                           )}
                                         </div>
@@ -4059,11 +4263,20 @@ export default function EquipmentSelection({
                                                   value={zone.selection!.coilType ?? ''}
                                                   onChange={async e => {
                                                     const newCoilType = e.target.value as IDUSelection['coilType'];
-                                                    await handleUpdateZoneEquipProps(zone.id, { coilType: newCoilType });
                                                     const hasHeat = isDXCoil
                                                       ? newCoilType === 'cooling-heating'
                                                       : newCoilType === 'cooling-heating' || ((selectedSystem.zones ?? []) as EquipmentZone[]).some(z => z.id !== zone.id && z.selection?.coilType === 'cooling-heating');
-                                                    await updateAHUCfg({ hasHeatingCoil: hasHeat });
+                                                    // Merge coilType + hasHeatingCoil in one write — two sequential writes both
+                                                    // rebuild from stale selectedSystem.zones and the second overwrites the first
+                                                    const nextAhuCfg = { ...ahuCfg, hasHeatingCoil: hasHeat };
+                                                    const updatedZones = ((selectedSystem.zones ?? []) as EquipmentZone[]).map((z: EquipmentZone) =>
+                                                      z.id === zone.id
+                                                        ? { ...z, selection: z.selection ? { ...z.selection, coilType: newCoilType } : z.selection, ahuConfig: nextAhuCfg }
+                                                        : z
+                                                    );
+                                                    const docUpdates: Record<string, any> = { zones: updatedZones, updatedAt: serverTimestamp() };
+                                                    if (selectedSystem.type !== 'VRF') docUpdates.ahuConfig = nextAhuCfg;
+                                                    await updateDoc(doc(db, 'projects', project.id, 'equipmentSystems', selectedSystem.id), docUpdates);
                                                   }}
                                                   className="w-full text-sm border border-slate-200 dark:border-slate-600 rounded-md px-2.5 py-1.5 bg-white dark:bg-slate-800 dark:text-slate-300 focus:outline-none focus:ring-2 focus:ring-blue-400"
                                                 >
@@ -4206,11 +4419,55 @@ export default function EquipmentSelection({
                                           </div>
                                         )}
 
-                                        {zoneNeedsHumidifier && (
-                                          <div className="text-xs text-sky-700 dark:text-sky-300 bg-sky-50 dark:bg-sky-900/30 border border-sky-300 dark:border-sky-700 rounded-md px-3 py-2 font-medium">
-                                            💧 This zone has rooms requiring a humidifier — include humidifier section in AHU specification.
-                                          </div>
-                                        )}
+                                        {zoneNeedsHumidifier && (() => {
+                                          const ahuFahu = zone.fahu ?? { hasElectricHeater: false, electricHeaterKW: 0, hasHumidifier: false, humidifierKgHr: 0 };
+                                          const suggestedKgHr = zoneCFM > 0 ? parseFloat((zoneCFM * 0.000091).toFixed(1)) : 0;
+                                          return (
+                                            <div className="border border-sky-200 dark:border-sky-700 rounded-md bg-sky-50 dark:bg-sky-900/30 px-3 py-2.5 space-y-2">
+                                              <div className="flex items-center gap-2">
+                                                <span className="text-xs font-bold uppercase tracking-wide text-sky-700 dark:text-sky-300">💧 AHU Humidifier</span>
+                                                <span className="text-xs text-sky-600 dark:text-sky-400 italic">· rooms in this zone require humidification</span>
+                                              </div>
+                                              <div className="flex items-center gap-3 flex-wrap">
+                                                <label className="flex items-center gap-1.5 cursor-pointer select-none">
+                                                  <input type="checkbox"
+                                                    checked={ahuFahu.hasHumidifier}
+                                                    onChange={e => void handleUpdateZoneFahu(zone.id, { ...ahuFahu, hasHumidifier: e.target.checked })}
+                                                    className="rounded border-slate-300 dark:border-slate-600 accent-sky-600" />
+                                                  <span className="text-sm font-semibold text-sky-800 dark:text-sky-200">Include Steam / Electric Humidifier</span>
+                                                </label>
+                                                {ahuFahu.hasHumidifier && (
+                                                  <div className="flex items-center gap-1.5 flex-wrap">
+                                                    <input type="number" min={0} step={0.1}
+                                                      value={ahuFahu.humidifierKgHr || ''}
+                                                      onChange={e => void handleUpdateZoneFahu(zone.id, { ...ahuFahu, humidifierKgHr: parseFloat(e.target.value) || 0 })}
+                                                      className="w-16 h-8 text-sm font-mono border border-sky-300 dark:border-sky-700 rounded px-1.5 bg-white dark:bg-slate-800 dark:text-slate-300 focus:outline-none focus:ring-1 focus:ring-sky-400"
+                                                      placeholder="kg/hr" />
+                                                    <span className="text-xs text-slate-500 dark:text-slate-400">kg/hr</span>
+                                                    {suggestedKgHr > 0 && !ahuFahu.humidifierKgHr && (
+                                                      <button type="button"
+                                                        className="text-xs text-sky-600 dark:text-sky-400 hover:underline"
+                                                        onClick={() => void handleUpdateZoneFahu(zone.id, { ...ahuFahu, humidifierKgHr: suggestedKgHr })}>
+                                                        Use est. {suggestedKgHr} kg/hr
+                                                      </button>
+                                                    )}
+                                                    <button type="button"
+                                                      className="text-xs px-2 py-0.5 rounded border border-sky-300 dark:border-sky-700 text-sky-600 dark:text-sky-400 hover:bg-sky-100 dark:hover:bg-sky-900/50"
+                                                      onClick={() => setHumidPicker({ zoneId: zone.id, suggestedKgHr: ahuFahu.humidifierKgHr || suggestedKgHr })}>
+                                                      Select model
+                                                    </button>
+                                                  </div>
+                                                )}
+                                              </div>
+                                              {ahuFahu.humidifierModel && (
+                                                <div className="text-xs text-sky-700 dark:text-sky-300 pl-1">
+                                                  Selected: <span className="font-semibold">{ahuFahu.humidifierModel}</span>
+                                                  {ahuFahu.humidifierSubType && <span className="ml-1 text-sky-500">· {ahuFahu.humidifierSubType}</span>}
+                                                </div>
+                                              )}
+                                            </div>
+                                          );
+                                        })()}
                                       </div>
                                     );
                                   })()}
@@ -5152,6 +5409,7 @@ export default function EquipmentSelection({
                               s.type === 'AHU'           ? 'bg-teal-50 dark:bg-teal-950/20 text-teal-700 dark:text-teal-300 border-teal-200 dark:border-teal-800' :
                               s.type === 'Package' || s.type === 'DuctableSplit' ? 'bg-sky-50 dark:bg-sky-950/20 text-sky-700 dark:text-sky-300 border-sky-200 dark:border-sky-800' :
                               s.type === 'Split'         ? 'bg-amber-50 dark:bg-amber-950/20 text-amber-700 dark:text-amber-300 border-amber-200 dark:border-amber-800' :
+                              s.type === 'DOAS'          ? 'bg-teal-50 dark:bg-teal-950/20 text-teal-700 dark:text-teal-300 border-teal-200 dark:border-teal-800' :
                               'bg-slate-50 dark:bg-slate-800 text-slate-600 dark:text-slate-400 border-slate-200 dark:border-slate-700'
                             )}>
                               {s.type}
@@ -5724,25 +5982,29 @@ export default function EquipmentSelection({
         />
       )}
 
-      {/* ── Unit Picker — AHU (DX condensing unit) and Chiller (plant section) ── */}
-      {selectedSystem && (selectedSystem.type === 'AHU' || selectedSystem.type === 'Chiller') && (
+      {/* ── Unit Picker — AHU (DX condensing unit), Chiller, and DOAS ── */}
+      {selectedSystem && (selectedSystem.type === 'AHU' || selectedSystem.type === 'Chiller' || selectedSystem.type === 'DOAS') && (
         <UnitPickerDialog
           open={unitPicker}
           onClose={() => setUnitPicker(false)}
-          systemType={selectedSystem.type as 'AHU' | 'Chiller'}
+          systemType={selectedSystem.type as 'AHU' | 'Chiller' | 'DOAS'}
           packageSubType={selectedSystem.packageSubType}
           requiredTR={
             selectedSystem.type === 'Chiller'
               ? Math.max(0.5, chillerDiverseTR - chillerTotalInstalledTR)
+              : selectedSystem.type === 'DOAS'
+              ? totalSystemOACFM / 600
               : (unitQuantity > 1 ? totalRequiredTR / unitQuantity : totalRequiredTR)
           }
-          designCFM={unitQuantity > 1 ? totalDesignCFM / unitQuantity : totalDesignCFM}
+          designCFM={selectedSystem.type === 'DOAS' ? totalSystemOACFM : (unitQuantity > 1 ? totalDesignCFM / unitQuantity : totalDesignCFM)}
           customItems={customEquipment}
           systemName={selectedSystem.name}
           onSaveToLibrary={async (item) => { await saveCustomEquipment_item(item); }}
           onSelect={sel => {
             if (selectedSystem.type === 'Chiller') {
               void addChillerUnit(selectedSystem.id, sel);
+            } else if (selectedSystem.type === 'DOAS') {
+              void selectUnit(selectedSystem.id, sel);
             } else {
               void addAHUUnit(selectedSystem.id, sel);
             }
@@ -5813,6 +6075,69 @@ export default function EquipmentSelection({
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {/* ── Humidifier Model Picker ── */}
+      {humidPicker && (
+        <Dialog open={!!humidPicker} onOpenChange={v => { if (!v) setHumidPicker(null); }}>
+          <DialogContent className="sm:max-w-2xl max-h-[80vh] flex flex-col p-0 dark:bg-slate-900">
+            <DialogHeader className="px-5 pt-5 pb-3 border-b dark:border-slate-700">
+              <DialogTitle className="text-sm font-bold dark:text-slate-100">Select Humidifier Model</DialogTitle>
+              {humidPicker.suggestedKgHr > 0 && (
+                <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">
+                  Required: <span className="font-semibold text-sky-700 dark:text-sky-300">{humidPicker.suggestedKgHr} kg/hr</span> · select a model at or above this capacity
+                </p>
+              )}
+            </DialogHeader>
+            <div className="overflow-y-auto flex-1 px-4 py-3 space-y-3">
+              {(['Ultrasonic', 'Heater-Based'] as const).map(subType => {
+                const items = EQUIPMENT_CATALOG.filter(m => m.type === 'Humidifier' && m.subType === subType);
+                if (!items.length) return null;
+                return (
+                  <div key={subType}>
+                    <div className="text-xs font-bold uppercase tracking-wide text-slate-500 dark:text-slate-400 mb-1.5">
+                      {subType === 'Ultrasonic' ? 'Ultrasonic (Cool Mist — low power)' : 'Heater-Based (Steam — higher power)'}
+                    </div>
+                    <div className="rounded-lg border border-slate-200 dark:border-slate-700 overflow-hidden">
+                      <table className="w-full text-xs">
+                        <thead>
+                          <tr className="bg-slate-50 dark:bg-slate-800 text-xs uppercase text-slate-500 dark:text-slate-400">
+                            <th className="text-left px-3 py-1.5 font-semibold">Model</th>
+                            <th className="text-right px-3 py-1.5 font-semibold">Capacity</th>
+                            <th className="text-right px-3 py-1.5 font-semibold">Power</th>
+                            <th className="px-2 py-1.5"></th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-100 dark:divide-slate-700">
+                          {items.map(item => {
+                            const adequate = (item.capacityLPH ?? 0) >= humidPicker.suggestedKgHr;
+                            return (
+                              <tr key={item.id} className={cn('hover:bg-sky-50 dark:hover:bg-sky-900/20', adequate ? '' : 'opacity-60')}>
+                                <td className="px-3 py-1.5 font-medium dark:text-slate-300">
+                                  {item.brand} {item.modelSeries}
+                                  {adequate && <span className="ml-1.5 text-emerald-600 dark:text-emerald-400 text-[10px] font-bold">✓ Fits</span>}
+                                </td>
+                                <td className="px-3 py-1.5 text-right font-mono dark:text-slate-300">{item.capacityLPH} kg/hr</td>
+                                <td className="px-3 py-1.5 text-right font-mono text-slate-500 dark:text-slate-400">{item.powerInputKW} kW</td>
+                                <td className="px-2 py-1.5 text-right">
+                                  <button
+                                    className="px-2.5 py-1 text-xs rounded bg-sky-600 text-white hover:bg-sky-700 font-medium"
+                                    onClick={() => void handleSelectHumidifier(humidPicker.zoneId, item)}>
+                                    Select
+                                  </button>
+                                </td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </DialogContent>
+        </Dialog>
+      )}
     </div>
   );
 }

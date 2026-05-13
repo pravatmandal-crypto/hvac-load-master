@@ -968,6 +968,59 @@ export const generatePDFReport = (
     margin: { left: PAGE.left, right: PAGE.right },
   });
 
+  // ── Equipment Fit Verification ────────────────────────────────────────────
+  {
+    const fitBody: any[][] = [];
+    for (const entity of entities) {
+      if (entity.rooms.length === 0) continue;
+      const eDc  = resolveEntityDC(entity, summer, project);
+      const eMon = monsoon ? resolveEntityDC(entity, monsoon, project) : null;
+      let sBTU = 0, sCFM = 0, mBTU = 0, mCFM = 0;
+      entity.rooms.forEach((rm) => {
+        const sm = computeDetailed(rm, envelopeElements[rm.id] || [], eDc, project);
+        sBTU += sm.grandTotal; sCFM += sm.designCfm;
+        if (eMon) { const mm = computeDetailed(rm, envelopeElements[rm.id] || [], eMon, project); mBTU += mm.grandTotal; mCFM += mm.designCfm; }
+      });
+      const sTR = sBTU / 12000, mTR = mBTU / 12000;
+      const govTR  = includeMonsoon ? Math.max(Math.max(sTR, sCFM / 400), Math.max(mTR, mCFM / 400)) : Math.max(sTR, sCFM / 400);
+      const govCFM = Math.max(sCFM, mCFM);
+      const inst   = getInstalledTrCfm(entity.id, effectiveEquipSystems, entity.rooms.map(r => r.id));
+      const fitStatus = inst.tr === 0 ? 'No Equip' : inst.tr >= govTR * 0.97 ? 'OK' : 'Undersized';
+      fitBody.push([entity.name, n2(govTR), n0(govCFM), inst.tr > 0 ? n2(inst.tr) : '—', inst.cfm > 0 ? n0(inst.cfm) : '—', fitStatus]);
+    }
+    if (fitBody.length > 0) {
+      y = (doc as any).lastAutoTable.finalY + 8;
+      y = ensureSpace(doc, y, 16 + fitBody.length * 7, project);
+      y = subBanner(doc, 'Equipment Fit Verification  (safety factors already included in Governing TR)', y, C);
+      y += 2;
+      autoTable(doc, {
+        startY: y,
+        head: [['Entity / Zone', 'Governing TR', 'Design CFM', 'Inst. TR', 'Inst. CFM', 'Status']],
+        body: fitBody,
+        theme: 'grid',
+        styles:     { fontSize: 7.5, cellPadding: 2, textColor: C.ink },
+        headStyles: { fillColor: C.accent, textColor: [255, 255, 255] as [number,number,number], fontStyle: 'bold', fontSize: 7.5 },
+        columnStyles: {
+          0: { fontStyle: 'bold', cellWidth: 48 },
+          1: { halign: 'right' as const, cellWidth: 24, fontStyle: 'bold' },
+          2: { halign: 'right' as const, cellWidth: 24 },
+          3: { halign: 'right' as const, cellWidth: 22, fontStyle: 'bold' },
+          4: { halign: 'right' as const, cellWidth: 22 },
+          5: { halign: 'center' as const, fontStyle: 'bold' },
+        },
+        willDrawCell: (data: any) => {
+          if (data.section === 'body' && data.column.index === 6) {
+            const s = String(data.cell.raw);
+            if (s === 'OK')         data.cell.styles.textColor = [20, 130, 70]  as [number,number,number];
+            else if (s === 'Undersized') data.cell.styles.textColor = [180, 50, 50] as [number,number,number];
+            else                    data.cell.styles.textColor = [120, 120, 120] as [number,number,number];
+          }
+        },
+        margin: { left: PAGE.left, right: PAGE.right },
+      });
+    }
+  }
+
   // ═══ SECTIONS 4+: ENTITY DETAIL ═══════════════════════════════════════════
 
   for (const entity of entities) {
@@ -1713,6 +1766,33 @@ export const generatePDFReport = (
     }
   }
 
+  // ═══ DESIGN NOTES & ASSUMPTIONS ══════════════════════════════════════════
+  {
+    const projNotes = String(project?.notes ?? project?.data?.notes ?? '').trim();
+    const sysWithNotes = effectiveEquipSystems.filter((s: any) => String(s.notes ?? '').trim());
+    if (projNotes || sysWithNotes.length > 0) {
+      y = startBody(doc, project);
+      y = sectionBanner(doc, 'DESIGN NOTES & ASSUMPTIONS', y, C);
+      y += 5;
+      if (projNotes) {
+        doc.setFont('helvetica', 'bold'); doc.setFontSize(8.5); doc.setTextColor(...C.ink);
+        doc.text('Project Notes', PAGE.left, y); y += 5;
+        doc.setFont('helvetica', 'normal'); doc.setFontSize(8); doc.setTextColor(...C.subInk);
+        const noteLines = doc.splitTextToSize(projNotes, pageW - PAGE.left - PAGE.right);
+        doc.text(noteLines, PAGE.left, y); y += (noteLines.length * 4.5) + 6;
+      }
+      for (const sys of sysWithNotes) {
+        const sysNotes = String(sys.notes ?? '').trim();
+        y = ensureSpace(doc, y, 20, project);
+        doc.setFont('helvetica', 'bold'); doc.setFontSize(8); doc.setTextColor(...C.ink);
+        doc.text(`${String(sys.name ?? sys.id)}  ·  ${String(sys.type ?? '')}`, PAGE.left, y); y += 5;
+        doc.setFont('helvetica', 'normal'); doc.setFontSize(7.5); doc.setTextColor(...C.subInk);
+        const sysLines = doc.splitTextToSize(sysNotes, pageW - PAGE.left - PAGE.right);
+        doc.text(sysLines, PAGE.left, y); y += (sysLines.length * 4.5) + 8;
+      }
+    }
+  }
+
   // ═══ Stamp headers/footers on all body pages ══════════════════════════════
 
   const totalPages = doc.getNumberOfPages();
@@ -1734,64 +1814,178 @@ const renderEquipmentScheduleBody = (
   flatRooms: any[],
   project: any,
   C: Theme,
+  startY?: number,
 ) => {
   const eqHead = ['Zone / Room', 'Equipment', 'Brand', 'Model / Series', 'Sub-type', 'TR (Rated)', 'CFM (Rated)', 'Qty'];
-  let y = PAGE.top + 4;
+  // Show only the human-readable model series; never expose raw Firestore doc IDs
+  const ms = (item: any) => String(item?.modelSeries || item?.model || '—').trim() || '—';
+  // Defaults match DEFAULT_AHU_CONFIG in EquipmentSelection.tsx
+  const AHU_DEFAULTS = {
+    fanCurve: 'backward-curved', fanDrive: 'belt-driven', extStaticPa: 150,
+    hasMixingBox: true, coolingCoilRows: 6, heatingCoilRows: 2, hasHeatingCoil: false,
+    filters: { pre: true, fine: true, hepa: false },
+    preFilterGrade: 'G4 (EU4 / MERV-8)', fineFilterGrade: 'F7 (EU7 / MERV-13)', hepaFilterGrade: 'H14',
+  };
+  let y = startY ?? PAGE.top + 4;
 
-  for (const sys of equipSystems) {
+  // ── System deduplication ─────────────────────────────────────────────────────
+  // Step 1: deduplicate by Firestore document ID (exact duplicates)
+  const seenSysIds = new Set<string>();
+  const idDeduped = equipSystems.filter((s: any) => {
+    if (seenSysIds.has(s.id)) return false;
+    seenSysIds.add(s.id);
+    return true;
+  });
+
+  // Step 2: deduplicate stale documents that share the same type+name (created during
+  // modifications when the old document was never deleted).  Keep the most recently
+  // updated document for each type+name pair — that is the user's current setup.
+  const systemNameKey = (s: any) =>
+    `${String(s.type || '')}|${String(s.name || s.id).toLowerCase().trim()}`;
+  const nameGroupMap = new Map<string, any[]>();
+  idDeduped.forEach((s: any) => {
+    const k = systemNameKey(s);
+    if (!nameGroupMap.has(k)) nameGroupMap.set(k, []);
+    nameGroupMap.get(k)!.push(s);
+  });
+  const dedupedSystems = Array.from(nameGroupMap.values()).map(group => {
+    if (group.length === 1) return group[0];
+    // Multiple docs with the same type+name → keep the most recently updated one
+    return group.reduce((best: any, s: any) => {
+      const tBest = best.updatedAt?.seconds ?? best.updatedAt?.toMillis?.() / 1000 ?? 0;
+      const tS    = s.updatedAt?.seconds    ?? s.updatedAt?.toMillis?.()    / 1000 ?? 0;
+      return tS > tBest ? s : best;
+    }, group[0]);
+  });
+
+  // Step 3: for Chiller systems — if ANY Chiller document uses the zone-based data path
+  // (chillerUnits[] + zones[].selection), treat any other Chiller document that uses ONLY
+  // the legacy unitSelection/ctSelection path (no zones with equipment) as stale and skip it.
+  // This handles the "IGLOO 1" vs "Chiller Plant" pattern where the user migrated to zones
+  // but the old legacy document was never deleted from Firestore.
+  const hasZoneBasedChiller = dedupedSystems.some((s: any) =>
+    String(s.type) === 'Chiller' &&
+    (s.zones ?? []).some((z: any) => z.selection || (z.unitSelections ?? []).length > 0)
+  );
+  const finalSystems = hasZoneBasedChiller
+    ? dedupedSystems.filter((s: any) => {
+        if (String(s.type) !== 'Chiller') return true;
+        const hasZones = (s.zones ?? []).some((z: any) => z.selection || (z.unitSelections ?? []).length > 0);
+        if (hasZones) return true;
+        // Legacy-only Chiller: has unitSelection or chillerUnits but NO zones with equipment
+        const isLegacyOnly = !!(s.unitSelection || (s.chillerUnits ?? []).length > 0);
+        return !isLegacyOnly; // skip legacy-only when a zone-based Chiller exists
+      })
+    : dedupedSystems;
+
+  for (const sys of finalSystems) {
     const sysType  = String(sys.type  || '—');
     const sysName  = String(sys.name  || `System ${sys.id}`);
     const sysBrand = String(sys.brand || '—');
+    // ── Zone deduplication ────────────────────────────────────────────────────
+    // Step 1: deduplicate by zone ID
+    const seenZoneIds = new Set<string>();
+    const idDedupedZones: any[] = ((sys.zones ?? []) as any[]).filter((z: any) => {
+      if (!z.id || seenZoneIds.has(z.id)) return false;
+      seenZoneIds.add(z.id);
+      return true;
+    });
+
+    // Step 2: sort zones newest-first (zone IDs embed a Date.now() timestamp: "zone-1234567890")
+    // so that when room-coverage filtering runs, the latest zone wins over stale old zones.
+    const zoneTimestamp = (z: any): number =>
+      parseInt(String(z.id ?? '').replace(/^[a-z]+-/, ''), 10) || 0;
+    idDedupedZones.sort((a: any, b: any) => zoneTimestamp(b) - zoneTimestamp(a));
+
+    // Step 3: room-coverage filter — skip any zone whose rooms are ALL already claimed by
+    // a newer zone.  This removes orphaned zones left when a zone was deleted and re-created.
+    const claimedRoomIds = new Set<string>();
+    const dedupedZones: any[] = idDedupedZones.filter((z: any) => {
+      const rIds: string[] = z.roomIds ?? [];
+      const hasEquip = !!(z.selection || (z.unitSelections ?? []).length > 0);
+      if (!hasEquip) return false; // skip zones with no equipment at all
+      if (rIds.length === 0) return true; // empty-room zones: keep if they have equipment
+      const allClaimed = rIds.every(rid => claimedRoomIds.has(rid));
+      if (allClaimed) return false; // stale zone — all its rooms moved to a newer zone
+      rIds.forEach(rid => claimedRoomIds.add(rid));
+      return true;
+    });
     const eqBody: any[][] = [];
 
     if (sysType === 'VRF' && sys.oduSelection) {
       const odu = sys.oduSelection;
       const instTR = odu.effectiveTR ?? ((odu.trCapacity ?? 0) * (odu.modules ?? 1));
       eqBody.push([sysName, 'ODU', String(odu.brand || sysBrand),
-        `${String(odu.modelSeries || '')} ${String(odu.modelId || '')}`.trim() || '—',
+        ms(odu),
         String(odu.compressorType || '—'), n2(instTR), '—', odu.modules ? `×${odu.modules} mod` : '1']);
+      const df = sys.diversityFactor;
+      if (df && df !== 1) {
+        let connTR = 0;
+        dedupedZones.forEach((z: any) => {
+          if (z.unitSelections?.length) connTR += (z.unitSelections as any[]).reduce((s: number, u: any) => s + (u.trCapacity ?? 0) * (u.quantity ?? 1), 0);
+          else if (z.selection) connTR += (z.selection.trCapacity ?? 0) * (z.selection.quantity ?? 1);
+        });
+        if (sys.iduSelections) Object.values(sys.iduSelections as Record<string, any>).forEach((val: any) => { (Array.isArray(val) ? val : val ? [val] : []).forEach((u: any) => { connTR += (u.trCapacity ?? 0) * (u.quantity ?? 1); }); });
+        const note = connTR > 0
+          ? `  Diversity Factor: ${(df * 100).toFixed(0)}%  ·  Total Connected IDU: ${n2(connTR)} TR  →  Effective Required: ${n2(connTR * df)} TR`
+          : `  Diversity Factor: ${(df * 100).toFixed(0)}%`;
+        eqBody.push([{ content: note, colSpan: 8, styles: { fontStyle: 'italic' as const, fontSize: 7, textColor: C.subInk } }]);
+      }
     }
     if (sysType === 'Chiller') {
       const units: any[] = sys.chillerUnits?.length ? sys.chillerUnits : (sys.unitSelection ? [{ ...sys.unitSelection, quantity: sys.unitSelection.quantity ?? 1 }] : []);
       units.forEach((u: any) => eqBody.push([sysName, 'Chiller', String(u.brand || sysBrand),
-        `${String(u.modelSeries || '')} ${String(u.modelId || '')}`.trim() || '—', '—', n2(u.trCapacity ?? 0), '—', String(u.quantity ?? 1)]));
+        ms(u), '—', n2(u.trCapacity ?? 0), '—', String(u.quantity ?? 1)]));
       if (sys.ctSelection) {
         const ct = sys.ctSelection;
         eqBody.push([sysName, 'Cooling Tower', String(ct.brand || sysBrand),
-          `${String(ct.modelSeries || '')} ${String(ct.modelId || '')}`.trim() || '—', '—', n2(ct.trCapacity ?? 0), n0(ct.cfmRated ?? 0), String(ct.quantity ?? 1)]);
+          ms(ct), '—', n2(ct.trCapacity ?? 0), ct.cfmRated ? n0(ct.cfmRated) : '—', String(ct.quantity ?? 1)]);
       }
     }
     if (sysType === 'AHU' && sys.unitSelection) {
       const u = sys.unitSelection;
       eqBody.push([sysName, 'DX Condensing Unit', String(u.brand || sysBrand),
-        `${String(u.modelSeries || '')} ${String(u.modelId || '')}`.trim() || '—', String(u.subType || '—'), n2(u.trCapacity ?? 0), '—', String(u.quantity ?? 1)]);
+        ms(u), String(u.subType || '—'), n2(u.trCapacity ?? 0), '—', String(u.quantity ?? 1)]);
+    }
+    if (sysType === 'DOAS' && sys.unitSelection) {
+      const u = sys.unitSelection;
+      const oaNote = String(u.subType || 'ERV/HRV/FAHU');
+      eqBody.push([sysName, 'DOAS Unit', String(u.brand || sysBrand),
+        ms(u),
+        oaNote, n2(u.trCapacity ?? 0), n0(u.cfmRated ?? 0), String(u.quantity ?? 1)]);
+      const linked: string[] = (sys as any).doasLinkedSystemIds ?? [];
+      if (linked.length > 0) {
+        const linkedNames = linked.map((id: string) => equipSystems.find((s: any) => s.id === id)?.name ?? id).join(', ');
+        eqBody.push([{ content: `  Supplements: ${linkedNames}  ·  OA-only ventilation system`, colSpan: 8, styles: { fontStyle: 'italic' as const, fontSize: 7, textColor: C.subInk } }]);
+      }
     }
     if ((sysType === 'Package' || sysType === 'DuctableSplit') && sys.unitSelection) {
       const u = sys.unitSelection;
       eqBody.push([sysName, sysType, String(u.brand || sysBrand),
-        `${String(u.modelSeries || '')} ${String(u.modelId || '')}`.trim() || '—', String(u.subType || '—'), n2(u.trCapacity ?? 0), n0(u.cfmRated ?? 0), String(u.quantity ?? 1)]);
+        ms(u), String(u.subType || '—'), n2(u.trCapacity ?? 0), n0(u.cfmRated ?? 0), String(u.quantity ?? 1)]);
     }
 
     // Zone-level IDUs
-    (sys.zones ?? [] as any[]).forEach((zone: any) => {
+    dedupedZones.forEach((zone: any) => {
       const zoneName = String(zone.name || `Zone ${zone.id}`);
       const unitSels = (zone.unitSelections ?? []) as any[];
       if (unitSels.length > 0) {
         unitSels.forEach((u: any) => {
           const lbl = sysType === 'Chiller' ? 'FCU' : sysType === 'AHU' ? 'AHU-DX' : 'IDU';
-          eqBody.push([zoneName, lbl, String(u.brand || sysBrand), `${String(u.modelSeries || '')} ${String(u.modelId || '')}`.trim() || '—', String(u.subType || '—'), n2(u.trCapacity ?? 0), n0(u.cfmRated ?? 0), String(u.quantity ?? 1)]);
+          eqBody.push([zoneName, lbl, String(u.brand || sysBrand), ms(u), String(u.subType || '—'), n2(u.trCapacity ?? 0), n0(u.cfmRated ?? 0), String(u.quantity ?? 1)]);
         });
       } else if (zone.selection) {
         const sel = zone.selection;
         const lbl = sysType === 'Chiller' ? 'FCU / AHU' : sysType === 'AHU' ? 'AHU-DX' : 'IDU';
-        eqBody.push([zoneName, lbl, String(sel.brand || sysBrand), `${String(sel.modelSeries || '')} ${String(sel.modelId || '')}`.trim() || '—', String(sel.subType || '—'), n2(sel.trCapacity ?? 0), n0(sel.cfmRated ?? 0), String(sel.quantity ?? 1)]);
+        eqBody.push([zoneName, lbl, String(sel.brand || sysBrand), ms(sel), String(sel.subType || '—'), n2(sel.trCapacity ?? 0), n0(sel.cfmRated ?? 0), String(sel.quantity ?? 1)]);
       }
     });
 
-    // Per-room iduSelections
-    if (sys.iduSelections && (sysType === 'VRF' || sysType === 'AHU' || sysType === 'Chiller')) {
+    // Per-room iduSelections — VRF and AHU only.
+    // Chiller is a zone-based system; per-room iduSelections are legacy orphaned data, suppressed here.
+    if (sys.iduSelections && (sysType === 'VRF' || sysType === 'AHU')) {
       const zoneCovered = new Set<string>();
-      (sys.zones ?? []).forEach((z: any) => {
+      dedupedZones.forEach((z: any) => {
         if (z.selection || z.unitSelections?.length) (z.roomIds as string[] ?? []).forEach((rid: string) => zoneCovered.add(rid));
       });
       Object.entries(sys.iduSelections as Record<string, any>).forEach(([roomId, val]) => {
@@ -1800,19 +1994,18 @@ const renderEquipmentScheduleBody = (
         units.forEach((u: any) => {
           if (!u || (u.trCapacity ?? 0) === 0) return;
           const roomObj = flatRooms.find((r: any) => r.id === roomId);
-          const lbl = sysType === 'Chiller' ? 'FCU' : sysType === 'AHU' ? 'AHU-DX' : 'IDU';
-          eqBody.push([String(roomObj?.name ?? roomObj?.roomName ?? roomId), lbl, String(u.brand || sysBrand), `${String(u.modelSeries || '')} ${String(u.modelId || '')}`.trim() || '—', String(u.subType || '—'), n2(u.trCapacity ?? 0), n0(u.cfmRated ?? 0), String(u.quantity ?? 1)]);
+          const lbl = sysType === 'AHU' ? 'AHU-DX' : 'IDU';
+          eqBody.push([String(roomObj?.name ?? roomObj?.roomName ?? roomId), lbl, String(u.brand || sysBrand), ms(u), String(u.subType || '—'), n2(u.trCapacity ?? 0), n0(u.cfmRated ?? 0), String(u.quantity ?? 1)]);
         });
       });
     }
     if (sysType === 'Split' && sys.roomSelections) {
       Object.entries(sys.roomSelections as Record<string, any>).forEach(([rId, idus]: [string, any]) => {
-        (idus as any[]).forEach((u: any) => eqBody.push([String(rId), 'Split IDU', String(u.brand || sysBrand), `${String(u.modelSeries || '')} ${String(u.modelId || '')}`.trim() || '—', String(u.subType || '—'), n2(u.trCapacity ?? 0), n0(u.cfmRated ?? 0), String(u.quantity ?? 1)]));
+        (idus as any[]).forEach((u: any) => eqBody.push([String(rId), 'Split IDU', String(u.brand || sysBrand), ms(u), String(u.subType || '—'), n2(u.trCapacity ?? 0), n0(u.cfmRated ?? 0), String(u.quantity ?? 1)]));
       });
     }
-    if (eqBody.length === 0) {
-      eqBody.push([{ content: 'No equipment selected for this system.', colSpan: 8, styles: { fontStyle: 'italic' as const, textColor: C.subInk } }]);
-    }
+    // Skip systems with no equipment — avoids ghost/placeholder system blocks in the PDF
+    if (eqBody.length === 0) continue;
 
     y = ensureSpace(doc, y, 16 + eqBody.length * 7, project);
     const w = doc.internal.pageSize.getWidth();
@@ -1838,6 +2031,55 @@ const renderEquipmentScheduleBody = (
       margin: { left: PAGE.left, right: PAGE.right },
     });
     y = (doc as any).lastAutoTable.finalY + 6;
+
+    // ── AHU Configuration Schedule — shown when the system has AHU-capable zones with equipment ──
+    const ahuZones = dedupedZones.filter((z: any) => {
+      const hasEquip = z.selection || z.unitSelections?.length;
+      const isAhuType = sysType === 'Chiller' || sysType === 'AHU' ||
+        ['ductable-low', 'ductable-mid', 'ductable-hi', 'AHU-DX', 'AHU', 'TFA'].includes(z.selection?.subType ?? '');
+      return hasEquip && isAhuType;
+    });
+    if (ahuZones.length > 0) {
+      const ahuRows: any[][] = [];
+      ahuZones.forEach((zone: any) => {
+        const cfg: any = { ...AHU_DEFAULTS, ...(sys as any).ahuConfig, ...zone.ahuConfig };
+        const zoneName = String(zone.name || `Zone ${zone.id}`);
+        const fanWheel = cfg.fanCurve === 'forward-curved' ? 'Fwd Curved' : cfg.fanCurve === 'backward-curved' ? 'Bwd Curved' : '—';
+        const drive    = cfg.fanDrive === 'plug-fan' ? 'Plug Fan' : cfg.fanDrive === 'belt-driven' ? 'Belt' : '—';
+        const esp      = cfg.extStaticPa != null ? `${cfg.extStaticPa} Pa` : '—';
+        const mixBox   = cfg.hasMixingBox === false ? 'No' : 'Yes';
+        const coilRows = `${cfg.coolingCoilRows ?? 6}R cooling` + (cfg.hasHeatingCoil ? ` + ${cfg.heatingCoilRows ?? 2}R htg` : '');
+        const filters: string[] = [];
+        if (cfg.filters?.pre)  filters.push(String(cfg.preFilterGrade  || 'Pre'));
+        if (cfg.filters?.fine) filters.push(String(cfg.fineFilterGrade || 'Fine'));
+        if (cfg.filters?.hepa) filters.push(String(cfg.hepaFilterGrade || 'HEPA'));
+        const filtration = filters.length ? filters.join(' + ') : 'None';
+        const fahu: any = zone.fahu ?? {};
+        const humidifier = fahu.hasHumidifier ? `${fahu.humidifierKgHr ?? '—'} kg/hr` : '—';
+        ahuRows.push([zoneName, fanWheel, drive, esp, mixBox, coilRows, filtration, humidifier]);
+      });
+      if (ahuRows.length > 0) {
+        y = ensureSpace(doc, y, 12 + ahuRows.length * 6, project);
+        doc.setFont('helvetica', 'bold'); doc.setFontSize(7); doc.setTextColor(...C.subInk);
+        doc.text('AHU CONFIGURATION', PAGE.left, y);
+        y += 3;
+        autoTable(doc, {
+          startY: y,
+          head: [['Zone', 'Fan Wheel', 'Drive', 'ESP', 'Mixing Box', 'Coil', 'Filtration', 'Humidifier']],
+          body: ahuRows, theme: 'grid',
+          styles:     { fontSize: 7, cellPadding: 1.8, textColor: C.ink },
+          headStyles: { fillColor: C.panelDark as [number,number,number], textColor: C.ink as [number,number,number], fontStyle: 'bold', fontSize: 6.5 },
+          columnStyles: {
+            0: { cellWidth: 28, fontStyle: 'bold' }, 1: { cellWidth: 18 }, 2: { cellWidth: 14 },
+            3: { cellWidth: 14, halign: 'right' as const }, 4: { cellWidth: 16, halign: 'center' as const },
+            5: { cellWidth: 24 }, 6: { cellWidth: 'auto' as const },
+            7: { cellWidth: 18, halign: 'right' as const },
+          },
+          margin: { left: PAGE.left, right: PAGE.right },
+        });
+        y = (doc as any).lastAutoTable.finalY + 6;
+      }
+    }
   }
 };
 
@@ -1891,7 +2133,7 @@ export const generateEquipmentSchedulePDF = (
   y = sectionBanner(doc, 'INSTALLED EQUIPMENT SCHEDULE', y, C);
   y += 4;
 
-  renderEquipmentScheduleBody(doc, effectiveEquipSystems, flatRooms, project, C);
+  renderEquipmentScheduleBody(doc, effectiveEquipSystems, flatRooms, project, C, y);
 
   // ── Headers / footers ────────────────────────────────────────────────────
   const totalPages = doc.getNumberOfPages();

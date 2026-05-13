@@ -138,6 +138,61 @@ function computeZoneTotals(
   };
 }
 
+function computeGoverningRoom(
+  zoneRooms: any[],
+  envelopeElements: Record<string, any[]>,
+  dc: DesignConditions,
+  isChiller: boolean,
+): { name: string; loadTR: number } | null {
+  let maxLoad = -Infinity;
+  let result: { name: string; loadTR: number } | null = null;
+  for (const room of zoneRooms) {
+    try {
+      const rd: RoomDetails = {
+        id: room.id,
+        name: room.name ?? '',
+        floor: room.floor ?? 'Ground',
+        length: Number(room.length) || 0,
+        width: Number(room.width) || 0,
+        height: Number(room.height) || 0,
+        hasFalseCeiling: room.hasFalseCeiling ?? false,
+        falseCeilingHeight: Number(room.falseCeilingHeight) || 8,
+        facph: Number(room.facph) || 0,
+        peopleCount: Number(room.peopleCount) || 0,
+        activityType: room.activityType ?? 'office',
+        lightsWattsPerSqft: Number(room.lightsWattsPerSqft) || 0,
+        equipmentKW: Number(room.equipmentKW) || 0,
+        othersKW: Number(room.othersKW) || 0,
+      };
+      const elements = (envelopeElements[room.id] || []) as EnvelopeElement[];
+      const envelope = calculateEnvelopeGain(elements, dc);
+      const internal = calculateInternalGains(rd);
+      const vent = calculateVentilationLoad(rd, dc);
+      const erSensible = envelope.sensible + internal.sensible + vent.sensible * BF;
+      const erLatent = internal.latent + vent.latent * BF;
+      const ductPct = Number(room.ductGainPct) || 2;
+      const fanPct = Number(room.fanGainPct) || 3;
+      const sensibleSafetyPct = Number(room.sensibleSafetyPercent ?? room.sensibleSafetyFactor ?? 10);
+      const latentSafetyPct = Number(room.latentSafetyPercent ?? room.latentSafetyFactor ?? 5);
+      const parasitic = calculateParasiticGains(erSensible, erSensible, ductPct, fanPct);
+      const ersh = (erSensible + parasitic.ductGain + parasitic.fanGain) * (1 + sensibleSafetyPct / 100);
+      const erlh = erLatent * (1 + latentSafetyPct / 100);
+      const oaSensible = vent.sensible * (1 - BF);
+      const oaLatent = vent.latent * (1 - BF);
+      const coilSensible = ersh + oaSensible;
+      const coilLatent = erlh + oaLatent;
+      const grandTotal = coilSensible + coilLatent;
+      if (isFinite(grandTotal) && grandTotal > maxLoad) {
+        maxLoad = grandTotal;
+        result = { name: room.name ?? 'Unnamed', loadTR: grandTotal / 12000 };
+      }
+    } catch {
+      // skip
+    }
+  }
+  return result;
+}
+
 // ─── Zone summary bar (rendered after room list) ───────────────────────────────
 
 function ZoneSummaryBar({
@@ -177,6 +232,14 @@ function ZoneSummaryBar({
     () => (includeMonsoon ? computeZoneTotals(zoneRooms, envelopeElements, monsoonDc, isChiller) : null),
     [zoneRooms, envelopeElements, monsoonDc, isChiller, includeMonsoon],
   );
+  const summerGoverningRoom = useMemo(
+    () => computeGoverningRoom(zoneRooms, envelopeElements, dc, isChiller),
+    [zoneRooms, envelopeElements, dc, isChiller],
+  );
+  const monsoonGoverningRoom = useMemo(
+    () => (includeMonsoon ? computeGoverningRoom(zoneRooms, envelopeElements, monsoonDc, isChiller) : null),
+    [zoneRooms, envelopeElements, monsoonDc, isChiller, includeMonsoon],
+  );
 
   if (zoneRooms.length === 0) return null;
   const n = (v: number) => Math.round(v).toLocaleString();
@@ -196,6 +259,7 @@ function ZoneSummaryBar({
     : summerTotals.totalDesignCfm;
   const requiredTR = governingTR * 1.10;
   const achGovernsAirflow = governingCfmTR >= governingLoadTR;
+  const governingRoomInfo = peakSeason === 'Monsoon' && monsoonGoverningRoom ? monsoonGoverningRoom : summerGoverningRoom;
 
   const zoneRoomIdSet = new Set(zoneRooms.map((r: any) => r.id));
   const installedForZone = (equipSystems ?? []).reduce<{ tr: number; cfm: number }>(
@@ -242,6 +306,11 @@ function ZoneSummaryBar({
               <span className="rounded-full border border-orange-200 dark:border-orange-800 bg-white dark:bg-slate-800 px-2 py-0.5 text-[10px] font-semibold text-orange-700 dark:text-orange-400">{zoneRooms.length} room{zoneRooms.length !== 1 ? 's' : ''}</span>
               <span className="rounded-full border border-slate-200 dark:border-slate-600 bg-slate-100 dark:bg-slate-700 px-2 py-0.5 text-[10px] font-semibold text-slate-700 dark:text-slate-300">AHU Basis: {peakSeason}</span>
               <span className="rounded-full border border-indigo-200 dark:border-indigo-800 bg-indigo-50 dark:bg-indigo-950/30 px-2 py-0.5 text-[10px] font-semibold text-indigo-700 dark:text-indigo-400">{governingTR === governingCfmTR ? 'CFM Gov' : 'Load Gov'}</span>
+              {governingRoomInfo && zoneRooms.length > 1 && (
+                <span className="rounded-full border border-amber-200 dark:border-amber-800 bg-amber-50 dark:bg-amber-950/30 px-2 py-0.5 text-[10px] font-semibold text-amber-700 dark:text-amber-400" title={`Highest load room: ${governingRoomInfo.loadTR.toFixed(2)} TR`}>
+                  Peak: {governingRoomInfo.name}
+                </span>
+              )}
             </div>
             <div className="mt-3 grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-6">
               <div className="rounded-lg border border-orange-200 dark:border-orange-800 bg-white dark:bg-slate-800 px-3 py-2">

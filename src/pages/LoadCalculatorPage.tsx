@@ -822,20 +822,24 @@ function ProjectCard({
           />
           </>
           )}
-          <ConditionBox
-            label="Winter Outside"
-            color="indigo"
-            temp={project.winterDesignTemp}
-            rh={project.winterDesignHumidity}
-            enthalpy={project.winterEnthalpy}
-            hr={project.winterHumidityRatio}
-          />
-          <ConditionBox
-            label="Winter Inside"
-            color="purple"
-            temp={project.insideWinterTemp}
-            rh={project.insideWinterHumidity}
-          />
+          {project.includeWinter && (
+            <>
+              <ConditionBox
+                label="Winter Outside"
+                color="indigo"
+                temp={project.winterDesignTemp}
+                rh={project.winterDesignHumidity}
+                enthalpy={project.winterEnthalpy}
+                hr={project.winterHumidityRatio}
+              />
+              <ConditionBox
+                label="Winter Inside"
+                color="purple"
+                temp={project.insideWinterTemp}
+                rh={project.insideWinterHumidity}
+              />
+            </>
+          )}
         </div>
 
         {(project.latitude || project.longitude) && (

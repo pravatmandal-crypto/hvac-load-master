@@ -294,6 +294,28 @@ export const EQUIPMENT_CATALOG: EquipmentModel[] = [
   { id: 'bs-scroll-wc-70',        brand: 'Blue Star', type: 'Chiller', subType: 'Water Cooled Scroll', modelSeries: 'XWC Eco Scroll', capacityTR:  70.0, capacityBTU:  840000, ratedAirflowCFM: 28000, refrigerant: 'R410A', powerInputKW:  54.7, cop: 4.50 },
   { id: 'bs-scroll-wc-85',        brand: 'Blue Star', type: 'Chiller', subType: 'Water Cooled Scroll', modelSeries: 'XWC Eco Scroll', capacityTR:  84.0, capacityBTU: 1008000, ratedAirflowCFM: 33600, refrigerant: 'R407C', powerInputKW:  68.7, cop: 4.30 },
 
+  // ── VOLTAS AIR-COOLED SCROLL CHILLERS (official ACDS series) ─────────────
+  // ACDS R407C series — Hermetic Scroll, Shell & Tube DX evaporator, Fin & Tube condenser
+  { id: 'vo-acds-r407c-11',  brand: 'Voltas', type: 'Chiller', subType: 'Air Cooled Scroll', modelSeries: 'ACDS R407C Scroll', capacityTR:  11, capacityBTU:  132000, ratedAirflowCFM: 11000, refrigerant: 'R407C', source: 'catalog' },
+  { id: 'vo-acds-r407c-22',  brand: 'Voltas', type: 'Chiller', subType: 'Air Cooled Scroll', modelSeries: 'ACDS R407C Scroll', capacityTR:  22, capacityBTU:  264000, ratedAirflowCFM: 22000, refrigerant: 'R407C', source: 'catalog' },
+  { id: 'vo-acds-r407c-34',  brand: 'Voltas', type: 'Chiller', subType: 'Air Cooled Scroll', modelSeries: 'ACDS R407C Scroll', capacityTR:  34, capacityBTU:  408000, ratedAirflowCFM: 26000, refrigerant: 'R407C', source: 'catalog' },
+  { id: 'vo-acds-r407c-45',  brand: 'Voltas', type: 'Chiller', subType: 'Air Cooled Scroll', modelSeries: 'ACDS R407C Scroll', capacityTR:  45, capacityBTU:  540000, ratedAirflowCFM: 42000, refrigerant: 'R407C', source: 'catalog' },
+  { id: 'vo-acds-r407c-56',  brand: 'Voltas', type: 'Chiller', subType: 'Air Cooled Scroll', modelSeries: 'ACDS R407C Scroll', capacityTR:  56, capacityBTU:  672000, ratedAirflowCFM: 44000, refrigerant: 'R407C', source: 'catalog' },
+  { id: 'vo-acds-r407c-68',  brand: 'Voltas', type: 'Chiller', subType: 'Air Cooled Scroll', modelSeries: 'ACDS R407C Scroll', capacityTR:  68, capacityBTU:  816000, ratedAirflowCFM: 48000, refrigerant: 'R407C', source: 'catalog' },
+  { id: 'vo-acds-r407c-75',  brand: 'Voltas', type: 'Chiller', subType: 'Air Cooled Scroll', modelSeries: 'ACDS R407C Scroll', capacityTR:  75, capacityBTU:  900000, ratedAirflowCFM: 52000, refrigerant: 'R407C', source: 'catalog' },
+  { id: 'vo-acds-r407c-87',  brand: 'Voltas', type: 'Chiller', subType: 'Air Cooled Scroll', modelSeries: 'ACDS R407C Scroll', capacityTR:  87, capacityBTU: 1044000, ratedAirflowCFM: 66000, refrigerant: 'R407C', source: 'catalog' },
+  { id: 'vo-acds-r407c-106', brand: 'Voltas', type: 'Chiller', subType: 'Air Cooled Scroll', modelSeries: 'ACDS R407C Scroll', capacityTR: 106, capacityBTU: 1272000, ratedAirflowCFM: 78000, refrigerant: 'R407C', source: 'catalog' },
+  // ACDS R22 series
+  { id: 'vo-acds-r22-12',  brand: 'Voltas', type: 'Chiller', subType: 'Air Cooled Scroll', modelSeries: 'ACDS R22 Scroll', capacityTR:  12, capacityBTU:  144000, ratedAirflowCFM: 11000, refrigerant: 'R22', source: 'catalog' },
+  { id: 'vo-acds-r22-24',  brand: 'Voltas', type: 'Chiller', subType: 'Air Cooled Scroll', modelSeries: 'ACDS R22 Scroll', capacityTR:  24, capacityBTU:  288000, ratedAirflowCFM: 22000, refrigerant: 'R22', source: 'catalog' },
+  { id: 'vo-acds-r22-36',  brand: 'Voltas', type: 'Chiller', subType: 'Air Cooled Scroll', modelSeries: 'ACDS R22 Scroll', capacityTR:  36, capacityBTU:  432000, ratedAirflowCFM: 26000, refrigerant: 'R22', source: 'catalog' },
+  { id: 'vo-acds-r22-48',  brand: 'Voltas', type: 'Chiller', subType: 'Air Cooled Scroll', modelSeries: 'ACDS R22 Scroll', capacityTR:  48, capacityBTU:  576000, ratedAirflowCFM: 42000, refrigerant: 'R22', source: 'catalog' },
+  { id: 'vo-acds-r22-60',  brand: 'Voltas', type: 'Chiller', subType: 'Air Cooled Scroll', modelSeries: 'ACDS R22 Scroll', capacityTR:  60, capacityBTU:  720000, ratedAirflowCFM: 44000, refrigerant: 'R22', source: 'catalog' },
+  { id: 'vo-acds-r22-72',  brand: 'Voltas', type: 'Chiller', subType: 'Air Cooled Scroll', modelSeries: 'ACDS R22 Scroll', capacityTR:  72, capacityBTU:  864000, ratedAirflowCFM: 48000, refrigerant: 'R22', source: 'catalog' },
+  { id: 'vo-acds-r22-80',  brand: 'Voltas', type: 'Chiller', subType: 'Air Cooled Scroll', modelSeries: 'ACDS R22 Scroll', capacityTR:  80, capacityBTU:  960000, ratedAirflowCFM: 52000, refrigerant: 'R22', source: 'catalog' },
+  { id: 'vo-acds-r22-90',  brand: 'Voltas', type: 'Chiller', subType: 'Air Cooled Scroll', modelSeries: 'ACDS R22 Scroll', capacityTR:  90, capacityBTU: 1080000, ratedAirflowCFM: 66000, refrigerant: 'R22', source: 'catalog' },
+  { id: 'vo-acds-r22-110', brand: 'Voltas', type: 'Chiller', subType: 'Air Cooled Scroll', modelSeries: 'ACDS R22 Scroll', capacityTR: 110, capacityBTU: 1320000, ratedAirflowCFM: 78000, refrigerant: 'R22', source: 'catalog' },
+
   // ── LEGACY ENTRIES (backward compat) ─────────────────────────────────────
   { id: 'vo-ch-1', brand: 'Voltas',    type: 'Chiller', subType: 'Air Cooled Scroll',  modelSeries: 'V-Scroll',  capacityTR: 15,  capacityBTU: 180000,  ratedAirflowCFM: 6000 },
   { id: 'vo-ch-2', brand: 'Voltas',    type: 'Chiller', subType: 'Air Cooled Screw',   modelSeries: 'V-Screw',   capacityTR: 60,  capacityBTU: 720000,  ratedAirflowCFM: 24000 },
@@ -513,6 +535,30 @@ export const EQUIPMENT_CATALOG: EquipmentModel[] = [
   { id: 'dk-tfa-chw-1',  brand: 'Daikin',    type: 'AHU', subType: 'Fresh Air HW', modelSeries: 'FAHU DAIKU-OA', capacityTR:  6, capacityBTU:  72000, ratedAirflowCFM: 1000, staticPressurePa: 100, powerInputKW: 1.10, source: 'placeholder', description: 'TFA 1000 CFM OA · CHW coil' },
   { id: 'dk-tfa-chw-2',  brand: 'Daikin',    type: 'AHU', subType: 'Fresh Air HW', modelSeries: 'FAHU DAIKU-OA', capacityTR: 12, capacityBTU: 144000, ratedAirflowCFM: 2000, staticPressurePa: 125, powerInputKW: 2.20, source: 'placeholder', description: 'TFA 2000 CFM OA · CHW coil' },
   { id: 'dk-tfa-chw-3',  brand: 'Daikin',    type: 'AHU', subType: 'Fresh Air HW', modelSeries: 'FAHU DAIKU-OA', capacityTR: 18, capacityBTU: 216000, ratedAirflowCFM: 3000, staticPressurePa: 150, powerInputKW: 3.00, source: 'placeholder', description: 'TFA 3000 CFM OA · CHW coil' },
+
+  // ── DOAS UNITS — Energy Recovery Ventilators (ERV) ────────────────────────
+  // DOAS DX units with rotary enthalpy-wheel ERV (≈70 % total effectiveness).
+  // Conditions 100 % outdoor air for ventilation; pairs with any primary system.
+  // Net cooling capacity accounts for heat recovery; rated at 95 °F DB/50 % RH in, 55 °F DB/90 % RH supply.
+  // Sizing rule: 1 TR net ≈ 600 CFM OA (after 70 % energy recovery).  source: placeholder.
+  { id: 'dk-erv-500',  brand: 'Daikin',    type: 'AHU', subType: 'ERV', modelSeries: 'DOAS-ERV FreshVentilation', capacityTR:  1.0, capacityBTU:  12000, ratedAirflowCFM:  500, staticPressurePa: 100, powerInputKW: 0.75, source: 'placeholder', description: 'DOAS ERV 500 CFM OA · 70% total effectiveness' },
+  { id: 'dk-erv-1000', brand: 'Daikin',    type: 'AHU', subType: 'ERV', modelSeries: 'DOAS-ERV FreshVentilation', capacityTR:  2.0, capacityBTU:  24000, ratedAirflowCFM: 1000, staticPressurePa: 100, powerInputKW: 1.30, source: 'placeholder', description: 'DOAS ERV 1000 CFM OA · 70% total effectiveness' },
+  { id: 'dk-erv-1500', brand: 'Daikin',    type: 'AHU', subType: 'ERV', modelSeries: 'DOAS-ERV FreshVentilation', capacityTR:  3.0, capacityBTU:  36000, ratedAirflowCFM: 1500, staticPressurePa: 125, powerInputKW: 1.80, source: 'placeholder', description: 'DOAS ERV 1500 CFM OA · 70% total effectiveness' },
+  { id: 'dk-erv-2000', brand: 'Daikin',    type: 'AHU', subType: 'ERV', modelSeries: 'DOAS-ERV FreshVentilation', capacityTR:  4.0, capacityBTU:  48000, ratedAirflowCFM: 2000, staticPressurePa: 125, powerInputKW: 2.30, source: 'placeholder', description: 'DOAS ERV 2000 CFM OA · 70% total effectiveness' },
+  { id: 'dk-erv-3000', brand: 'Daikin',    type: 'AHU', subType: 'ERV', modelSeries: 'DOAS-ERV FreshVentilation', capacityTR:  6.0, capacityBTU:  72000, ratedAirflowCFM: 3000, staticPressurePa: 150, powerInputKW: 3.20, source: 'placeholder', description: 'DOAS ERV 3000 CFM OA · 70% total effectiveness' },
+  { id: 'cr-erv-500',  brand: 'Carrier',   type: 'AHU', subType: 'ERV', modelSeries: 'DOAS ERV 50VE',             capacityTR:  1.0, capacityBTU:  12000, ratedAirflowCFM:  500, staticPressurePa: 100, powerInputKW: 0.75, source: 'placeholder', description: 'DOAS ERV 500 CFM OA · rotary wheel ERV' },
+  { id: 'cr-erv-1000', brand: 'Carrier',   type: 'AHU', subType: 'ERV', modelSeries: 'DOAS ERV 50VE',             capacityTR:  2.0, capacityBTU:  24000, ratedAirflowCFM: 1000, staticPressurePa: 100, powerInputKW: 1.30, source: 'placeholder', description: 'DOAS ERV 1000 CFM OA · rotary wheel ERV' },
+  { id: 'cr-erv-2000', brand: 'Carrier',   type: 'AHU', subType: 'ERV', modelSeries: 'DOAS ERV 50VE',             capacityTR:  4.0, capacityBTU:  48000, ratedAirflowCFM: 2000, staticPressurePa: 125, powerInputKW: 2.30, source: 'placeholder', description: 'DOAS ERV 2000 CFM OA · rotary wheel ERV' },
+  { id: 'bs-erv-1000', brand: 'Blue Star', type: 'AHU', subType: 'ERV', modelSeries: 'DOAS ERV Star-Fresh',        capacityTR:  2.0, capacityBTU:  24000, ratedAirflowCFM: 1000, staticPressurePa: 100, powerInputKW: 1.30, source: 'placeholder', description: 'DOAS ERV 1000 CFM OA · energy recovery' },
+  { id: 'bs-erv-2000', brand: 'Blue Star', type: 'AHU', subType: 'ERV', modelSeries: 'DOAS ERV Star-Fresh',        capacityTR:  4.0, capacityBTU:  48000, ratedAirflowCFM: 2000, staticPressurePa: 125, powerInputKW: 2.30, source: 'placeholder', description: 'DOAS ERV 2000 CFM OA · energy recovery' },
+  // DOAS with sensible-only HRV (plate heat exchanger, 80 % sensible, 0 % latent)
+  { id: 'gen-hrv-500',  brand: 'Generic',   type: 'AHU', subType: 'HRV', modelSeries: 'DOAS HRV Plate',            capacityTR:  1.5, capacityBTU:  18000, ratedAirflowCFM:  500, staticPressurePa: 100, powerInputKW: 0.75, source: 'placeholder', description: 'DOAS HRV 500 CFM OA · sensible recovery only' },
+  { id: 'gen-hrv-1000', brand: 'Generic',   type: 'AHU', subType: 'HRV', modelSeries: 'DOAS HRV Plate',            capacityTR:  3.0, capacityBTU:  36000, ratedAirflowCFM: 1000, staticPressurePa: 100, powerInputKW: 1.30, source: 'placeholder', description: 'DOAS HRV 1000 CFM OA · sensible recovery only' },
+  { id: 'gen-hrv-2000', brand: 'Generic',   type: 'AHU', subType: 'HRV', modelSeries: 'DOAS HRV Plate',            capacityTR:  6.0, capacityBTU:  72000, ratedAirflowCFM: 2000, staticPressurePa: 125, powerInputKW: 2.30, source: 'placeholder', description: 'DOAS HRV 2000 CFM OA · sensible recovery only' },
+  // DOAS DX (no heat recovery — direct conditioning of OA; higher TR needed)
+  { id: 'gen-doas-dx-500',  brand: 'Generic', type: 'AHU', subType: 'DOAS-DX', modelSeries: 'DOAS DX Unit',       capacityTR:  3.0, capacityBTU:  36000, ratedAirflowCFM:  500, staticPressurePa: 100, powerInputKW: 1.20, source: 'placeholder', description: 'DOAS DX 500 CFM OA · no heat recovery' },
+  { id: 'gen-doas-dx-1000', brand: 'Generic', type: 'AHU', subType: 'DOAS-DX', modelSeries: 'DOAS DX Unit',       capacityTR:  6.0, capacityBTU:  72000, ratedAirflowCFM: 1000, staticPressurePa: 100, powerInputKW: 2.20, source: 'placeholder', description: 'DOAS DX 1000 CFM OA · no heat recovery' },
+  { id: 'gen-doas-dx-2000', brand: 'Generic', type: 'AHU', subType: 'DOAS-DX', modelSeries: 'DOAS DX Unit',       capacityTR: 12.0, capacityBTU: 144000, ratedAirflowCFM: 2000, staticPressurePa: 125, powerInputKW: 4.00, source: 'placeholder', description: 'DOAS DX 2000 CFM OA · no heat recovery' },
 
   // ── COOLING TOWERS ───────────────────────────────────────────────────────
   // Required for every Chiller WC system.

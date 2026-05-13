@@ -609,15 +609,15 @@ function SF({
 }) {
   return (
     <div className={cn('flex items-center gap-2 min-w-0', className)}>
-      <span className="text-[11px] text-slate-500 w-48 shrink-0">{label}</span>
+      <span className="text-[11px] text-slate-500 dark:text-slate-400 w-48 shrink-0">{label}</span>
       <div className="flex items-center gap-1">
         <Input
           type={type}
           value={value}
           onChange={e => onChange(type === 'number' ? (parseFloat(e.target.value) || 0) : e.target.value)}
-          className={cn('h-7 text-xs font-mono', wide ? 'w-52' : 'w-24')}
+          className={cn('h-7 text-xs font-mono dark:bg-slate-900 dark:border-slate-600 dark:text-slate-200', wide ? 'w-52' : 'w-24')}
         />
-        {unit && <span className="text-[11px] text-slate-400 shrink-0">{unit}</span>}
+        {unit && <span className="text-[11px] text-slate-400 dark:text-slate-500 shrink-0">{unit}</span>}
       </div>
     </div>
   );
@@ -628,17 +628,17 @@ function Sec({ title, color = 'slate', children }: { title: string; color?: stri
     <div>
       <div className={cn(
         'px-3 py-1.5 rounded-t text-[10px] font-bold uppercase tracking-wider',
-        color === 'sky'    ? 'bg-sky-100 text-sky-700' :
-        color === 'indigo' ? 'bg-indigo-100 text-indigo-700' :
-        color === 'teal'   ? 'bg-teal-100 text-teal-700' :
-        color === 'amber'  ? 'bg-amber-100 text-amber-700' :
-        color === 'orange' ? 'bg-orange-100 text-orange-700' :
-        color === 'blue'   ? 'bg-blue-100 text-blue-700' :
-        'bg-slate-100 text-slate-600',
+        color === 'sky'    ? 'bg-sky-100 text-sky-700 dark:bg-sky-900/40 dark:text-sky-300' :
+        color === 'indigo' ? 'bg-indigo-100 text-indigo-700 dark:bg-indigo-900/40 dark:text-indigo-300' :
+        color === 'teal'   ? 'bg-teal-100 text-teal-700 dark:bg-teal-900/40 dark:text-teal-300' :
+        color === 'amber'  ? 'bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300' :
+        color === 'orange' ? 'bg-orange-100 text-orange-700 dark:bg-orange-900/40 dark:text-orange-300' :
+        color === 'blue'   ? 'bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300' :
+        'bg-slate-100 text-slate-600 dark:bg-slate-700 dark:text-slate-300',
       )}>
         {title}
       </div>
-      <div className="border border-t-0 border-slate-200 rounded-b p-3 grid grid-cols-1 sm:grid-cols-2 gap-x-8 gap-y-2">
+      <div className="border border-t-0 border-slate-200 dark:border-slate-700 rounded-b p-3 grid grid-cols-1 sm:grid-cols-2 gap-x-8 gap-y-2 dark:bg-slate-800/30">
         {children}
       </div>
     </div>
@@ -688,18 +688,18 @@ function AHUUnitForm({ ahu, onChange, ahuConfig }: {
       {(ahuConfig?.hasHeatingCoil || ahu.heatingCoil) && (
         <Sec title="Heating Coil (Hot Water)" color="orange">
           {ahuConfig?.hasHeatingCoil && !ahu.heatingCoil && (
-            <div className="col-span-2 text-[10px] text-amber-700 bg-amber-50 border border-amber-200 rounded px-2 py-1.5">
+            <div className="col-span-2 text-[10px] text-amber-700 dark:text-amber-300 bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800 rounded px-2 py-1.5">
               Coil type set to Cooling + Heating — run <strong>Auto-Fill</strong> to populate heating coil data.
             </div>
           )}
           <SF label="Heating Capacity" value={ahu.heatingCapKW} onChange={v => onChange('heatingCapKW', v)} unit="kW" />
           {((ahu.heatVentLoadKW ?? 0) > 0 || (ahu.heatReheatKW ?? 0) > 0) && (
-            <div className="col-span-2 text-[10px] text-slate-500 bg-amber-50 border border-amber-200 rounded px-2 py-1.5 -mt-1">
-              Space heating (vent): <span className="font-semibold text-slate-700">{(ahu.heatVentLoadKW ?? 0).toFixed(1)} kW</span>
+            <div className="col-span-2 text-[10px] text-slate-500 dark:text-slate-400 bg-amber-50 dark:bg-amber-950/20 border border-amber-200 dark:border-amber-800 rounded px-2 py-1.5 -mt-1">
+              Space heating (vent): <span className="font-semibold text-slate-700 dark:text-slate-300">{(ahu.heatVentLoadKW ?? 0).toFixed(1)} kW</span>
               {' · '}
-              Dehumid reheat: <span className="font-semibold text-slate-700">{(ahu.heatReheatKW ?? 0).toFixed(1)} kW</span>
+              Dehumid reheat: <span className="font-semibold text-slate-700 dark:text-slate-300">{(ahu.heatReheatKW ?? 0).toFixed(1)} kW</span>
               {' · '}
-              Governing: <span className="font-semibold text-orange-700">
+              Governing: <span className="font-semibold text-orange-700 dark:text-orange-400">
                 {(ahu.heatVentLoadKW ?? 0) >= (ahu.heatReheatKW ?? 0) ? 'Space Heating' : 'Dehumidification Reheat'}
               </span>
               {' (10% safety added)'}
@@ -729,7 +729,9 @@ function AHUUnitForm({ ahu, onChange, ahuConfig }: {
           <span className="text-[11px] text-slate-500 w-48 shrink-0">HEPA Filter</span>
           <button onClick={() => onChange('hepaFilter', !(ahu.hepaFilter ?? false))}
             className={cn('text-[10px] px-2 py-0.5 rounded border font-medium',
-              ahu.hepaFilter ? 'bg-sky-100 border-sky-300 text-sky-700' : 'bg-slate-50 border-slate-200 text-slate-400')}>
+              ahu.hepaFilter
+                ? 'bg-sky-100 border-sky-300 text-sky-700 dark:bg-sky-900/40 dark:border-sky-700 dark:text-sky-300'
+                : 'bg-slate-50 border-slate-200 text-slate-400 dark:bg-slate-800 dark:border-slate-600 dark:text-slate-500')}>
             {ahu.hepaFilter ? 'Installed ✓' : '+ Add HEPA'}
           </button>
         </div>
@@ -745,8 +747,8 @@ function AHUUnitForm({ ahu, onChange, ahuConfig }: {
       </Sec>
 
       {(ahu.ahuLengthMM ?? 0) > 0 && (
-        <div className="rounded border border-amber-200 bg-amber-50/60 px-3 py-2.5">
-          <div className="text-[10px] font-bold uppercase tracking-wider text-amber-700 mb-2">
+        <div className="rounded border border-amber-200 dark:border-amber-800 bg-amber-50/60 dark:bg-amber-950/20 px-3 py-2.5">
+          <div className="text-[10px] font-bold uppercase tracking-wider text-amber-700 dark:text-amber-400 mb-2">
             Approximate Unit Dimensions (for space estimation only — confirm with manufacturer)
           </div>
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-center">
@@ -756,26 +758,26 @@ function AHUUnitForm({ ahu, onChange, ahuConfig }: {
               { label: 'Height (H)', value: `${ahu.ahuHeightMM} mm` },
               { label: 'Mixing Box', value: ahu.hasMixingBox ? 'Included' : 'Not Included' },
             ].map(item => (
-              <div key={item.label} className="bg-white border border-amber-200 rounded px-2 py-1.5">
-                <div className="text-[9px] text-amber-600 leading-tight">{item.label}</div>
-                <div className="text-xs font-bold font-mono text-amber-900 mt-0.5">{item.value}</div>
+              <div key={item.label} className="bg-white dark:bg-slate-800 border border-amber-200 dark:border-amber-800 rounded px-2 py-1.5">
+                <div className="text-[9px] text-amber-600 dark:text-amber-400 leading-tight">{item.label}</div>
+                <div className="text-xs font-bold font-mono text-amber-900 dark:text-amber-300 mt-0.5">{item.value}</div>
               </div>
             ))}
           </div>
-          <div className="text-[9px] text-amber-500 mt-1.5 italic">
+          <div className="text-[9px] text-amber-500 dark:text-amber-500 mt-1.5 italic">
             L = {ahu.hasMixingBox ? 'Mixing Box + ' : ''}Filters + Coil(s) + Fan section. Actual size may vary ±10%.
           </div>
         </div>
       )}
 
       <div className="col-span-2">
-        <div className="text-[10px] font-bold uppercase text-slate-400 mb-1">Notes / Special Requirements</div>
+        <div className="text-[10px] font-bold uppercase text-slate-400 dark:text-slate-500 mb-1">Notes / Special Requirements</div>
         <textarea
           value={ahu.notes}
           onChange={e => onChange('notes', e.target.value)}
           rows={3}
           placeholder="Vibration isolators, access doors, drain pan spec, coil material, etc."
-          className="w-full rounded border border-slate-200 px-2.5 py-1.5 text-xs text-slate-700 resize-none focus:outline-none focus:border-blue-400"
+          className="w-full rounded border border-slate-200 dark:border-slate-700 px-2.5 py-1.5 text-xs text-slate-700 dark:text-slate-200 bg-white dark:bg-slate-900 resize-none focus:outline-none focus:border-blue-400 dark:focus:border-blue-500 placeholder:text-slate-400 dark:placeholder:text-slate-600"
         />
       </div>
     </>
@@ -964,11 +966,11 @@ export default function SpecSheet({
   return (
     <div className={cn(
       'rounded-lg overflow-hidden border',
-      system.type === 'AHU'     ? 'border-sky-200 bg-sky-50/20' :
-      system.type === 'Chiller' ? 'border-indigo-200 bg-indigo-50/20' :
-      system.type === 'Package' ? 'border-teal-200 bg-teal-50/20' :
-      system.type === 'VRF'     ? 'border-violet-200 bg-violet-50/20' :
-      'border-amber-200 bg-amber-50/20',
+      system.type === 'AHU'     ? 'border-sky-200 bg-sky-50/20 dark:border-sky-800 dark:bg-sky-950/10' :
+      system.type === 'Chiller' ? 'border-indigo-200 bg-indigo-50/20 dark:border-indigo-800 dark:bg-indigo-950/10' :
+      system.type === 'Package' ? 'border-teal-200 bg-teal-50/20 dark:border-teal-800 dark:bg-teal-950/10' :
+      system.type === 'VRF'     ? 'border-violet-200 bg-violet-50/20 dark:border-violet-800 dark:bg-violet-950/10' :
+      'border-amber-200 bg-amber-50/20 dark:border-amber-800 dark:bg-amber-950/10',
     )}>
       {/* Header — div instead of button to avoid nested <button> inside <button> (HTML spec violation) */}
       <div
@@ -978,32 +980,32 @@ export default function SpecSheet({
         onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') setExpanded(v => !v); }}
         className={cn(
           'w-full flex items-center justify-between px-4 py-2.5 border-b text-left cursor-pointer',
-          system.type === 'AHU'     ? 'bg-sky-50 border-sky-200' :
-          system.type === 'Chiller' ? 'bg-indigo-50 border-indigo-200' :
-          system.type === 'Package' ? 'bg-teal-50 border-teal-200' :
-          system.type === 'VRF'     ? 'bg-violet-50 border-violet-200' :
-          'bg-amber-50 border-amber-200',
+          system.type === 'AHU'     ? 'bg-sky-50 border-sky-200 dark:bg-sky-950/30 dark:border-sky-800' :
+          system.type === 'Chiller' ? 'bg-indigo-50 border-indigo-200 dark:bg-indigo-950/30 dark:border-indigo-800' :
+          system.type === 'Package' ? 'bg-teal-50 border-teal-200 dark:bg-teal-950/30 dark:border-teal-800' :
+          system.type === 'VRF'     ? 'bg-violet-50 border-violet-200 dark:bg-violet-950/30 dark:border-violet-800' :
+          'bg-amber-50 border-amber-200 dark:bg-amber-950/30 dark:border-amber-800',
         )}
       >
         <div className="flex items-center gap-2">
           <FileText className={cn('w-3.5 h-3.5',
-            system.type === 'AHU'     ? 'text-sky-600' :
-            system.type === 'Chiller' ? 'text-indigo-600' :
-            system.type === 'Package' ? 'text-teal-600' :
-            system.type === 'VRF'     ? 'text-violet-600' :
-            'text-amber-600',
+            system.type === 'AHU'     ? 'text-sky-600 dark:text-sky-400' :
+            system.type === 'Chiller' ? 'text-indigo-600 dark:text-indigo-400' :
+            system.type === 'Package' ? 'text-teal-600 dark:text-teal-400' :
+            system.type === 'VRF'     ? 'text-violet-600 dark:text-violet-400' :
+            'text-amber-600 dark:text-amber-400',
           )} />
           <span className={cn('text-xs font-bold uppercase tracking-wide',
-            system.type === 'AHU'     ? 'text-sky-700' :
-            system.type === 'Chiller' ? 'text-indigo-700' :
-            system.type === 'Package' ? 'text-teal-700' :
-            system.type === 'VRF'     ? 'text-violet-700' :
-            'text-amber-700',
+            system.type === 'AHU'     ? 'text-sky-700 dark:text-sky-300' :
+            system.type === 'Chiller' ? 'text-indigo-700 dark:text-indigo-300' :
+            system.type === 'Package' ? 'text-teal-700 dark:text-teal-300' :
+            system.type === 'VRF'     ? 'text-violet-700 dark:text-violet-300' :
+            'text-amber-700 dark:text-amber-300',
           )}>
             Equipment Specification Sheet
           </span>
           {hasSpec && (
-            <span className="text-[10px] bg-white/70 border border-current px-1.5 py-0.5 rounded font-medium opacity-70">
+            <span className="text-[10px] bg-white/70 dark:bg-slate-800/70 border border-current px-1.5 py-0.5 rounded font-medium opacity-70">
               {spec.specType}
             </span>
           )}
@@ -1013,7 +1015,7 @@ export default function SpecSheet({
           {expanded && (
             <>
               <Button size="sm" variant="outline"
-                className="h-7 text-xs gap-1.5 bg-white"
+                className="h-7 text-xs gap-1.5 bg-white dark:bg-slate-800 dark:border-slate-600 dark:text-slate-200"
                 onClick={e => { e.stopPropagation(); autoFill(); }}
               >
                 <Wand2 className="w-3 h-3" /> Auto-fill
@@ -1021,7 +1023,7 @@ export default function SpecSheet({
               {hasSpec && (
                 <>
                   <Button size="sm" variant="outline"
-                    className="h-7 text-xs gap-1.5 bg-white"
+                    className="h-7 text-xs gap-1.5 bg-white dark:bg-slate-800 dark:border-slate-600 dark:text-slate-200"
                     onClick={e => { e.stopPropagation(); handlePrint(); }}
                   >
                     <Printer className="w-3 h-3" /> Print All
@@ -1051,15 +1053,15 @@ export default function SpecSheet({
 
       {/* Body */}
       {expanded && (
-        <div className="p-4 space-y-4">
+        <div className="p-4 space-y-4 dark:bg-slate-900/20">
           {!hasSpec && (
-            <div className="flex flex-col items-center justify-center py-6 text-slate-400 gap-2">
+            <div className="flex flex-col items-center justify-center py-6 text-slate-400 dark:text-slate-500 gap-2">
               <FileText className="w-8 h-8 opacity-20" />
               <p className="text-sm font-medium">No specification data yet</p>
               <p className="text-xs text-center max-w-xs">
                 Click <strong>Auto-fill</strong> to populate from the calculated load, then edit as needed and save.
               </p>
-              <Button size="sm" variant="outline" className="gap-1.5 mt-2" onClick={autoFill}>
+              <Button size="sm" variant="outline" className="gap-1.5 mt-2 dark:border-slate-600 dark:text-slate-300" onClick={autoFill}>
                 <Wand2 className="w-3 h-3" /> Auto-fill from Load Calculation
               </Button>
             </div>
@@ -1070,9 +1072,9 @@ export default function SpecSheet({
             <div className="space-y-3">
               {spec.chiller && (
                 <div className="flex items-center gap-2 px-1">
-                  <div className="h-px flex-1 bg-sky-200" />
-                  <span className="text-[10px] font-bold uppercase text-sky-600 tracking-wider">AHU / FCU Terminal Units</span>
-                  <div className="h-px flex-1 bg-sky-200" />
+                  <div className="h-px flex-1 bg-sky-200 dark:bg-sky-800" />
+                  <span className="text-[10px] font-bold uppercase text-sky-600 dark:text-sky-400 tracking-wider">AHU / FCU Terminal Units</span>
+                  <div className="h-px flex-1 bg-sky-200 dark:bg-sky-800" />
                 </div>
               )}
 
@@ -1082,12 +1084,12 @@ export default function SpecSheet({
                   <div key={idx} className="space-y-3">
                     {/* Zone name header */}
                     <div className="flex items-center gap-2">
-                      <div className="bg-sky-700 text-white text-[10px] font-bold px-3 py-1 rounded-l">
+                      <div className="bg-sky-700 dark:bg-sky-800 text-white text-[10px] font-bold px-3 py-1 rounded-l">
                         Unit {idx + 1}
                       </div>
-                      <div className="bg-sky-50 border border-sky-200 text-sky-800 text-[11px] font-semibold px-3 py-1 rounded-r flex-1">
+                      <div className="bg-sky-50 dark:bg-sky-950/40 border border-sky-200 dark:border-sky-800 text-sky-800 dark:text-sky-300 text-[11px] font-semibold px-3 py-1 rounded-r flex-1">
                         {unit.zoneName}
-                        <span className="ml-3 text-sky-500 font-normal">
+                        <span className="ml-3 text-sky-500 dark:text-sky-500 font-normal">
                           {unit.coolingCapTR} TR · {unit.supplyAirCFM.toLocaleString()} CFM
                         </span>
                       </div>
@@ -1098,7 +1100,7 @@ export default function SpecSheet({
                       ahuConfig={ahuConfig}
                     />
                     {idx < spec.ahuUnits!.length - 1 && (
-                      <div className="border-t border-dashed border-sky-200 mt-4" />
+                      <div className="border-t border-dashed border-sky-200 dark:border-sky-800 mt-4" />
                     )}
                   </div>
                 ))
@@ -1117,9 +1119,9 @@ export default function SpecSheet({
           {spec.chiller && (
             <div className="space-y-3">
               <div className="flex items-center gap-2 px-1">
-                <div className="h-px flex-1 bg-indigo-200" />
-                <span className="text-[10px] font-bold uppercase text-indigo-500 tracking-wider">Central Chiller Plant</span>
-                <div className="h-px flex-1 bg-indigo-200" />
+                <div className="h-px flex-1 bg-indigo-200 dark:bg-indigo-800" />
+                <span className="text-[10px] font-bold uppercase text-indigo-500 dark:text-indigo-400 tracking-wider">Central Chiller Plant</span>
+                <div className="h-px flex-1 bg-indigo-200 dark:bg-indigo-800" />
               </div>
 
               <Sec title="Cooling Capacity & Performance" color={sysColor}>
@@ -1149,13 +1151,13 @@ export default function SpecSheet({
               )}
 
               <div>
-                <div className="text-[10px] font-bold uppercase text-slate-400 mb-1">Notes</div>
+                <div className="text-[10px] font-bold uppercase text-slate-400 dark:text-slate-500 mb-1">Notes</div>
                 <textarea
                   value={spec.chiller.notes}
                   onChange={e => upd('chiller', 'notes', e.target.value)}
                   rows={2}
                   placeholder="Noise level, start sequence, BMS integration, etc."
-                  className="w-full rounded border border-slate-200 px-2.5 py-1.5 text-xs text-slate-700 resize-none focus:outline-none focus:border-blue-400"
+                  className="w-full rounded border border-slate-200 dark:border-slate-700 px-2.5 py-1.5 text-xs text-slate-700 dark:text-slate-200 bg-white dark:bg-slate-900 resize-none focus:outline-none focus:border-blue-400 dark:focus:border-blue-500 placeholder:text-slate-400 dark:placeholder:text-slate-600"
                 />
               </div>
             </div>
@@ -1165,9 +1167,9 @@ export default function SpecSheet({
           {spec.ct && (
             <div className="space-y-3">
               <div className="flex items-center gap-2 px-1">
-                <div className="h-px flex-1 bg-indigo-200" />
-                <span className="text-[10px] font-bold uppercase text-indigo-500 tracking-wider">Cooling Tower</span>
-                <div className="h-px flex-1 bg-indigo-200" />
+                <div className="h-px flex-1 bg-indigo-200 dark:bg-indigo-800" />
+                <span className="text-[10px] font-bold uppercase text-indigo-500 dark:text-indigo-400 tracking-wider">Cooling Tower</span>
+                <div className="h-px flex-1 bg-indigo-200 dark:bg-indigo-800" />
               </div>
 
               <Sec title="Thermal Duty & Design Temperatures" color="blue">
@@ -1192,13 +1194,13 @@ export default function SpecSheet({
               </Sec>
 
               <div>
-                <div className="text-[10px] font-bold uppercase text-slate-400 mb-1">Cooling Tower Notes</div>
+                <div className="text-[10px] font-bold uppercase text-slate-400 dark:text-slate-500 mb-1">Cooling Tower Notes</div>
                 <textarea
                   value={spec.ct.notes}
                   onChange={e => upd('ct', 'notes', e.target.value)}
                   rows={2}
                   placeholder="Material spec for coastal/aggressive environment, basin heater, sump screen, make-up valve, etc."
-                  className="w-full rounded border border-slate-200 px-2.5 py-1.5 text-xs text-slate-700 resize-none focus:outline-none focus:border-blue-400"
+                  className="w-full rounded border border-slate-200 dark:border-slate-700 px-2.5 py-1.5 text-xs text-slate-700 dark:text-slate-200 bg-white dark:bg-slate-900 resize-none focus:outline-none focus:border-blue-400 dark:focus:border-blue-500 placeholder:text-slate-400 dark:placeholder:text-slate-600"
                 />
               </div>
             </div>
@@ -1222,13 +1224,13 @@ export default function SpecSheet({
               </Sec>
 
               <div>
-                <div className="text-[10px] font-bold uppercase text-slate-400 mb-1">Notes</div>
+                <div className="text-[10px] font-bold uppercase text-slate-400 dark:text-slate-500 mb-1">Notes</div>
                 <textarea
                   value={spec.pkg.notes}
                   onChange={e => upd('pkg', 'notes', e.target.value)}
                   rows={2}
                   placeholder="Discharge arrangement, economiser coil, controls, BMS integration, etc."
-                  className="w-full rounded border border-slate-200 px-2.5 py-1.5 text-xs text-slate-700 resize-none focus:outline-none focus:border-blue-400"
+                  className="w-full rounded border border-slate-200 dark:border-slate-700 px-2.5 py-1.5 text-xs text-slate-700 dark:text-slate-200 bg-white dark:bg-slate-900 resize-none focus:outline-none focus:border-blue-400 dark:focus:border-blue-500 placeholder:text-slate-400 dark:placeholder:text-slate-600"
                 />
               </div>
             </div>
@@ -1238,14 +1240,14 @@ export default function SpecSheet({
           {spec.humidifier && (
             <div className="space-y-3">
               <div className="flex items-center gap-2 px-1">
-                <div className="h-px flex-1 bg-cyan-200" />
-                <span className="text-[10px] font-bold uppercase text-cyan-600 tracking-wider">Humidifier</span>
-                <div className="h-px flex-1 bg-cyan-200" />
+                <div className="h-px flex-1 bg-cyan-200 dark:bg-cyan-800" />
+                <span className="text-[10px] font-bold uppercase text-cyan-600 dark:text-cyan-400 tracking-wider">Humidifier</span>
+                <div className="h-px flex-1 bg-cyan-200 dark:bg-cyan-800" />
               </div>
 
               {/* Humidifier type toggle */}
               <div className="flex items-center gap-2 flex-wrap">
-                <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Technology:</span>
+                <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 dark:text-slate-500">Technology:</span>
                 {(['steam-electrode', 'ultrasonic'] as const).map(t => {
                   const current = spec.humidifier!.humidifierType ?? (spec.humidifier!.type.includes('Ultrasonic') ? 'ultrasonic' : 'steam-electrode');
                   const isActive = t === current;
@@ -1256,14 +1258,16 @@ export default function SpecSheet({
                         setSpec(s => ({ ...s, humidifier: { ...rebuilt, notes: s.humidifier?.notes ?? '' } }));
                       }}
                       className={cn('text-[11px] px-2.5 py-1 rounded border font-medium transition-colors',
-                        isActive ? 'bg-cyan-600 border-cyan-600 text-white' : 'bg-white border-slate-200 text-slate-500 hover:border-cyan-300 hover:text-cyan-700'
+                        isActive
+                          ? 'bg-cyan-600 border-cyan-600 text-white dark:bg-cyan-700 dark:border-cyan-700'
+                          : 'bg-white dark:bg-slate-800 border-slate-200 dark:border-slate-600 text-slate-500 dark:text-slate-400 hover:border-cyan-300 dark:hover:border-cyan-700 hover:text-cyan-700 dark:hover:text-cyan-400'
                       )}
                     >
                       {t === 'steam-electrode' ? '♨ Steam Electrode' : '〰 Ultrasonic'}
                     </button>
                   );
                 })}
-                <span className="text-[10px] text-slate-400 italic">
+                <span className="text-[10px] text-slate-400 dark:text-slate-500 italic">
                   {spec.humidifier.humidifierType === 'ultrasonic'
                     ? '· Piezoelectric, low energy (~0.05 kW/kg/h), no heating element'
                     : '· Resistive heating element (~0.75 kW/kg/h), clean steam'}
@@ -1280,13 +1284,13 @@ export default function SpecSheet({
               </Sec>
 
               <div>
-                <div className="text-[10px] font-bold uppercase text-slate-400 mb-1">Humidifier Notes</div>
+                <div className="text-[10px] font-bold uppercase text-slate-400 dark:text-slate-500 mb-1">Humidifier Notes</div>
                 <textarea
                   value={spec.humidifier.notes}
                   onChange={e => upd('humidifier', 'notes', e.target.value)}
                   rows={2}
                   placeholder="Flush cycle, water quality requirements, BMS integration, drain valve, etc."
-                  className="w-full rounded border border-slate-200 px-2.5 py-1.5 text-xs text-slate-700 resize-none focus:outline-none focus:border-blue-400"
+                  className="w-full rounded border border-slate-200 dark:border-slate-700 px-2.5 py-1.5 text-xs text-slate-700 dark:text-slate-200 bg-white dark:bg-slate-900 resize-none focus:outline-none focus:border-blue-400 dark:focus:border-blue-500 placeholder:text-slate-400 dark:placeholder:text-slate-600"
                 />
               </div>
             </div>
@@ -1294,18 +1298,18 @@ export default function SpecSheet({
 
           {/* Bottom action bar */}
           {hasSpec && (
-            <div className="space-y-3 pt-3 border-t border-slate-100">
+            <div className="space-y-3 pt-3 border-t border-slate-100 dark:border-slate-800">
               {/* Per-equipment PDF download */}
-              <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2.5">
+              <div className="rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/50 px-3 py-2.5">
                 <div className="flex items-center gap-1.5 mb-2">
-                  <Download className="w-3.5 h-3.5 text-slate-500" />
-                  <span className="text-[10px] font-bold uppercase tracking-wide text-slate-500">Download Spec PDF — send to respective manufacturer</span>
+                  <Download className="w-3.5 h-3.5 text-slate-500 dark:text-slate-400" />
+                  <span className="text-[10px] font-bold uppercase tracking-wide text-slate-500 dark:text-slate-400">Download Spec PDF — send to respective manufacturer</span>
                 </div>
                 <div className="flex flex-wrap gap-2">
                   {spec.ahu && (
                     <button
                       onClick={() => handlePrintEquipment('ahu')}
-                      className="flex items-center gap-1.5 text-[11px] font-medium px-3 py-1.5 rounded border border-sky-300 bg-sky-50 text-sky-700 hover:bg-sky-100 transition-colors"
+                      className="flex items-center gap-1.5 text-[11px] font-medium px-3 py-1.5 rounded border border-sky-300 dark:border-sky-700 bg-sky-50 dark:bg-sky-950/30 text-sky-700 dark:text-sky-300 hover:bg-sky-100 dark:hover:bg-sky-950/50 transition-colors"
                     >
                       <Printer className="w-3 h-3" /> AHU / FCU Spec
                     </button>
@@ -1313,7 +1317,7 @@ export default function SpecSheet({
                   {spec.chiller && (
                     <button
                       onClick={() => handlePrintEquipment('chiller')}
-                      className="flex items-center gap-1.5 text-[11px] font-medium px-3 py-1.5 rounded border border-indigo-300 bg-indigo-50 text-indigo-700 hover:bg-indigo-100 transition-colors"
+                      className="flex items-center gap-1.5 text-[11px] font-medium px-3 py-1.5 rounded border border-indigo-300 dark:border-indigo-700 bg-indigo-50 dark:bg-indigo-950/30 text-indigo-700 dark:text-indigo-300 hover:bg-indigo-100 dark:hover:bg-indigo-950/50 transition-colors"
                     >
                       <Printer className="w-3 h-3" /> Chiller Spec
                     </button>
@@ -1321,7 +1325,7 @@ export default function SpecSheet({
                   {spec.ct && (
                     <button
                       onClick={() => handlePrintEquipment('ct')}
-                      className="flex items-center gap-1.5 text-[11px] font-medium px-3 py-1.5 rounded border border-teal-300 bg-teal-50 text-teal-700 hover:bg-teal-100 transition-colors"
+                      className="flex items-center gap-1.5 text-[11px] font-medium px-3 py-1.5 rounded border border-teal-300 dark:border-teal-700 bg-teal-50 dark:bg-teal-950/30 text-teal-700 dark:text-teal-300 hover:bg-teal-100 dark:hover:bg-teal-950/50 transition-colors"
                     >
                       <Printer className="w-3 h-3" /> Cooling Tower Spec
                     </button>
@@ -1329,7 +1333,7 @@ export default function SpecSheet({
                   {spec.humidifier && (
                     <button
                       onClick={() => handlePrintEquipment('humidifier')}
-                      className="flex items-center gap-1.5 text-[11px] font-medium px-3 py-1.5 rounded border border-cyan-300 bg-cyan-50 text-cyan-700 hover:bg-cyan-100 transition-colors"
+                      className="flex items-center gap-1.5 text-[11px] font-medium px-3 py-1.5 rounded border border-cyan-300 dark:border-cyan-700 bg-cyan-50 dark:bg-cyan-950/30 text-cyan-700 dark:text-cyan-300 hover:bg-cyan-100 dark:hover:bg-cyan-950/50 transition-colors"
                     >
                       <Printer className="w-3 h-3" /> Humidifier Spec
                     </button>
@@ -1337,25 +1341,25 @@ export default function SpecSheet({
                   {spec.pkg && (
                     <button
                       onClick={() => handlePrintEquipment('pkg')}
-                      className="flex items-center gap-1.5 text-[11px] font-medium px-3 py-1.5 rounded border border-amber-300 bg-amber-50 text-amber-700 hover:bg-amber-100 transition-colors"
+                      className="flex items-center gap-1.5 text-[11px] font-medium px-3 py-1.5 rounded border border-amber-300 dark:border-amber-700 bg-amber-50 dark:bg-amber-950/30 text-amber-700 dark:text-amber-300 hover:bg-amber-100 dark:hover:bg-amber-950/50 transition-colors"
                     >
                       <Printer className="w-3 h-3" /> Package AC Spec
                     </button>
                   )}
                   <button
                     onClick={handlePrint}
-                    className="flex items-center gap-1.5 text-[11px] font-medium px-3 py-1.5 rounded border border-slate-300 bg-white text-slate-600 hover:bg-slate-100 transition-colors"
+                    className="flex items-center gap-1.5 text-[11px] font-medium px-3 py-1.5 rounded border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-700 transition-colors"
                   >
                     <Printer className="w-3 h-3" /> Full Spec (All)
                   </button>
                 </div>
-                <p className="text-[9px] text-slate-400 mt-2 italic">
+                <p className="text-[9px] text-slate-400 dark:text-slate-500 mt-2 italic">
                   Opens print dialog → use "Save as PDF" to download. Each PDF is addressed to a specific manufacturer.
                 </p>
               </div>
 
               <div className="flex items-center justify-between">
-                <p className="text-[10px] text-slate-400 italic">
+                <p className="text-[10px] text-slate-400 dark:text-slate-500 italic">
                   Auto-filled values are estimated — verify before submission.
                 </p>
                 <Button size="sm"

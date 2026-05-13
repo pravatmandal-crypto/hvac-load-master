@@ -10,9 +10,14 @@ import { BookOpen, Calculator, Thermometer, Wind, Shield, Info, FlaskConical, Za
 /* Based on: ASHRAE Fundamentals 2017, Carrier HAP, Trane Trace methodology   */
 /* ─────────────────────────────────────────────────────────────────────────── */
 
+// Context that forces every CollapseSection open during PDF canvas capture
+const PdfCtx = React.createContext(false);
+
 // ── Collapsible section wrapper ──────────────────────────────────────────────
 function CollapseSection({ title, children, defaultOpen = true }: { title: string; children: React.ReactNode; defaultOpen?: boolean }) {
+  const pdfMode = React.useContext(PdfCtx);
   const [open, setOpen] = useState(defaultOpen);
+  const isOpen = pdfMode || open;
   return (
     <div className="border border-gray-100 rounded-xl overflow-hidden">
       <button
@@ -20,9 +25,9 @@ function CollapseSection({ title, children, defaultOpen = true }: { title: strin
         className="w-full flex items-center justify-between px-4 py-3 bg-gray-50 hover:bg-gray-100 text-left text-sm font-semibold text-gray-800 transition-colors"
       >
         {title}
-        {open ? <ChevronDown className="w-4 h-4 text-gray-400" /> : <ChevronRight className="w-4 h-4 text-gray-400" />}
+        {isOpen ? <ChevronDown className="w-4 h-4 text-gray-400" /> : <ChevronRight className="w-4 h-4 text-gray-400" />}
       </button>
-      {open && <div className="p-4 space-y-3">{children}</div>}
+      {isOpen && <div className="p-4 space-y-3">{children}</div>}
     </div>
   );
 }
@@ -52,10 +57,14 @@ function CalcRow({ label, formula, result, unit = '', highlight = false }: { lab
 export default function Methodology({ userRole }: { userRole?: string | null }) {
   const contentRef = useRef<HTMLDivElement>(null);
   const [generating, setGenerating] = useState(false);
+  const [pdfMode, setPdfMode] = useState(false);
 
   const handleDownloadPDF = async () => {
     if (!contentRef.current || generating) return;
     setGenerating(true);
+    setPdfMode(true);
+    // Wait one frame for React to re-render all CollapseSection as expanded
+    await new Promise(r => setTimeout(r, 350));
     try {
       const pageW = 210;
       const pageH = 297;
@@ -117,6 +126,7 @@ export default function Methodology({ userRole }: { userRole?: string | null }) 
         'Step 6 — ADP Search & Dehumidified CFM',
         'Step 7 — Equipment Sizing (Load TR vs CFM TR)',
         'Step 8 — Reheat Analysis & Moisture Management',
+        'Step 9 — Seasonal Design Comparison (Monsoon / Winter)',
         'Worked Example — Conference Room, Salt Lake, Kolkata',
         'Worked Example — Monsoon Design Scenario',
         'Worked Example — Gangtok High-Altitude Comparison',
@@ -189,11 +199,13 @@ export default function Methodology({ userRole }: { userRole?: string | null }) 
       const msg = err instanceof Error ? err.message : String(err);
       toast.error(`PDF failed: ${msg.slice(0, 120)}`);
     } finally {
+      setPdfMode(false);
       setGenerating(false);
     }
   };
 
   return (
+    <PdfCtx.Provider value={pdfMode}>
     <div className="max-w-5xl mx-auto space-y-8 pb-12">
       <div className="flex flex-col gap-2">
         <div className="flex items-start justify-between gap-4">
@@ -666,6 +678,70 @@ Q_vl × BF          ─┘
             because the supply air SHR must satisfy the total coil load, not just the room load.
             Similarly, moisture removal previously used ventilation CFM only; now correctly uses CLH/h_fg
             to account for all latent sources.
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* ── STEP 9 ── Seasonal Design Comparison ────────────────────────────── */}
+      <Card className="border-none shadow-sm overflow-hidden">
+        <CardHeader className="bg-teal-700 text-white">
+          <div className="flex items-center gap-3">
+            <Wind className="w-6 h-6" />
+            <div>
+              <CardTitle>Step 9 — Seasonal Design Comparison (Monsoon / Winter)</CardTitle>
+              <CardDescription className="text-teal-100">Full repeat of Steps 1–8 under alternate-season outdoor conditions; governing TR = max across seasons</CardDescription>
+            </div>
+          </div>
+        </CardHeader>
+        <CardContent className="pt-5 space-y-4 text-sm">
+          <p className="text-gray-600 text-xs leading-relaxed">
+            When Monsoon or Winter seasons are enabled in Project Settings, the engine repeats the full calculation
+            pipeline (Steps 1–8) under the alternate-season outdoor design conditions. Each room then carries
+            up to three governing TR candidates — the highest wins.
+          </p>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+            <FBlock label="Monsoon outdoor conditions" color="text-teal-600"
+              code={'T_out_monsoon = monsoon dry-bulb  [°F]\nRH_monsoon    = monsoon relative humidity  [%]\nΔT_monsoon    = T_out_monsoon − T_indoor\nΔW_monsoon    = W_out_monsoon − W_indoor  [gr/lb]\n\nTypically: lower DB, sharply higher RH vs summer\n→ sensible load falls, latent load rises'} />
+            <FBlock label="Winter heating load" color="text-teal-600"
+              code={'T_out_winter = heating design dry-bulb  [°F]\n\nQ_heat,wall  = U × A × (T_indoor − T_out_winter)\nQ_heat,glass = U × A × (T_indoor − T_out_winter)\nNo solar gain assumed in heating mode.\nReported as Q_heat [BTU/h] — NOT added to\ncooling TR (sizes heating coil / heat-pump\nheating mode, not refrigeration circuit).'} />
+            <FBlock label="Three-season governing TR" color="text-teal-600"
+              code={'govTR_summer  = max(loadTR_s,  cfmTR_s)\ngovTR_monsoon = max(loadTR_m, cfmTR_m)\n\nfinalGovTR = max(govTR_summer, govTR_monsoon)\n\nOverall safety applied after:\n  requiredTR = finalGovTR × (1 + s_o%)'} />
+            <FBlock label="When monsoon governs (typical triggers)" color="text-teal-600"
+              code={'• High OA ACH in humid climates\n  (Kolkata, Mumbai, Chennai, Kochi)\n• High-occupancy rooms\n  (gyms, auditoria, canteens)\n• Low-sensible / high-latent spaces\n\nGSHF_monsoon < 0.65 → humidity control\n  critical → check coil BF, consider DOAS'} />
+          </div>
+          <div className="overflow-x-auto">
+            <div className="bg-teal-50 border border-teal-200 rounded-xl p-4">
+              <p className="text-[11px] font-bold text-teal-800 mb-3">Seasonal Comparison — Decision Matrix</p>
+              <table className="w-full text-[10.5px] border border-teal-200 rounded overflow-hidden">
+                <thead>
+                  <tr className="bg-teal-700 text-white">
+                    <th className="px-3 py-1.5 text-left font-bold">Seasons Enabled</th>
+                    <th className="px-3 py-1.5 text-left font-bold">Engine action</th>
+                    <th className="px-3 py-1.5 text-left font-bold">Final govTR</th>
+                    <th className="px-3 py-1.5 text-left font-bold">Heating output</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {[
+                    ['Summer only', 'Steps 1–8 at summer OA conditions', 'govTR_summer', '—'],
+                    ['Summer + Monsoon', 'Full pipeline repeated at monsoon OA; latent recalculated from W_out_monsoon', 'max(summer, monsoon)', '—'],
+                    ['Summer + Winter', 'Heating load (U×A×ΔT reverse) computed; no separate cooling run at winter OA', 'govTR_summer', 'Q_heat [BTU/h]'],
+                    ['All three', 'Both alternate-season pipelines computed', 'max(summer, monsoon)', 'Q_heat [BTU/h]'],
+                  ].map(([seasons, action, govtr, heat], i) => (
+                    <tr key={i} className={i % 2 === 0 ? 'bg-white' : 'bg-teal-50/30'}>
+                      <td className="px-3 py-1.5 font-semibold text-gray-800">{seasons}</td>
+                      <td className="px-3 py-1.5 text-gray-700">{action}</td>
+                      <td className="px-3 py-1.5 font-mono font-bold text-teal-800">{govtr}</td>
+                      <td className="px-3 py-1.5 text-gray-600">{heat}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+          <div className="p-3 bg-teal-50 border border-teal-100 rounded-lg text-[11px] text-teal-900 space-y-1">
+            <p><strong>Engineering Guideline:</strong> For tropical Indian cities (Kolkata, Mumbai, Chennai, Kochi), always enable monsoon comparison. Monsoon governs equipment sizing in roughly 30–40% of rooms in humid climate zones. Monsoon-governed rooms require coils with lower bypass factor (BF ≤ 0.10) and sustained dehumidification capacity.</p>
+            <p><strong>Winter heating note:</strong> The heating BTU/h is used to size heat-pump heating mode, electric strip heaters, or hot-water heating coils. It is reported per room in the PDF report but does not inflate the cooling TR — these are two separate sizing exercises on one calculation sheet.</p>
           </div>
         </CardContent>
       </Card>
@@ -1165,10 +1241,10 @@ Q_vl × BF          ─┘
                 { label:'Design Month', value:'June (summer)' },
                 { label:'Room', value:'Conference Room' },
                 { label:'Dimensions', value:'20 ft × 15 ft × 10 ft' },
-                { label:'Floor Area', value:'300 ft2' },
-                { label:'Volume', value:'3 000 ft3' },
+                { label:'Floor Area', value:'300 ft²' },
+                { label:'Volume', value:'3 000 ft³' },
                 { label:'Occupancy', value:'10 people (Office Work)' },
-                { label:'Lighting', value:'2.0 W/ft2 (LED panels)' },
+                { label:'Lighting', value:'2.0 W/ft² (LED panels)' },
                 { label:'Equipment', value:'1.0 kW (laptop + projector)' },
                 { label:'Ventilation (ACH)', value:'2.0 ACH' },
                 { label:'System type', value:'Split DX, BF = 0.15' },
@@ -1186,12 +1262,12 @@ Q_vl × BF          ─┘
               <div className="bg-sky-50 rounded-lg p-3 space-y-1 text-[11px]">
                 <p className="font-bold text-sky-700">Outdoor Design Conditions (Gangtok summer design)</p>
                 {[
-                  ['Dry Bulb (T_out)', '82F'],
-                  ['Daily Range (DR)', '12F'],
-                  ['Mean outdoor temp', '82 − 6 = 76F'],
+                  ['Dry Bulb (T_out)', '82°F'],
+                  ['Daily Range (DR)', '12°F'],
+                  ['Mean outdoor temp', '82 − 6 = 76°F'],
                   ['Relative Humidity', '75%'],
                   ['Atmospheric pressure', '12.11 psia (at 5 249 ft)'],
-                  ['P_sat at 82F', '≈ 0.555 psia'],
+                  ['P_sat at 82°F', '≈ 0.555 psia'],
                   ['P_v = 0.75 × 0.555', '0.416 psia'],
                   ['W_out = 0.622×0.416/(12.11−0.416)', '0.0221 lb/lb = 154.7 gr/lb'],
                 ].map(([k,v])=>(
@@ -1204,13 +1280,13 @@ Q_vl × BF          ─┘
               <div className="bg-green-50 rounded-lg p-3 space-y-1 text-[11px]">
                 <p className="font-bold text-green-700">Indoor Design Conditions (Same comfort target)</p>
                 {[
-                  ['Dry Bulb (T_in)', '75F'],
+                  ['Dry Bulb (T_in)', '75°F'],
                   ['Relative Humidity', '55%'],
-                  ['P_sat at 75F', '≈ 0.430 psia'],
+                  ['P_sat at 75°F', '≈ 0.430 psia'],
                   ['P_v = 0.55 × 0.430', '0.237 psia'],
                   ['W_in = 0.622×0.237/(12.11−0.237)', '0.01239 lb/lb = 86.7 gr/lb'],
-                  ['Delta T = T_out − T_in', '7F'],
-                  ['Delta W = W_out − W_in (gr)', '154.7 − 86.7 = 68.0 gr/lb'],
+                  ['ΔT = T_out − T_in', '7°F'],
+                  ['ΔW = W_out − W_in (gr/lb)', '154.7 − 86.7 = 68.0 gr/lb'],
                 ].map(([k,v])=>(
                   <div key={k} className="flex justify-between">
                     <span className="text-gray-600">{k}</span>
@@ -1226,20 +1302,20 @@ Q_vl × BF          ─┘
                 <table className="w-full text-[11px]">
                   <thead><tr className="bg-gray-200">
                     <th className="px-2 py-1 text-left">Element</th>
-                    <th className="px-2 py-1 text-right">Area (ft2)</th>
-                    <th className="px-2 py-1 text-right">U (BTU/h·ft2·F)</th>
+                    <th className="px-2 py-1 text-right">Area (ft²)</th>
+                    <th className="px-2 py-1 text-right">U (BTU/h·ft²·°F)</th>
                     <th className="px-2 py-1 text-right">Orientation</th>
                     <th className="px-2 py-1 text-right">Color / SC</th>
                     <th className="px-2 py-1 text-left">Description</th>
                   </tr></thead>
                   <tbody>
                     {[
-                      { e:'East Wall (opaque)', a:'160', u:'0.35', o:'E', c:'Dark', d:'20 ft × 10 ft − 40 ft2 glass' },
+                      { e:'East Wall (opaque)', a:'160', u:'0.35', o:'E', c:'Dark', d:'20 ft × 10 ft − 40 ft² glass' },
                       { e:'South Wall (opaque)', a:'150', u:'0.35', o:'S', c:'Dark', d:'15 ft × 10 ft, no windows' },
                       { e:'Flat Roof (insulated)', a:'300', u:'0.15', o:'H', c:'Dark', d:'20 ft × 15 ft' },
                       { e:'East Glass ×2 windows', a:'40', u:'1.04', o:'E', c:'SC=0.87', d:'2 windows, 4×5 ft each, clear single' },
-                      { e:'West Wall (partition)', a:'200', u:'0.25', o:'Part.', c:'-', d:'Internal partition to corridor' },
-                      { e:'North Wall (partition)', a:'150', u:'0.25', o:'Part.', c:'-', d:'Internal partition to lobby' },
+                      { e:'West Wall (partition)', a:'200', u:'0.25', o:'Part.', c:'—', d:'Internal partition to corridor' },
+                      { e:'North Wall (partition)', a:'150', u:'0.25', o:'Part.', c:'—', d:'Internal partition to lobby' },
                     ].map((r,i)=>(
                       <tr key={i} className={i%2===0?'bg-white':'bg-gray-50'}>
                         <td className="px-2 py-1 font-semibold text-gray-700">{r.e}</td>
@@ -1261,10 +1337,10 @@ Q_vl × BF          ─┘
               <p className="font-bold text-orange-800">Corrections first:</p>
               <div className="font-mono space-y-1 text-gray-700">
                 <p>P_atm  = 14.696 × (1 − 6.8754e−6 × 5249)^5.2559 = <strong>12.11 psia</strong></p>
-                <p>k_alt  = sqrt(14.696 / 12.11) = <strong>1.102</strong>  (noticeable altitude amplification)</p>
-                <p>T_mean = 82 − 12/2          = <strong>76F</strong></p>
-                <p>corr_T = (78−75) + (76−85)  = 3 − 9 = <strong>−6F</strong></p>
-                <p>corr_color (Dark)           = <strong>0F</strong></p>
+                <p>k_alt  = √(14.696 / 12.11) = <strong>1.102</strong>  (noticeable altitude amplification)</p>
+                <p>T_mean = 82 − 12/2          = <strong>76°F</strong></p>
+                <p>corr_T = (78−75) + (76−85)  = 3 − 9 = <strong>−6°F</strong></p>
+                <p>corr_color (Dark)           = <strong>0°F</strong></p>
               </div>
             </div>
 
@@ -1296,14 +1372,14 @@ Q_vl × BF          ─┘
                       <td className="px-2 py-1.5 text-right font-mono text-gray-600">{r.base}</td>
                       <td className="px-2 py-1.5 text-right font-mono text-blue-700">{r.t}</td>
                       <td className="px-2 py-1.5 text-right font-mono text-purple-700">{r.lm}</td>
-                      <td className="px-2 py-1.5 text-right font-bold text-orange-700">{r.corr}F</td>
+                      <td className="px-2 py-1.5 text-right font-bold text-orange-700">{r.corr}°F</td>
                       <td className="px-2 py-1.5 text-right font-mono text-gray-600">{r.u}</td>
                       <td className="px-2 py-1.5 text-right font-mono text-gray-600">{r.a}</td>
                       <td className="px-2 py-1.5 text-right font-bold text-gray-900">{r.q}</td>
                     </tr>
                   ))}
                   <tr className="bg-orange-100 font-bold">
-                    <td className="px-3 py-2" colSpan={7}>Solar gain: 40 ft2 × 0.87 (SC) × 68 (SHGF_E) × 0.85 (CLF)</td>
+                    <td className="px-3 py-2" colSpan={7}>Solar gain: 40 ft² × 0.87 (SC) × 68 (SHGF_E) × 0.85 (CLF)</td>
                     <td className="px-2 py-2 text-right text-orange-800">2 007</td>
                   </tr>
                   <tr className="bg-orange-200">
@@ -1352,7 +1428,7 @@ Q_vl × BF          ─┘
                   </tr>
                 </thead>
                 <tbody>
-                  <CalcRow label="Vent CFM" formula="2.0 ACH × 3000 ft3 / 60" result="100" unit="CFM" />
+                  <CalcRow label="Vent CFM" formula="2.0 ACH × 3000 ft³ / 60" result="100" unit="CFM" />
                   <CalcRow label="ASHRAE 62.1 min OA check" formula="5×10 + 0.06×300 = 50+18" result="68 min → 100 OK" unit="CFM" />
                   <CalcRow label="Q_vs (vent sensible)" formula="1.08 × 100 × (82−75)" result="756" unit="BTU/h" />
                   <CalcRow label="Q_vl (vent latent)" formula="0.68 × 100 × 68.0" result="4 624" unit="BTU/h" />
@@ -1413,8 +1489,8 @@ Q_vl × BF          ─┘
                   <CalcRow label="sensibleDiff (no CFM)" formula="1.08×(75−52)" result="24.8" unit="" />
                   <CalcRow label="latentDiff" formula="0.68×(86.7−70.7)" result="10.9" unit="" />
                   <CalcRow label="ratio at 52F" formula="24.8/(24.8+10.9)" result="0.695 ≈ 0.694 ✓" unit="" highlight />
-                  <CalcRow label="T_ADP (converged)" formula="iteration converges" result="52.0F" unit="" highlight />
-                  <CalcRow label="T_supply" formula="52.0 + 0.15×(75−52.0)" result="55.5F" unit="" highlight />
+                  <CalcRow label="T_ADP (converged)" formula="iteration converges" result="52.0°F" unit="" highlight />
+                  <CalcRow label="T_supply" formula="52.0 + 0.15×(75−52.0)" result="55.5°F" unit="" highlight />
                   <CalcRow label="W_supply" formula="70.7 + 0.15×(86.7−70.7)" result="73.1" unit="gr/lb" />
                   <CalcRow label="DSCFM" formula="15 176 / (1.08×(75−55.5))" result="721" unit="CFM" highlight />
                 </tbody>
@@ -1438,7 +1514,7 @@ Q_vl × BF          ─┘
                   <CalcRow label="CFM TR" formula="15 176 / (12 000 × 0.85)" result="1.49" unit="TR" />
                   <CalcRow label="Governing TR" formula="max(1.82, 1.49)" result="1.82" unit="TR" highlight />
                   <CalcRow label="Required TR (+10% safety)" formula="1.82 × 1.10" result="2.00" unit="TR" highlight />
-                  <CalcRow label="Selected unit" formula="Next standard size >= 2.00 TR" result="2.0 TR" unit="TR ★" highlight />
+                  <CalcRow label="Selected unit" formula="Next standard size ≥ 2.00 TR" result="2.0 TR" unit="TR ★" highlight />
                   <CalcRow label="Unit CFM (catalog estimate)" formula="2.0 TR × 400" result="800" unit="CFM" />
                 </tbody>
               </table>
@@ -1467,7 +1543,7 @@ Q_vl × BF          ─┘
                   <CalcRow label="Moisture removal (m_dot)" formula="6 674 / 1 050" result="6.36" unit="lbs/hr" highlight />
                   <CalcRow label="Condensate flow" formula="6.36 / 8.34" result="0.76" unit="US gal/hr" />
                   <CalcRow label="Condensate (litres/hr)" formula="6.36 × 0.454" result="2.89" unit="L/hr" />
-                  <CalcRow label="W_supply vs indoor W_room" formula="73.1 vs 86.7 gr/lb" result="Delta W = 13.6" unit="gr/lb removed" />
+                  <CalcRow label="W_supply vs indoor W_room" formula="73.1 vs 86.7 gr/lb" result="ΔW = 13.6" unit="gr/lb removed" />
                 </tbody>
               </table>
             </div>
@@ -1498,8 +1574,8 @@ Q_vl × BF          ─┘
                 { label:'Selected Unit', value:'2.0 TR', unit:'Split DX', color:'text-emerald-300' },
                 { label:'Moisture Removal', value:'6.36', unit:'lbs/hr', color:'text-rose-300' },
                 { label:'Condensate', value:'2.89', unit:'L/hr', color:'text-rose-300' },
-                { label:'ADP', value:'52.0F', unit:'', color:'text-cyan-300' },
-                { label:'Supply Air', value:'55.5F / 73 gr', unit:'', color:'text-cyan-300' },
+                { label:'ADP', value:'52.0°F', unit:'', color:'text-cyan-300' },
+                { label:'Supply Air', value:'55.5°F / 73 gr', unit:'', color:'text-cyan-300' },
               ].map(({label,value,unit,color})=>(
                 <div key={label} className="bg-emerald-800 rounded-lg p-3">
                   <p className="text-[9px] text-emerald-300 uppercase tracking-wide">{label}</p>
@@ -1512,8 +1588,8 @@ Q_vl × BF          ─┘
           <div className="bg-slate-100 border border-slate-300 rounded-xl p-4 text-[12px] text-slate-700 leading-relaxed">
             <p>
               <strong>Expert comparison (Kolkata vs Gangtok, same room and same internal profile):</strong> Gangtok requires substantially lower cooling capacity
-              mainly because outdoor dry-bulb is much lower (82F vs 95F), which cuts Delta T and thus envelope + ventilation sensible loads. Even with altitude
-              increasing the CLTD multiplier (k_alt about 1.10), the net envelope sensible load still drops from 10,204 to 5,817 BTU/h. Grand Total Heat falls
+              mainly because outdoor dry-bulb is much lower (82°F vs 95°F), which cuts ΔT and thus envelope + ventilation sensible loads. Even with altitude
+              increasing the CLTD multiplier (k_alt ≈ 1.10), the net envelope sensible load still drops from 10,204 to 5,817 BTU/h. Grand Total Heat falls
               from 30,394 to 21,850 BTU/h, so selected capacity moves from 3.0 TR to 2.0 TR. Latent performance remains important in both cases, but Gangtok
               shows lower moisture removal demand (6.36 vs 8.76 lb/hr). Practical design takeaway: in Gangtok-like hill climates, prioritize right-sized capacity
               and airflow stability over oversizing for extreme heat; in Kolkata-like hot-humid climates, latent robustness and reheat/DOAS strategy become more critical.
@@ -1537,7 +1613,7 @@ Q_vl × BF          ─┘
                 </thead>
                 <tbody>
                   {[
-                    { kpi:'Outdoor DB', kol:'95F', gan:'82F', d:'-13F' },
+                    { kpi:'Outdoor DB', kol:'95°F', gan:'82°F', d:'−13°F' },
                     { kpi:'Outdoor humidity ratio', kol:'176.4 gr/lb', gan:'154.7 gr/lb', d:'-21.7 gr/lb' },
                     { kpi:'Atmospheric pressure', kol:'14.68 psia', gan:'12.11 psia', d:'-2.57 psia' },
                     { kpi:'Altitude correction factor (k_alt)', kol:'1.0005', gan:'1.102', d:'+0.1015' },
@@ -1554,8 +1630,8 @@ Q_vl × BF          ─┘
                     { kpi:'Required TR (+10%)', kol:'2.78 TR', gan:'2.00 TR', d:'-0.78 TR' },
                     { kpi:'Selected unit', kol:'3.0 TR', gan:'2.0 TR', d:'-1.0 TR size step' },
                     { kpi:'DSCFM', kol:'934 CFM', gan:'721 CFM', d:'-213 CFM' },
-                    { kpi:'ADP', kol:'50.4F', gan:'52.0F', d:'+1.6F' },
-                    { kpi:'Supply air DB', kol:'54.1F', gan:'55.5F', d:'+1.4F' },
+                    { kpi:'ADP', kol:'50.4°F', gan:'52.0°F', d:'+1.6°F' },
+                    { kpi:'Supply air DB', kol:'54.1°F', gan:'55.5°F', d:'+1.4°F' },
                     { kpi:'Moisture removal', kol:'8.76 lb/hr', gan:'6.36 lb/hr', d:'-2.40 lb/hr' },
                     { kpi:'Condensate', kol:'3.98 L/hr', gan:'2.89 L/hr', d:'-1.09 L/hr' },
                   ].map((row, i) => (
@@ -1803,5 +1879,6 @@ convective, making CLF < 1.0 even less significant.`,
       </div>
       </div>{/* end contentRef */}
     </div>
+    </PdfCtx.Provider>
   );
 }

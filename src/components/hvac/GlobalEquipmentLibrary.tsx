@@ -19,7 +19,7 @@ import { Badge } from '../ui/badge';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '../ui/dialog';
 import {
   getAllLibraryItems, addLibraryItem, updateLibraryItem, deleteLibraryItem,
-  seedLibraryFromCatalog, importFromCSV, exportToCSV, getCSVTemplate,
+  seedLibraryFromCatalog, syncNewCatalogItems, importFromCSV, exportToCSV, getCSVTemplate,
   migrateFromLegacyCollections, deleteAllLegacyEquipment,
 } from '../../services/equipmentLibraryService';
 import type { EquipmentModel } from '../../constants/equipment-catalog';
@@ -81,10 +81,55 @@ function TypeBadge({ type }: { type: string }) {
   return <Badge variant="outline" className={cn('text-xs whitespace-nowrap', cls)}>{type}</Badge>;
 }
 
+// ─── Form constants ───────────────────────────────────────────────────────────
+
+const TYPE_LABELS: Record<string, string> = {
+  'VRF-ODU':      'VRF Outdoor Unit',
+  'VRF-IDU':      'VRF Indoor Unit',
+  'Chiller':      'Chiller',
+  'ChillerIDU':   'Chiller Indoor Unit (AHU/FCU)',
+  'CoolingTower': 'Cooling Tower',
+  'Package':      'Package Unit',
+  'DuctableSplit':'Ductable Split',
+  'AHU':          'Air Handling Unit (AHU)',
+  'FCU':          'Fan Coil Unit (FCU)',
+  'Split':        'Split AC',
+  'Humidifier':   'Humidifier',
+  'Dehumidifier': 'Dehumidifier',
+  'Boiler':       'Boiler / Heater',
+  'Pump':         'Pump',
+  'DOAS':         'DOAS / Fresh Air Unit',
+};
+
+const SUBTYPE_BY_TYPE: Record<string, string[]> = {
+  'VRF-IDU':      ['Hi-Wall', 'Ductable (Low Static)', 'Ductable (Mid Static)', 'Ductable (High Static)', '1-Way Cassette', '2-Way Cassette', '4-Way Cassette', '360° Cassette', 'AHU with DX Coil', 'Fresh Air (TFA)'],
+  'VRF-ODU':      ['Heat Pump', 'Cooling Only', 'Heat Recovery'],
+  'Chiller':      ['Air Cooled Scroll', 'Water Cooled Scroll', 'Air Cooled Screw', 'Water Cooled Screw', 'Air Cooled Scroll Modular', 'Centrifugal', 'Absorption'],
+  'ChillerIDU':   ['AHU-Hydro', 'FCU', 'Floor Standing FCU', 'Ceiling Hung FCU'],
+  'CoolingTower': ['FRP Induced Draft', 'FRP Forced Draft', 'Galvanized Induced Draft', 'Galvanized Forced Draft', 'Hybrid'],
+  'Package':      ['Air Cooled', 'Water Cooled', 'Rooftop'],
+  'DuctableSplit':['Inverter', 'Fixed Speed'],
+  'AHU':          ['Draw-Through', 'Blow-Through', 'Horizontal', 'Vertical'],
+  'FCU':          ['Floor Standing', 'Ceiling Hung', '2-Pipe', '4-Pipe'],
+  'Split':        ['Hi-Wall Inverter', 'Hi-Wall Fixed', 'Window', 'Portable'],
+  'Humidifier':   ['Ultrasonic', 'Heater-Based', 'Steam', 'Evaporative'],
+  'Dehumidifier': ['Refrigerant-Based', 'Desiccant'],
+  'Boiler':       ['Gas Fired', 'Electric', 'Oil Fired', 'Heat Pump'],
+  'Pump':         ['Chilled Water', 'Condenser Water', 'Hot Water'],
+  'DOAS':         ['Energy Recovery', 'Without ERV', 'Rotary Wheel', 'Plate HX'],
+};
+
+const REFRIGERANT_OPTIONS = ['R32', 'R410A', 'R407C', 'R22', 'R134a', 'R1234ze', 'R290', 'R600a', 'NH3 (R717)'];
+
+// Types where static pressure (ESP) is relevant
+const ESP_TYPES = new Set(['VRF-IDU', 'DuctableSplit', 'AHU', 'Package', 'DOAS', 'ChillerIDU']);
+// Types where EER/COP are relevant
+const PERF_TYPES = new Set(['VRF-IDU', 'VRF-ODU', 'Chiller', 'Package', 'DuctableSplit', 'Split', 'AHU', 'DOAS']);
+
 // ─── Form Panel ───────────────────────────────────────────────────────────────
 
 function EquipmentForm({
-  form, setForm, onSave, onCancel, saving, isEdit, brandOptions, subTypeOptions,
+  form, setForm, onSave, onCancel, saving, isEdit, brandOptions,
 }: {
   form: FormState;
   setForm: React.Dispatch<React.SetStateAction<FormState>>;
@@ -93,7 +138,6 @@ function EquipmentForm({
   saving: boolean;
   isEdit: boolean;
   brandOptions: string[];
-  subTypeOptions: string[];
 }) {
   function field(key: keyof FormState) {
     return (e: React.ChangeEvent<HTMLInputElement>) =>
@@ -104,15 +148,31 @@ function EquipmentForm({
       setForm(f => ({ ...f, [key]: parseNum(e.target.value) }));
   }
 
-  const isVrfOdu = form.type === 'VRF-ODU';
+  const t = form.type ?? '';
+  const isVrfOdu  = t === 'VRF-ODU';
+  const showEsp   = ESP_TYPES.has(t);
+  const showPerf  = PERF_TYPES.has(t);
+  const subTypeOpts = SUBTYPE_BY_TYPE[t] ?? [];
 
-  function F({ label, required, children }: { label: string; required?: boolean; children: React.ReactNode }) {
+  function F({ label, required, hint, children }: { label: string; required?: boolean; hint?: string; children: React.ReactNode }) {
     return (
       <div className="flex flex-col gap-1.5">
-        <Label className="text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wide">
-          {label}{required && <span className="text-red-500 ml-0.5">*</span>}
-        </Label>
+        <div className="flex items-baseline gap-1.5">
+          <Label className="text-xs font-semibold text-slate-600 dark:text-slate-300 uppercase tracking-wide">
+            {label}{required && <span className="text-red-500 ml-0.5">*</span>}
+          </Label>
+          {hint && <span className="text-[10px] text-slate-400 dark:text-slate-500">{hint}</span>}
+        </div>
         {children}
+      </div>
+    );
+  }
+
+  function UnitInput({ unit, ...props }: React.ComponentProps<typeof Input> & { unit: string }) {
+    return (
+      <div className="relative">
+        <Input {...props} className={cn('h-9 text-sm pr-10', props.className)} />
+        <span className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-xs font-medium text-slate-400 dark:text-slate-500">{unit}</span>
       </div>
     );
   }
@@ -120,79 +180,108 @@ function EquipmentForm({
   return (
     <div className="flex flex-col gap-0">
 
-      {/* ── Section 1: Identity ─────────────────────────────────────────────── */}
+      {/* ── Section 1: Equipment Type ─────────────────────────────────────── */}
+      <div className="px-6 py-5 border-b border-slate-100 dark:border-slate-800">
+        <div className="flex items-center gap-2 mb-3">
+          <div className="w-1 h-4 rounded-full bg-blue-500" />
+          <span className="text-xs font-bold text-slate-500 dark:text-slate-400 uppercase tracking-widest">Equipment Type</span>
+          <span className="text-red-500 text-xs ml-0.5">*</span>
+        </div>
+        <div className="flex flex-wrap gap-2">
+          {EQUIPMENT_TYPES.map(tp => (
+            <button
+              key={tp}
+              type="button"
+              onClick={() => setForm(f => ({ ...f, type: tp as any, subType: '' }))}
+              className={cn(
+                'px-3 py-1.5 rounded-lg border text-xs font-medium transition-all',
+                form.type === tp
+                  ? 'bg-blue-600 border-blue-600 text-white shadow-sm'
+                  : 'bg-white dark:bg-slate-800 border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 hover:border-blue-300 dark:hover:border-blue-700 hover:text-blue-700 dark:hover:text-blue-300',
+              )}
+            >
+              {TYPE_LABELS[tp] ?? tp}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* ── Section 2: Identity ───────────────────────────────────────────── */}
       <div className="px-6 py-5 border-b border-slate-100 dark:border-slate-800">
         <div className="flex items-center gap-2 mb-4">
-          <div className="w-1 h-4 rounded-full bg-blue-500" />
+          <div className="w-1 h-4 rounded-full bg-indigo-500" />
           <span className="text-xs font-bold text-slate-500 dark:text-slate-400 uppercase tracking-widest">Identity</span>
         </div>
-        <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-          <F label="Type" required>
-            <ComboboxInput inputClassName="h-9 text-sm" placeholder="e.g. VRF-IDU"
-              value={form.type ?? ''} onChange={v => setForm(f => ({ ...f, type: v as any }))}
-              options={EQUIPMENT_TYPES} />
-          </F>
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
           <F label="Brand" required>
-            <ComboboxInput inputClassName="h-9 text-sm" placeholder="e.g. Blue Star"
+            <ComboboxInput inputClassName="h-9 text-sm" placeholder="e.g. Blue Star, Voltas, Daikin"
               value={form.brand ?? ''} onChange={v => setForm(f => ({ ...f, brand: v }))}
               options={brandOptions} />
           </F>
-          <F label="Model / Series" required>
-            <Input className="h-9 text-sm" placeholder="e.g. VHW Hi-Wall" value={form.modelSeries ?? ''} onChange={field('modelSeries')} />
+          <F label="Model / Series" required hint="(series name, not individual model number)">
+            <Input className="h-9 text-sm" placeholder="e.g. XAC R407C Scroll" value={form.modelSeries ?? ''} onChange={field('modelSeries')} />
           </F>
-          <F label="Sub-Type">
-            <ComboboxInput inputClassName="h-9 text-sm" placeholder="e.g. hi-wall"
+          <F label="Sub-Type" hint={subTypeOpts.length ? '(select or type your own)' : ''}>
+            <ComboboxInput inputClassName="h-9 text-sm" placeholder={subTypeOpts.length ? 'Select sub-type…' : 'e.g. Air Cooled Scroll'}
               value={form.subType ?? ''} onChange={v => setForm(f => ({ ...f, subType: v }))}
-              options={subTypeOptions} />
+              options={subTypeOpts} />
           </F>
         </div>
       </div>
 
-      {/* ── Section 2: Specifications ───────────────────────────────────────── */}
+      {/* ── Section 3: Capacity & Airflow ────────────────────────────────── */}
       <div className="px-6 py-5 border-b border-slate-100 dark:border-slate-800">
         <div className="flex items-center gap-2 mb-4">
           <div className="w-1 h-4 rounded-full bg-emerald-500" />
-          <span className="text-xs font-bold text-slate-500 dark:text-slate-400 uppercase tracking-widest">Specifications</span>
+          <span className="text-xs font-bold text-slate-500 dark:text-slate-400 uppercase tracking-widest">Capacity</span>
         </div>
         <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-          <F label="Capacity (TR)" required>
-            <Input type="number" className="h-9 text-sm" placeholder="e.g. 1.5" value={numField(form.capacityTR)} onChange={numInput('capacityTR')} />
+          <F label="Cooling Capacity" required hint="(TR)">
+            <UnitInput type="number" unit="TR" placeholder="e.g. 1.5" value={numField(form.capacityTR)} onChange={numInput('capacityTR')} />
           </F>
-          <F label="Airflow (CFM)">
-            <Input type="number" className="h-9 text-sm" placeholder="e.g. 600" value={numField(form.ratedAirflowCFM)} onChange={numInput('ratedAirflowCFM')} />
+          <F label="Rated Airflow" hint="(CFM)">
+            <UnitInput type="number" unit="CFM" placeholder="e.g. 600" value={numField(form.ratedAirflowCFM)} onChange={numInput('ratedAirflowCFM')} />
           </F>
-          <F label="Static Pressure (Pa)">
-            <Input type="number" className="h-9 text-sm" placeholder="e.g. 80" value={numField(form.staticPressurePa)} onChange={numInput('staticPressurePa')} />
-          </F>
-          <F label="Power Input (kW)">
-            <Input type="number" className="h-9 text-sm" placeholder="e.g. 1.2" value={numField(form.powerInputKW)} onChange={numInput('powerInputKW')} />
+          {showEsp && (
+            <F label="Static Pressure" hint="(external)">
+              <UnitInput type="number" unit="Pa" placeholder="e.g. 80" value={numField(form.staticPressurePa)} onChange={numInput('staticPressurePa')} />
+            </F>
+          )}
+          <F label="Power Input" hint="(kW)">
+            <UnitInput type="number" unit="kW" placeholder="e.g. 4.5" value={numField(form.powerInputKW)} onChange={numInput('powerInputKW')} />
           </F>
         </div>
       </div>
 
-      {/* ── Section 3: Performance ──────────────────────────────────────────── */}
+      {/* ── Section 4: Performance & Refrigerant ─────────────────────────── */}
       <div className="px-6 py-5 border-b border-slate-100 dark:border-slate-800">
         <div className="flex items-center gap-2 mb-4">
           <div className="w-1 h-4 rounded-full bg-violet-500" />
           <span className="text-xs font-bold text-slate-500 dark:text-slate-400 uppercase tracking-widest">Performance & Refrigerant</span>
         </div>
         <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-          <F label="EER">
-            <Input type="number" className="h-9 text-sm" placeholder="e.g. 11.8" value={numField(form.eer)} onChange={numInput('eer')} />
-          </F>
-          <F label="COP">
-            <Input type="number" className="h-9 text-sm" placeholder="e.g. 3.5" value={numField(form.cop)} onChange={numInput('cop')} />
-          </F>
+          {showPerf && (
+            <F label="EER" hint="(energy efficiency ratio)">
+              <Input type="number" className="h-9 text-sm" placeholder="e.g. 11.8" value={numField(form.eer)} onChange={numInput('eer')} />
+            </F>
+          )}
+          {showPerf && (
+            <F label="COP" hint="(coeff. of performance)">
+              <Input type="number" className="h-9 text-sm" placeholder="e.g. 3.5" value={numField(form.cop)} onChange={numInput('cop')} />
+            </F>
+          )}
           <F label="Refrigerant">
-            <Input className="h-9 text-sm" placeholder="e.g. R32" value={form.refrigerant ?? ''} onChange={field('refrigerant')} />
+            <ComboboxInput inputClassName="h-9 text-sm" placeholder="e.g. R32"
+              value={form.refrigerant ?? ''} onChange={v => setForm(f => ({ ...f, refrigerant: v }))}
+              options={REFRIGERANT_OPTIONS} />
           </F>
-          <F label="Description">
-            <Input className="h-9 text-sm" placeholder="Optional notes" value={form.description ?? ''} onChange={field('description')} />
+          <F label="Notes / Description">
+            <Input className="h-9 text-sm" placeholder="Optional — any notes" value={form.description ?? ''} onChange={field('description')} />
           </F>
         </div>
       </div>
 
-      {/* ── Section 4: VRF-ODU specifics (conditional) ─────────────────────── */}
+      {/* ── Section 5: VRF-ODU specifics (conditional) ───────────────────── */}
       {isVrfOdu && (
         <div className="px-6 py-5 border-b border-slate-100 dark:border-slate-800">
           <div className="flex items-center gap-2 mb-4">
@@ -200,42 +289,45 @@ function EquipmentForm({
             <span className="text-xs font-bold text-slate-500 dark:text-slate-400 uppercase tracking-widest">VRF ODU Details</span>
           </div>
           <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-            <F label="Discharge Type">
+            <F label="Discharge Direction">
               <Select value={form.dischargeType ?? ''} onValueChange={v => setForm(f => ({ ...f, dischargeType: v as any || undefined }))}>
                 <SelectTrigger className="h-9 text-sm"><SelectValue placeholder="Select…" /></SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="">—</SelectItem>
+                  <SelectItem value="">— Not specified</SelectItem>
                   <SelectItem value="top">Top Discharge</SelectItem>
                   <SelectItem value="side">Side Discharge</SelectItem>
                 </SelectContent>
               </Select>
             </F>
-            <F label="Compressor Type">
+            <F label="Compressor Mode">
               <Select value={form.compressorType ?? ''} onValueChange={v => setForm(f => ({ ...f, compressorType: v as any || undefined }))}>
                 <SelectTrigger className="h-9 text-sm"><SelectValue placeholder="Select…" /></SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="">—</SelectItem>
-                  <SelectItem value="heat-pump">Heat Pump</SelectItem>
+                  <SelectItem value="">— Not specified</SelectItem>
+                  <SelectItem value="heat-pump">Heat Pump (Heating + Cooling)</SelectItem>
                   <SelectItem value="cooling-only">Cooling Only</SelectItem>
                 </SelectContent>
               </Select>
             </F>
-            <F label="Min Connection %">
-              <Input type="number" className="h-9 text-sm" placeholder="e.g. 50" value={numField(form.minConnectionPct)} onChange={numInput('minConnectionPct')} />
+            <F label="Min IDU Connection" hint="(% of ODU capacity)">
+              <UnitInput type="number" unit="%" placeholder="e.g. 50" value={numField(form.minConnectionPct)} onChange={numInput('minConnectionPct')} />
             </F>
-            <F label="Max Connection %">
-              <Input type="number" className="h-9 text-sm" placeholder="e.g. 130" value={numField(form.maxConnectionPct)} onChange={numInput('maxConnectionPct')} />
+            <F label="Max IDU Connection" hint="(% of ODU capacity)">
+              <UnitInput type="number" unit="%" placeholder="e.g. 130" value={numField(form.maxConnectionPct)} onChange={numInput('maxConnectionPct')} />
             </F>
           </div>
+          <p className="mt-3 text-xs text-slate-400 dark:text-slate-500">
+            Min/Max Connection % = total IDU capacity that can be connected to this ODU (e.g. 50–130 means 50% to 130% of ODU TR).
+          </p>
         </div>
       )}
 
       {/* ── Footer ──────────────────────────────────────────────────────────── */}
       <div className="px-6 py-4 flex items-center justify-between bg-slate-50/60 dark:bg-slate-800/40">
-        <p className="text-xs text-slate-400"><span className="text-red-500">*</span> Required fields</p>
+        <p className="text-xs text-slate-400 dark:text-slate-500"><span className="text-red-500">*</span> Required fields</p>
         <div className="flex gap-2">
           <Button variant="outline" onClick={onCancel} disabled={saving}>Cancel</Button>
-          <Button className="gap-1.5 bg-blue-600 hover:bg-blue-700" onClick={onSave} disabled={saving}>
+          <Button className="gap-1.5 bg-blue-600 hover:bg-blue-700 dark:bg-blue-700 dark:hover:bg-blue-600" onClick={onSave} disabled={saving}>
             {saving ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Plus className="w-4 h-4" />}
             {isEdit ? 'Save Changes' : 'Add to Library'}
           </Button>
@@ -252,6 +344,7 @@ export default function GlobalEquipmentLibrary() {
   const [items, setItems] = useState<EquipmentModel[]>([]);
   const [loading, setLoading] = useState(true);
   const [seeding, setSeeding] = useState(false);
+  const [syncing, setSyncing] = useState(false);
   const [migrating, setMigrating] = useState(false);
   const [search, setSearch] = useState('');
   const [filterBrand, setFilterBrand] = useState('all');
@@ -330,6 +423,23 @@ export default function GlobalEquipmentLibrary() {
       toast.error('Seed failed: ' + e.message);
     } finally {
       setSeeding(false);
+    }
+  }
+
+  async function handleSync() {
+    setSyncing(true);
+    try {
+      const count = await syncNewCatalogItems(userId);
+      if (count === 0) {
+        toast.info('Library is already up to date — no new items found');
+      } else {
+        toast.success(`Added ${count} new item${count !== 1 ? 's' : ''} from the built-in catalog`);
+        await loadItems();
+      }
+    } catch (e: any) {
+      toast.error('Sync failed: ' + e.message);
+    } finally {
+      setSyncing(false);
     }
   }
 
@@ -676,6 +786,13 @@ export default function GlobalEquipmentLibrary() {
           </Button>
         )}
         {items.length > 0 && (
+          <Button variant="ghost" className="h-10 gap-2 text-sm text-green-600 hover:text-green-700 dark:text-green-400 dark:hover:text-green-300"
+            onClick={handleSync} disabled={syncing} title="Add new catalog items not yet in the library">
+            {syncing ? <RefreshCw className="w-4 h-4 animate-spin" /> : <CheckCircle2 className="w-4 h-4" />}
+            Sync New Items
+          </Button>
+        )}
+        {items.length > 0 && (
           <Button variant="ghost" className="h-10 gap-2 text-sm text-amber-600 hover:text-amber-700"
             onClick={handleSeed} disabled={seeding}>
             {seeding ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Database className="w-4 h-4" />}
@@ -849,7 +966,6 @@ export default function GlobalEquipmentLibrary() {
               saving={saving}
               isEdit={!!editingId}
               brandOptions={brands}
-              subTypeOptions={[...new Set([...Object.keys(IDU_SUBTYPE_LABELS), ...subTypes])].sort()}
             />
           </div>
         </DialogContent>

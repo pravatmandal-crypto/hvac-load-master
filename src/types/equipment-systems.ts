@@ -77,6 +77,8 @@ export interface EquipmentZone {
     electricHeaterKW: number;
     hasHumidifier: boolean;
     humidifierKgHr: number;
+    humidifierModel?: string;   // "Brand ModelSeries" when picked from catalog
+    humidifierSubType?: string; // Ultrasonic / Heater-Based
   };
   // AHU configuration per zone — applies to Chiller, AHU-DX, and VRF zones with AHU-type IDUs
   ahuConfig?: AHUConfig;
