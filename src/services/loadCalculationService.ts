@@ -200,7 +200,11 @@ export async function calculateAndPersistRoom(
   // ── Analysis snapshot ────────────────────────────────────────────────────
   const outdoorPsych = calculatePsychrometrics(dc.outdoorTemp, dc.outdoorHumidity, dc.altitude || 0);
   const indoorPsych = calculatePsychrometrics(dc.indoorTemp, dc.indoorHumidity, dc.altitude || 0);
-  const reheat = calculateReheat(coilSensible, coilLatent);
+  // Reheat sized against ROOM SHF (ersh / erlh) — see lib/hvac/reheat.ts and
+  // src/services/reportService.ts for the engineering rationale. Using coil
+  // totals (which include OA) produces unrealistically large reheat numbers
+  // (10-15x) for over-ventilated low-RSHF rooms.
+  const reheat = calculateReheat(ersh, erlh);
 
   const analysis = {
     updatedAt: Date.now(),

@@ -1803,16 +1803,25 @@ condensate rate that was 30–50% too low for occupied rooms.
 Fixed: ṁ_water = CLH / 1050 — uses total coil latent, capturing all sources.`,
               },
               {
-                name: 'Reheat using Room Loads (ERSH/ERLH)',
-                era: 'Earlier versions of this engine',
-                status: '🔧 Fixed — now uses coil loads (CSH/CLH)',
+                name: 'Reheat sized against ROOM SHF (ERSH/ERLH)',
+                era: 'Reverted to room-based after coil-based proved unrealistic',
+                status: '🔧 Fixed — uses ROOM loads (ERSH/ERLH)',
                 statusColor: 'text-blue-700 bg-blue-50',
-                why: `Prior code: calculateReheat(ersh, erlh)
-The room SHR = ERSH/ERTH does not include the OA coil portion. In high-OA applications 
-(hospitals, labs, humid climates), the outdoor air latent pushes the actual coil SHR much lower.
-Using room loads alone can falsely show "no reheat" when the coil SHR including OA requires it.
-Fixed: calculateReheat(coilSensible, coilLatent) — uses GSHF (Grand SHF) which is the true 
-supply-air SHR including all outdoor air contributions.`,
+                why: `Reheat exists to prevent room overcooling: the room receives supply air at a
+temperature that absorbs Q_room_sensible. If the coil over-cools (to handle latent), reheat brings
+supply temperature back up. The amount needed is a function of ROOM SHR, not coil/grand SHR.
+
+A previous "fix" switched to calculateReheat(coilSensible, coilLatent) — including all OA latent
+in the ratio. For over-ventilated rooms this inflates reheat 10-15x: a 50 TR cooling system was
+being sized for ~75 TR of reheat (e.g. IGLOO Jorhat: 902k BTU/h reheat vs realistic ~62k). No
+real installation has reheat exceeding the cooling load.
+
+Current: calculateReheat(ersh, erlh) — sizes against ROOM sensible/latent with safety factors,
+matching standard Carrier methodology and what comfort systems are actually built with.
+
+For genuine high-OA cases (DOAS, hospitals, labs) where OA dominates, the proper answer is
+desiccant dehumidification or precondition the OA separately — not 75 TR of reheat downstream
+of a 50 TR coil.`,
               },
               {
                 name: 'Fixed People Load CLF (Cooling Load Factor for People)',

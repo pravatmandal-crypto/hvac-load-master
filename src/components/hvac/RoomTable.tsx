@@ -241,9 +241,11 @@ function useRoomCalc(room: any, elements: any[], designConditions: DesignConditi
       loadBTU: coilLatent,
     };
 
-    // Reheat uses coil sensible/latent ratio (Grand Sensible Heat Factor)
-    // so that OA contribution is included — gives the true supply-air SHR
-    const reheat = calculateReheat(coilSensible, coilLatent);
+    // Reheat sized against ROOM SHF (ersh / erlh) — reheat exists to prevent
+    // room overcooling, so the room's own sensible:total ratio is what matters.
+    // Coil-based formula was producing 10-15x inflated numbers in over-ventilated
+    // rooms because it included all OA latent in the ratio.
+    const reheat = calculateReheat(ersh, erlh);
 
     const coil = calculateCoilParameters(
       coilSensible,

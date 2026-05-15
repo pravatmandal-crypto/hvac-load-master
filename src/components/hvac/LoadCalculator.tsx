@@ -572,7 +572,9 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
       monsoonRate: parseFloat(monsoonMoistureLbsHr.toFixed(2)),
       governs: monsoonMoistGoverns ? 'monsoon' : 'summer',
     };
-    const reheat = calculateReheat(coilSensible, coilLatent);
+    // Reheat sized against ROOM SHF (ersh / erlh). Using coil totals (which
+    // include OA latent) inflates reheat by 10-15x for over-ventilated rooms.
+    const reheat = calculateReheat(ersh, erlh);
 
     const analysis = {
       updatedAt: Date.now(),

@@ -3429,10 +3429,16 @@ export default function EquipmentSelection({
       totalLat += lat;
 
       const moisture = r.analysis?.moisture;
-      const reheat   = r.analysis?.reheat;
       const dehumid  = moisture?.action === 'Dehumidify' ? (Number(moisture.rate) || 0) : 0;
       const humid    = moisture?.action === 'Humidify'   ? (Number(moisture.rate) || 0) : 0;
-      const reheatBTU = reheat?.needed ? (Number(reheat.reheatBTU) || 0) : 0;
+      // Reheat sized against ROOM SHF (sen/lat are room-effective values).
+      // Computed live here rather than read from r.analysis.reheat — the cached
+      // value may have been written by an older code path that used coil/grand
+      // SHF, which inflates reheat by 10-15x for over-ventilated rooms.
+      const tSHR = 0.75;
+      const roomTot = sen + lat;
+      const rSHR = roomTot > 0 ? sen / roomTot : 1;
+      const reheatBTU = rSHR < tSHR ? Math.max(0, (lat * tSHR) / (1 - tSHR) - sen) : 0;
       totalDehumidLbsHr += dehumid;
       totalHumidLbsHr   += humid;
       totalReheatBTU    += reheatBTU;
