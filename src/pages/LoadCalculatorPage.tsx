@@ -969,7 +969,7 @@ function ProjectDialog({
 
   return (
     <Dialog open={open} onOpenChange={(v) => !v && onClose()}>
-      <DialogContent className="max-h-[92vh] max-w-5xl overflow-y-auto p-0">
+      <DialogContent className="max-h-[92vh] w-[95vw] sm:max-w-6xl overflow-y-auto p-0">
 
         {/* Header */}
         <div className="sticky top-0 z-10 rounded-t-lg border-b border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-6 py-4">

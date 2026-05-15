@@ -12,6 +12,7 @@ import {
   calculateParasiticGains,
   calculateHeatingLoad,
   getRecommendedAch,
+  getMinAdp,
   type DesignConditions,
   type RoomDetails,
   type EnvelopeElement,
@@ -91,7 +92,10 @@ function computeZoneTotals(
       const oaLatent = vent.latent * (1 - BF);
       const coilSensible = ersh + oaSensible;
       const coilLatent = erlh + oaLatent;
-      const minAdp = isChiller ? 44 : 42;
+      // Pass derived system type to centralized helper. Preserves the previous
+      // 44/42 split for chiller vs VRF; non-chiller types now use the canonical
+      // 42°F per getMinAdp (matches old isChiller=false behavior).
+      const minAdp = getMinAdp(isChiller ? 'chiller' : 'vrf');
       const coil = calculateCoilParameters(
         coilSensible,
         coilLatent,

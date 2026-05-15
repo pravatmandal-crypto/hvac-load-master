@@ -23,6 +23,7 @@ import {
   ACTIVITY_TYPES,
   ACTIVITY_ACH_RECOMMENDATIONS,
   getRecommendedAch,
+  getMinAdp,
   SPACE_TYPES_62,
   getSpaceType,
   calcRoomVbz,
@@ -52,12 +53,6 @@ const FLOOR_TYPES = DEFAULT_WALL_TYPES.filter(w => w.id.startsWith('f'));
  * CAC/VAV/WSHP/others: standard DX R-410A evaporating ~40–45°F → floor at 44°F.
  * Design/indicated ADP is calculated from GSHF; this is only the lower bound.
  */
-const getMinAdp = (systemType?: string): number => {
-  const st = String(systemType || '').toLowerCase();
-  if (st === 'chiller') return 44;
-  if (st === 'vrf' || st === 'hybrid') return 42;
-  return 44; // CAC, VAV, WSHP, unknown — standard DX floor
-};
 
 type RoomTableProps = {
   rooms: any[];

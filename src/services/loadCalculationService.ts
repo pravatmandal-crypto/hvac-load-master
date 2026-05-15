@@ -21,6 +21,7 @@ import {
   calculateRoomVolume,
   calculateReheat,
   getRecommendedAch,
+  getMinAdp,
   type RoomDetails,
 } from '../lib/hvac';
 import { EnvelopeElement } from '../lib/hvac/constants';
@@ -39,6 +40,7 @@ export interface RoomCalcDesignConditions {
   winterOutdoorHumidity: number;
   winterIndoorTemp?: number;
   winterIndoorHumidity?: number;
+  winterInfiltrationACH?: number;
   includeWinter?: boolean;
   monsoonOutdoorTemp?: number;
   monsoonOutdoorHumidity?: number;
@@ -70,12 +72,6 @@ export interface RoomCalcResult {
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
-function getMinAdp(systemType?: string): number {
-  const st = String(systemType || '').toLowerCase();
-  if (st === 'chiller') return 44;
-  if (st === 'vrf' || st === 'hybrid') return 42;
-  return 44;
-}
 
 // ─── Main exported function ───────────────────────────────────────────────────
 
@@ -113,6 +109,9 @@ export async function calculateAndPersistRoom(
     lightsWattsPerSqft: Number(room.lightsWattsPerSqft) || 0,
     equipmentKW: Number(room.equipmentKW) || 0,
     othersKW: Number(room.othersKW) || 0,
+    isGroundFloor: !!room.isGroundFloor,
+    slabPerimeter: Number(room.slabPerimeter) || 0,
+    slabFFactor: Number(room.slabFFactor) || undefined,
   };
 
   const bf = 0.15;
@@ -128,6 +127,11 @@ export async function calculateAndPersistRoom(
   const internal = calculateInternalGains(rd);
   const vent = calculateVentilationLoad(rd, dc);
   const heating = dc.includeWinter ? calculateHeatingLoad(rd, elements, dc) : null;
+  // Apply same overall safety factor that cooling pipeline uses, so heating output
+  // mirrors the cooling-side margin. Stored alongside the raw value for transparency.
+  const heatingTotalWithSafety = heating
+    ? heating.totalHeatingLoad * (1 + overallSafetyPct / 100)
+    : 0;
 
   const erSensible = envelope.sensible + internal.sensible + vent.sensible * bf;
   const erLatent = internal.latent + vent.latent * bf;
@@ -212,7 +216,13 @@ export async function calculateAndPersistRoom(
     envelope,
     internal,
     ventilation: vent,
-    heating,
+    heating: heating
+      ? {
+          ...heating,
+          safetyAppliedBTUH: heatingTotalWithSafety,
+          safetyPercent: overallSafetyPct,
+        }
+      : null,
     psychrometrics: { outdoor: outdoorPsych, indoor: indoorPsych },
     coil,
     // Moisture analysis at the cooling coil. For climates with a separate monsoon

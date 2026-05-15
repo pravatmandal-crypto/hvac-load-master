@@ -23,6 +23,7 @@ import {
   calculateRoomVolume,
   calculateVentilationLoad,
   getRecommendedAch,
+  getMinAdp,
   type DesignConditions,
   type EnvelopeElement,
 } from '../lib/hvac';
@@ -351,8 +352,7 @@ function calcSeason(project: any, zos: any, room: any, elements: EnvelopeElement
   const coilL  = erlh + vent.latent   * (1 - BF);
   const grand  = (coilS + coilL) * (1 + oPct / 100);
 
-  const isChiller = String(project?.systemType || '').toLowerCase().includes('chiller');
-  const coil = calculateCoilParameters(coilS, coilL, dc.indoorTemp, dc.indoorHumidity, asNum(project?.altitude), BF, 35, 65, isChiller ? 50 : 54);
+  const coil = calculateCoilParameters(coilS, coilL, dc.indoorTemp, dc.indoorHumidity, asNum(project?.altitude), BF, 35, 65, getMinAdp(project?.systemType));
   const ach  = Math.max(getRecommendedAch(room.activityType ?? room.achProfile), asNum(room.facph));
   const totCFM = (volume * ach) / 60;
   const desCFM = Math.max(coil.dehumidifiedCFM, totCFM);

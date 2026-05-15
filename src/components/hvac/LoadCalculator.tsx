@@ -10,7 +10,7 @@ import {
   closestCorners,
 } from '@dnd-kit/core';
 import { sortableKeyboardCoordinates } from '@dnd-kit/sortable';
-import { Plus, Download, Building, BookOpen, Pencil, Loader2, BarChart3 } from 'lucide-react';
+import { Plus, Download, Building, BookOpen, Pencil, Loader2, BarChart3, Thermometer, Droplets, MapPin } from 'lucide-react';
 import { MetDataImporterDialog } from './MetDataImporterDialog';
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogFooter } from '../ui/dialog';
 import { Input } from '../ui/input';
@@ -35,16 +35,11 @@ import {
   calculateRoomVolume,
   calculateReheat,
   getRecommendedAch,
+  getMinAdp,
   type RoomDetails,
 } from '../../lib/hvac';
 import { EnvelopeElement } from '../../lib/hvac/constants';
 
-const getMinAdp = (systemType?: string): number => {
-  const st = String(systemType || '').toLowerCase();
-  if (st === 'chiller') return 44;
-  if (st === 'vrf' || st === 'hybrid') return 42;
-  return 44;
-};
 
 interface Room {
   id: string;
@@ -87,7 +82,7 @@ interface HVACSystem {
 }
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '../ui/tooltip';
 import PsychrometricChart from './PsychrometricChart';
-import { generatePDFReport, generateEquipmentSchedulePDF } from '../../services/reportService';
+import { generatePDFReport, generateEquipmentSchedulePDF, generateEngineeringReviewPDF } from '../../services/reportService';
 import { generateExcelReport } from '../../services/excelService';
 import { envelopeCache } from '../../lib/envelopeCache';
 import ZoneList from './ZoneList';
@@ -479,6 +474,9 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
       lightsWattsPerSqft: Number(roomSource.lightsWattsPerSqft) || 0,
       equipmentKW: Number(roomSource.equipmentKW) || 0,
       othersKW: Number(roomSource.othersKW) || 0,
+      isGroundFloor: !!roomSource.isGroundFloor,
+      slabPerimeter: Number(roomSource.slabPerimeter) || 0,
+      slabFFactor: Number(roomSource.slabFFactor) || undefined,
     };
 
     const elements = (elementsOverride ?? envelopeElements[roomId] ?? []) as EnvelopeElement[];
@@ -638,7 +636,8 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
       // Winter heating BTU/h — flat field so ES, LC row badges, and PDF can read it
       // without parsing the nested analysis.heating object. Always written (even when winter
       // isn't enabled in project settings) so toggling the season doesn't require a re-save.
-      _calcWinterHeatingBTUH: parseFloat((heating.totalHeatingLoad || 0).toFixed(0)),
+      // Safety factor (overallSafetyPct) is applied to mirror the cooling-side margin.
+      _calcWinterHeatingBTUH: parseFloat(((heating.totalHeatingLoad || 0) * (1 + overallSafetyPct / 100)).toFixed(0)),
       updatedAt: new Date(),
     });
 
@@ -670,7 +669,7 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
               _calcOverallGoverningTR: parseFloat(overallGoverningTR.toFixed(3)),
               _calcOverallRequiredTR: parseFloat(overallRequiredTR.toFixed(3)),
               _calcOverallDesignCFM: parseFloat(overallDesignCFM.toFixed(0)),
-              _calcWinterHeatingBTUH: parseFloat((heating.totalHeatingLoad || 0).toFixed(0)),
+              _calcWinterHeatingBTUH: parseFloat(((heating.totalHeatingLoad || 0) * (1 + overallSafetyPct / 100)).toFixed(0)),
             }
           : r
       ),
@@ -712,6 +711,9 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
         lightsWattsPerSqft: Number(room.lightsWattsPerSqft) || 0,
         equipmentKW: Number(room.equipmentKW) || 0,
         othersKW: Number(room.othersKW) || 0,
+        isGroundFloor: !!room.isGroundFloor,
+        slabPerimeter: Number(room.slabPerimeter) || 0,
+        slabFFactor: Number(room.slabFFactor) || undefined,
       };
 
       const envelope = calculateEnvelopeGain(elements, zoneDc);
@@ -788,7 +790,10 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
         summerCooling += summerSnapshot.grandTotal;
         summerDesignCfm += summerSnapshot.designSupplyCFM;
         summerCoilDehumCfm += summerSnapshot.coilDehumCFM;
-        totalHeating += heatingSnapshot.heating.totalHeatingLoad;
+        {
+          const heatingSF = Number(room.overallSafetyPercent ?? room.grandTotalSafetyFactor ?? 3);
+          totalHeating += heatingSnapshot.heating.totalHeatingLoad * (1 + heatingSF / 100);
+        }
         totalArea += summerSnapshot.area;
 
         if (includeMonsoon) {
@@ -2307,6 +2312,9 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
             <Button variant="outline" size="sm" onClick={() => generateEquipmentSchedulePDF(project, equipSystems, liveRooms)} className="gap-1 bg-teal-50 dark:bg-teal-950/20 text-teal-700 dark:text-teal-400 border-teal-200 dark:border-teal-800 hover:bg-teal-100 dark:hover:bg-teal-900/30 shadow-sm" title="Download Equipment Schedule as separate PDF">
               <Download className="w-3.5 h-3.5" /> Equip. Schedule
             </Button>
+            <Button variant="outline" size="sm" onClick={() => generateEngineeringReviewPDF(project, systems, zones, liveRooms, liveEnvelopeElements, equipSystems)} className="gap-1 bg-amber-50 dark:bg-amber-950/20 text-amber-700 dark:text-amber-400 border-amber-200 dark:border-amber-800 hover:bg-amber-100 dark:hover:bg-amber-900/30 shadow-sm" title="Internal QA review — auto-detected design findings. Not part of the client load-calculation submission.">
+              <Download className="w-3.5 h-3.5" /> Eng. Review
+            </Button>
             <Button variant="outline" size="sm" onClick={() => {
               const p = project;
               const pd = project.data ?? {};
@@ -2417,6 +2425,28 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
                   <p className="text-[10px] font-bold uppercase tracking-[0.14em] text-blue-700 dark:text-blue-400">Heating Load</p>
                   <p className="mt-2 font-mono text-xl font-bold text-blue-900 dark:text-blue-300">{Math.round(projectTotals.totalHeating).toLocaleString()}</p>
                   <p className="mt-1 text-xs text-blue-600 dark:text-blue-400">BTU/h winter design basis</p>
+                  {(() => {
+                    const wOut = Number(winterDesignTemp);
+                    const wIn = Number(insideWinterTemp);
+                    const missing = !Number.isFinite(wOut) || !Number.isFinite(wIn);
+                    const implausibleOutdoor = Number.isFinite(wOut) && (wOut < -20 || wOut > 70);
+                    const implausibleIndoor = Number.isFinite(wIn) && (wIn < 50 || wIn > 80);
+                    if (missing) {
+                      return (
+                        <p className="mt-2 text-[11px] font-semibold text-red-700 dark:text-red-400">
+                          ⚠ Winter design temps missing — heating load reads 0. Set winter outdoor &amp; indoor temps in project settings.
+                        </p>
+                      );
+                    }
+                    if (implausibleOutdoor || implausibleIndoor) {
+                      return (
+                        <p className="mt-2 text-[11px] font-semibold text-amber-700 dark:text-amber-400">
+                          ⚠ Winter temps look unusual (Out {wOut}°F, In {wIn}°F). Verify in project settings.
+                        </p>
+                      );
+                    }
+                    return null;
+                  })()}
                 </div>
               )}
               {/* Design Airflow — always shown */}
@@ -2658,296 +2688,367 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
 
       </div>
 
-      {/* Edit Project Data Modal */}
-      <Dialog open={editModalOpen} onOpenChange={setEditModalOpen}>
-        <DialogContent className="max-w-md">
-          <DialogHeader>
-            <DialogTitle>Edit Project Data</DialogTitle>
-            <DialogDescription>Update project metadata and design conditions</DialogDescription>
-          </DialogHeader>
-          <div className="space-y-4 py-4">
-            <div className="space-y-2">
-              <Label htmlFor="edit-name">Project Name</Label>
-              <input className={EDIT_INPUT_CLS}
-                id="edit-name"
-                value={editData.name}
-                onChange={(e) => setEditData(prev => ({ ...prev, name: e.target.value }))}
-                placeholder={project.name || 'Project name'}
-              />
-            </div>
-            <div className="space-y-2">
-              <Label htmlFor="edit-location">Location</Label>
-              <input className={EDIT_INPUT_CLS}
-                id="edit-location"
-                value={editData.location}
-                onChange={(e) => setEditData(prev => ({ ...prev, location: e.target.value }))}
-                placeholder={project.location || 'City, State'}
-              />
-            </div>
-            <div className="grid grid-cols-2 gap-4">
-              <div className="space-y-2">
-                <Label htmlFor="edit-latitude">Latitude</Label>
-                <input className={EDIT_INPUT_CLS}
-                  id="edit-latitude"
-                  type="text" inputMode="decimal"
-                  step="0.0001"
-                  value={editData.latitude}
-                  onChange={(e) => setEditData(prev => ({ ...prev, latitude: e.target.value }))}
-                  placeholder={(project.latitude ?? project.data?.latitude)?.toString() || 'Latitude'}
-                />
-              </div>
-              <div className="space-y-2">
-                <Label htmlFor="edit-longitude">Longitude</Label>
-                <input className={EDIT_INPUT_CLS}
-                  id="edit-longitude"
-                  type="text" inputMode="decimal"
-                  step="0.0001"
-                  value={editData.longitude}
-                  onChange={(e) => setEditData(prev => ({ ...prev, longitude: e.target.value }))}
-                  placeholder={(project.longitude ?? project.data?.longitude)?.toString() || 'Longitude'}
-                />
+      {/* Edit Project Data Modal — polished UI matching the New Project dialog (LoadCalculatorPage). */}
+      {(() => {
+        const activeSeasonsCount = 1 + (editData.includeMonsoon ? 1 : 0) + (editData.includeWinter ? 1 : 0);
+        const gridCols = activeSeasonsCount === 1 ? 'grid-cols-1' : activeSeasonsCount === 2 ? 'grid-cols-2' : 'grid-cols-3';
+        return (
+        <Dialog open={editModalOpen} onOpenChange={setEditModalOpen}>
+          <DialogContent className="max-h-[92vh] w-[95vw] sm:max-w-6xl overflow-y-auto p-0">
+
+            {/* Header */}
+            <div className="sticky top-0 z-10 rounded-t-lg border-b border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-6 py-4">
+              <div className="flex items-center gap-3">
+                <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-teal-500/10 dark:bg-teal-500/20">
+                  <Thermometer className="h-5 w-5 text-teal-600 dark:text-teal-400" />
+                </div>
+                <div className="flex-1">
+                  <h2 className="text-base font-bold text-slate-800 dark:text-slate-100">Edit Project</h2>
+                  <p className="text-xs text-slate-500 dark:text-slate-400">Update project settings and design conditions</p>
+                </div>
+                <Button type="button" size="sm" variant="outline" className="text-xs gap-1.5 h-8"
+                  onClick={() => setMetDataDialogOpen(true)}>
+                  <BarChart3 className="w-3.5 h-3.5" /> Import from Met Data
+                </Button>
               </div>
             </div>
-            <div className="space-y-2">
-              <Label htmlFor="edit-altitude">Altitude (ft)</Label>
-              <input className={EDIT_INPUT_CLS}
-                id="edit-altitude"
-                type="text" inputMode="decimal"
-                value={editData.altitude}
-                onChange={(e) => setEditData(prev => ({ ...prev, altitude: e.target.value }))}
-                placeholder={(project.altitude ?? project.data?.altitude)?.toString() || 'Elevation in feet'}
-              />
+
+            <div className="px-6 py-5 space-y-6">
+
+              {/* ── Project Information ──────────────────────────── */}
+              <div className="space-y-4">
+                <h3 className="text-xs font-semibold uppercase tracking-widest text-slate-400 dark:text-slate-500">Project Information</h3>
+                <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                  <div className="sm:col-span-2 space-y-1.5">
+                    <Label className="text-sm font-medium">Project Name</Label>
+                    <input className={EDIT_INPUT_CLS}
+                      value={editData.name}
+                      onChange={(e) => setEditData(prev => ({ ...prev, name: e.target.value }))}
+                      placeholder={project.name || 'Project name'}
+                    />
+                  </div>
+
+                  <div className="sm:col-span-2 space-y-1.5">
+                    <Label className="text-sm font-medium">Project Location</Label>
+                    <input className={EDIT_INPUT_CLS}
+                      value={editData.location}
+                      onChange={(e) => setEditData(prev => ({ ...prev, location: e.target.value }))}
+                      placeholder={project.location || 'City, State'}
+                    />
+                  </div>
+
+                  <div className="space-y-1.5">
+                    <Label className="text-sm font-medium flex items-center gap-1.5">
+                      <MapPin className="h-3.5 w-3.5 text-slate-400" /> Latitude
+                    </Label>
+                    <input className={EDIT_INPUT_CLS}
+                      type="text" inputMode="decimal" step="0.0001"
+                      value={editData.latitude}
+                      onChange={(e) => setEditData(prev => ({ ...prev, latitude: e.target.value }))}
+                      placeholder={(project.latitude ?? project.data?.latitude)?.toString() || 'Latitude'}
+                    />
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label className="text-sm font-medium flex items-center gap-1.5">
+                      <MapPin className="h-3.5 w-3.5 text-slate-400" /> Longitude
+                    </Label>
+                    <input className={EDIT_INPUT_CLS}
+                      type="text" inputMode="decimal" step="0.0001"
+                      value={editData.longitude}
+                      onChange={(e) => setEditData(prev => ({ ...prev, longitude: e.target.value }))}
+                      placeholder={(project.longitude ?? project.data?.longitude)?.toString() || 'Longitude'}
+                    />
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label className="text-sm font-medium">Altitude (ft)</Label>
+                    <input className={EDIT_INPUT_CLS}
+                      type="text" inputMode="decimal"
+                      value={editData.altitude}
+                      onChange={(e) => setEditData(prev => ({ ...prev, altitude: e.target.value }))}
+                      placeholder={(project.altitude ?? project.data?.altitude)?.toString() || 'Elevation in feet'}
+                    />
+                  </div>
+                </div>
+              </div>
+
+              <Separator className="dark:bg-slate-700" />
+
+              {/* ── Season Toggles ───────────────────────────────── */}
+              <div className="space-y-3">
+                <h3 className="text-xs font-semibold uppercase tracking-widest text-slate-400 dark:text-slate-500">Design Seasons</h3>
+                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                  <label className={`flex cursor-pointer items-start gap-3 rounded-xl border p-4 transition-all ${
+                    editData.includeMonsoon
+                      ? 'border-teal-400/60 bg-teal-50 dark:border-teal-600/50 dark:bg-teal-900/20'
+                      : 'border-slate-200 dark:border-slate-700 hover:border-teal-300 dark:hover:border-teal-700'
+                  }`}>
+                    <input
+                      type="checkbox"
+                      checked={editData.includeMonsoon}
+                      onChange={(e) => setEditData(prev => ({ ...prev, includeMonsoon: e.target.checked }))}
+                      className="mt-0.5 h-4 w-4 cursor-pointer accent-teal-500"
+                    />
+                    <div>
+                      <p className="text-sm font-semibold text-slate-700 dark:text-slate-200">Include Monsoon</p>
+                      <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5">
+                        Calculate peak load at monsoon conditions (high humidity)
+                      </p>
+                    </div>
+                  </label>
+
+                  <label className={`flex cursor-pointer items-start gap-3 rounded-xl border p-4 transition-all ${
+                    editData.includeWinter
+                      ? 'border-blue-400/60 bg-blue-50 dark:border-blue-600/50 dark:bg-blue-900/20'
+                      : 'border-slate-200 dark:border-slate-700 hover:border-blue-300 dark:hover:border-blue-700'
+                  }`}>
+                    <input
+                      type="checkbox"
+                      checked={editData.includeWinter}
+                      onChange={(e) => setEditData(prev => ({ ...prev, includeWinter: e.target.checked }))}
+                      className="mt-0.5 h-4 w-4 cursor-pointer accent-blue-500"
+                    />
+                    <div>
+                      <p className="text-sm font-semibold text-slate-700 dark:text-slate-200">Include Winter</p>
+                      <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5">
+                        Calculate heating load at winter design conditions
+                      </p>
+                    </div>
+                  </label>
+                </div>
+              </div>
+
+              <Separator className="dark:bg-slate-700" />
+
+              {/* ── Outside Design Conditions ─────────────────────── */}
+              <div className="space-y-3">
+                <div className="flex items-center gap-2">
+                  <Thermometer className="h-4 w-4 text-orange-500" />
+                  <h3 className="text-sm font-semibold text-slate-700 dark:text-slate-200">Outside Design Conditions</h3>
+                </div>
+                <div className={`grid gap-3 ${gridCols}`}>
+                  {/* Summer */}
+                  <div className="rounded-xl border border-orange-200 dark:border-orange-800/50 bg-orange-50 dark:bg-orange-900/15 p-4 space-y-3">
+                    <div className="flex items-center gap-1.5">
+                      <span className="h-2 w-2 rounded-full bg-orange-400" />
+                      <p className="text-xs font-bold text-orange-700 dark:text-orange-300 uppercase tracking-wide">Summer</p>
+                    </div>
+                    <div className="grid grid-cols-2 gap-2">
+                      <div className="space-y-1">
+                        <Label className="text-[11px] text-slate-500 dark:text-slate-400">Temp (°F)</Label>
+                        <input className={EDIT_INPUT_CLS}
+                          type="text" inputMode="decimal"
+                          value={editData.summerDesignTemp}
+                          onChange={(e) => setEditData(prev => ({ ...prev, summerDesignTemp: e.target.value }))}
+                          placeholder={(project.summerDesignTemp ?? project.data?.summerDesignTemp ?? 95).toString()}
+                        />
+                      </div>
+                      <div className="space-y-1">
+                        <Label className="text-[11px] text-slate-500 dark:text-slate-400">RH (%)</Label>
+                        <input className={EDIT_INPUT_CLS}
+                          type="text" inputMode="decimal"
+                          value={editData.summerDesignHumidity}
+                          onChange={(e) => setEditData(prev => ({ ...prev, summerDesignHumidity: e.target.value }))}
+                          placeholder={(project.summerDesignHumidity ?? project.data?.summerDesignHumidity ?? 50).toString()}
+                        />
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Monsoon */}
+                  {editData.includeMonsoon && (
+                    <div className="rounded-xl border border-teal-200 dark:border-teal-700/50 bg-teal-50 dark:bg-teal-900/15 p-4 space-y-3">
+                      <div className="flex items-center gap-1.5">
+                        <span className="h-2 w-2 rounded-full bg-teal-400" />
+                        <p className="text-xs font-bold text-teal-700 dark:text-teal-300 uppercase tracking-wide">Monsoon</p>
+                      </div>
+                      <div className="grid grid-cols-2 gap-2">
+                        <div className="space-y-1">
+                          <Label className="text-[11px] text-slate-500 dark:text-slate-400">Temp (°F)</Label>
+                          <input className={EDIT_INPUT_CLS}
+                            type="text" inputMode="decimal"
+                            value={editData.monsoonDesignTemp}
+                            onChange={(e) => setEditData(prev => ({ ...prev, monsoonDesignTemp: e.target.value }))}
+                            placeholder={(project.monsoonDesignTemp ?? project.data?.monsoonDesignTemp ?? 85).toString()}
+                          />
+                        </div>
+                        <div className="space-y-1">
+                          <Label className="text-[11px] text-slate-500 dark:text-slate-400">RH (%)</Label>
+                          <input className={EDIT_INPUT_CLS}
+                            type="text" inputMode="decimal"
+                            value={editData.monsoonDesignHumidity}
+                            onChange={(e) => setEditData(prev => ({ ...prev, monsoonDesignHumidity: e.target.value }))}
+                            placeholder={(project.monsoonDesignHumidity ?? project.data?.monsoonDesignHumidity ?? 85).toString()}
+                          />
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Winter */}
+                  {editData.includeWinter && (
+                    <div className="rounded-xl border border-blue-200 dark:border-blue-700/50 bg-blue-50 dark:bg-blue-900/15 p-4 space-y-3">
+                      <div className="flex items-center gap-1.5">
+                        <span className="h-2 w-2 rounded-full bg-blue-400" />
+                        <p className="text-xs font-bold text-blue-700 dark:text-blue-300 uppercase tracking-wide">Winter</p>
+                      </div>
+                      <div className="grid grid-cols-2 gap-2">
+                        <div className="space-y-1">
+                          <Label className="text-[11px] text-slate-500 dark:text-slate-400">Temp (°F)</Label>
+                          <input className={EDIT_INPUT_CLS}
+                            type="text" inputMode="decimal"
+                            value={editData.winterDesignTemp}
+                            onChange={(e) => setEditData(prev => ({ ...prev, winterDesignTemp: e.target.value }))}
+                            placeholder={(project.winterDesignTemp ?? project.data?.winterDesignTemp ?? 30).toString()}
+                          />
+                        </div>
+                        <div className="space-y-1">
+                          <Label className="text-[11px] text-slate-500 dark:text-slate-400">RH (%)</Label>
+                          <input className={EDIT_INPUT_CLS}
+                            type="text" inputMode="decimal"
+                            value={editData.winterDesignHumidity}
+                            onChange={(e) => setEditData(prev => ({ ...prev, winterDesignHumidity: e.target.value }))}
+                            placeholder={(project.winterDesignHumidity ?? project.data?.winterDesignHumidity ?? 30).toString()}
+                          />
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              {/* ── Inside Design Conditions ──────────────────────── */}
+              <div className="space-y-3">
+                <div className="flex items-center gap-2">
+                  <Droplets className="h-4 w-4 text-sky-500" />
+                  <h3 className="text-sm font-semibold text-slate-700 dark:text-slate-200">Inside Design Conditions</h3>
+                </div>
+                <div className={`grid gap-3 ${gridCols}`}>
+                  {/* Summer inside */}
+                  <div className="rounded-xl border border-sky-200 dark:border-sky-700/50 bg-sky-50 dark:bg-sky-900/15 p-4 space-y-3">
+                    <div className="flex items-center gap-1.5">
+                      <span className="h-2 w-2 rounded-full bg-sky-400" />
+                      <p className="text-xs font-bold text-sky-700 dark:text-sky-300 uppercase tracking-wide">Summer (Cooling)</p>
+                    </div>
+                    <div className="grid grid-cols-2 gap-2">
+                      <div className="space-y-1">
+                        <Label className="text-[11px] text-slate-500 dark:text-slate-400">Temp (°F)</Label>
+                        <input className={EDIT_INPUT_CLS}
+                          type="text" inputMode="decimal"
+                          value={editData.insideSummerTemp}
+                          onChange={(e) => setEditData(prev => ({ ...prev, insideSummerTemp: e.target.value }))}
+                          placeholder={(project.insideSummerTemp ?? project.data?.insideSummerTemp ?? 75).toString()}
+                        />
+                      </div>
+                      <div className="space-y-1">
+                        <Label className="text-[11px] text-slate-500 dark:text-slate-400">RH (%)</Label>
+                        <input className={EDIT_INPUT_CLS}
+                          type="text" inputMode="decimal"
+                          value={editData.insideSummerHumidity}
+                          onChange={(e) => setEditData(prev => ({ ...prev, insideSummerHumidity: e.target.value }))}
+                          placeholder={(project.insideSummerHumidity ?? project.data?.insideSummerHumidity ?? 50).toString()}
+                        />
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Monsoon inside */}
+                  {editData.includeMonsoon && (
+                    <div className="rounded-xl border border-cyan-200 dark:border-cyan-700/50 bg-cyan-50 dark:bg-cyan-900/15 p-4 space-y-3">
+                      <div className="flex items-center gap-1.5">
+                        <span className="h-2 w-2 rounded-full bg-cyan-400" />
+                        <p className="text-xs font-bold text-cyan-700 dark:text-cyan-300 uppercase tracking-wide">Monsoon (Cooling)</p>
+                      </div>
+                      <div className="grid grid-cols-2 gap-2">
+                        <div className="space-y-1">
+                          <Label className="text-[11px] text-slate-500 dark:text-slate-400">Temp (°F)</Label>
+                          <input className={EDIT_INPUT_CLS}
+                            type="text" inputMode="decimal"
+                            value={editData.insideMonsoonTemp}
+                            onChange={(e) => setEditData(prev => ({ ...prev, insideMonsoonTemp: e.target.value }))}
+                            placeholder={(project.insideMonsoonTemp ?? project.data?.insideMonsoonTemp ?? project.insideSummerTemp ?? 75).toString()}
+                          />
+                        </div>
+                        <div className="space-y-1">
+                          <Label className="text-[11px] text-slate-500 dark:text-slate-400">RH (%)</Label>
+                          <input className={EDIT_INPUT_CLS}
+                            type="text" inputMode="decimal"
+                            value={editData.insideMonsoonHumidity}
+                            onChange={(e) => setEditData(prev => ({ ...prev, insideMonsoonHumidity: e.target.value }))}
+                            placeholder={(project.insideMonsoonHumidity ?? project.data?.insideMonsoonHumidity ?? 55).toString()}
+                          />
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Winter inside */}
+                  {editData.includeWinter && (
+                    <div className="rounded-xl border border-indigo-200 dark:border-indigo-700/50 bg-indigo-50 dark:bg-indigo-900/15 p-4 space-y-3">
+                      <div className="flex items-center gap-1.5">
+                        <span className="h-2 w-2 rounded-full bg-indigo-400" />
+                        <p className="text-xs font-bold text-indigo-700 dark:text-indigo-300 uppercase tracking-wide">Winter (Heating)</p>
+                      </div>
+                      <div className="grid grid-cols-2 gap-2">
+                        <div className="space-y-1">
+                          <Label className="text-[11px] text-slate-500 dark:text-slate-400">Temp (°F)</Label>
+                          <input className={EDIT_INPUT_CLS}
+                            type="text" inputMode="decimal"
+                            value={editData.insideWinterTemp}
+                            onChange={(e) => setEditData(prev => ({ ...prev, insideWinterTemp: e.target.value }))}
+                            placeholder={(project.insideWinterTemp ?? project.data?.insideWinterTemp ?? 72).toString()}
+                          />
+                        </div>
+                        <div className="space-y-1">
+                          <Label className="text-[11px] text-slate-500 dark:text-slate-400">RH (%)</Label>
+                          <input className={EDIT_INPUT_CLS}
+                            type="text" inputMode="decimal"
+                            value={editData.insideWinterHumidity}
+                            onChange={(e) => setEditData(prev => ({ ...prev, insideWinterHumidity: e.target.value }))}
+                            placeholder={(project.insideWinterHumidity ?? project.data?.insideWinterHumidity ?? 40).toString()}
+                          />
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                </div>
+                <p className="text-[11px] text-slate-400 dark:text-slate-500">
+                  Enthalpy and humidity ratio are calculated automatically on save.
+                </p>
+              </div>
             </div>
-            <div className="flex items-center justify-between rounded-md border border-teal-200 dark:border-teal-800 bg-teal-50 dark:bg-teal-950/20 px-3 py-2">
-              <Label htmlFor="edit-include-monsoon" className="font-semibold text-teal-700">Include Monsoon</Label>
-              <input
-                id="edit-include-monsoon"
-                type="checkbox"
-                checked={editData.includeMonsoon}
-                onChange={(e) => setEditData(prev => ({ ...prev, includeMonsoon: e.target.checked }))}
-                className="h-4 w-4"
-              />
-            </div>
-            <div className="flex items-center justify-between rounded-md border border-blue-200 dark:border-blue-800 bg-blue-50 dark:bg-blue-950/20 px-3 py-2">
-              <Label htmlFor="edit-include-winter" className="font-semibold text-blue-700 dark:text-blue-300">Include Winter Heating</Label>
-              <input
-                id="edit-include-winter"
-                type="checkbox"
-                checked={editData.includeWinter}
-                onChange={(e) => setEditData(prev => ({ ...prev, includeWinter: e.target.checked }))}
-                className="h-4 w-4"
-              />
-            </div>
-            <Separator />
-            <div className="flex justify-end">
-              <Button type="button" size="sm" variant="outline" className="text-xs gap-1.5"
-                onClick={() => setMetDataDialogOpen(true)}>
-                <BarChart3 className="w-3.5 h-3.5" /> Import from Met Data
+
+            {/* Footer */}
+            <div className="sticky bottom-0 rounded-b-lg border-t border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-6 py-4 flex justify-end gap-3">
+              <Button
+                variant="outline"
+                onClick={() => {
+                  setEditData({
+                    name: '', location: '', longitude: '', latitude: '', altitude: '',
+                    includeMonsoon: false, includeWinter: false,
+                    summerDesignTemp: '', summerDesignHumidity: '',
+                    monsoonDesignTemp: '', monsoonDesignHumidity: '',
+                    winterDesignTemp: '', winterDesignHumidity: '',
+                    insideSummerTemp: '', insideSummerHumidity: '',
+                    insideMonsoonTemp: '', insideMonsoonHumidity: '',
+                    insideWinterTemp: '', insideWinterHumidity: '',
+                  });
+                  setEditModalOpen(false);
+                }}
+                disabled={editLoading}
+                className="h-9"
+              >
+                Cancel
+              </Button>
+              <Button onClick={saveProjectData} disabled={editLoading} className="h-9 bg-teal-600 hover:bg-teal-500 text-white min-w-[130px]">
+                {editLoading
+                  ? <><Loader2 className="mr-2 h-4 w-4 animate-spin" />Saving…</>
+                  : 'Update Project'}
               </Button>
             </div>
-            <div className="space-y-2">
-              <Label className="font-semibold">Summer Design Conditions</Label>
-              <div className="grid grid-cols-2 gap-4">
-                <div className="space-y-2">
-                  <Label htmlFor="edit-summer-temp">Temperature (°F)</Label>
-                  <input className={EDIT_INPUT_CLS}
-                    id="edit-summer-temp"
-                    type="text" inputMode="decimal"
-                    step="0.1"
-                    value={editData.summerDesignTemp}
-                    onChange={(e) => setEditData(prev => ({ ...prev, summerDesignTemp: e.target.value }))}
-                    placeholder={(project.summerDesignTemp ?? project.data?.summerDesignTemp ?? 95).toString()}
-                  />
-                </div>
-                <div className="space-y-2">
-                  <Label htmlFor="edit-summer-humidity">Humidity (%)</Label>
-                  <input className={EDIT_INPUT_CLS}
-                    id="edit-summer-humidity"
-                    type="text" inputMode="decimal"
-                    step="0.1"
-                    value={editData.summerDesignHumidity}
-                    onChange={(e) => setEditData(prev => ({ ...prev, summerDesignHumidity: e.target.value }))}
-                    placeholder={(project.summerDesignHumidity ?? project.data?.summerDesignHumidity ?? 50).toString()}
-                  />
-                </div>
-              </div>
-            </div>
-            {editData.includeMonsoon && (
-              <div className="space-y-2">
-                <Label className="font-semibold">Monsoon Design Conditions</Label>
-                <div className="grid grid-cols-2 gap-4">
-                  <div className="space-y-2">
-                    <Label htmlFor="edit-monsoon-temp">Temperature (°F)</Label>
-                    <input className={EDIT_INPUT_CLS}
-                      id="edit-monsoon-temp"
-                      type="text" inputMode="decimal"
-                      step="0.1"
-                      value={editData.monsoonDesignTemp}
-                      onChange={(e) => setEditData(prev => ({ ...prev, monsoonDesignTemp: e.target.value }))}
-                      placeholder={(project.monsoonDesignTemp ?? project.data?.monsoonDesignTemp ?? 85).toString()}
-                    />
-                  </div>
-                  <div className="space-y-2">
-                    <Label htmlFor="edit-monsoon-humidity">Humidity (%)</Label>
-                    <input className={EDIT_INPUT_CLS}
-                      id="edit-monsoon-humidity"
-                      type="text" inputMode="decimal"
-                      step="0.1"
-                      value={editData.monsoonDesignHumidity}
-                      onChange={(e) => setEditData(prev => ({ ...prev, monsoonDesignHumidity: e.target.value }))}
-                      placeholder={(project.monsoonDesignHumidity ?? project.data?.monsoonDesignHumidity ?? 85).toString()}
-                    />
-                  </div>
-                </div>
-              </div>
-            )}
-            {editData.includeWinter && (
-            <div className="space-y-2">
-              <Label className="font-semibold">Winter Design Conditions</Label>
-              <div className="grid grid-cols-2 gap-4">
-                <div className="space-y-2">
-                  <Label htmlFor="edit-winter-temp">Temperature (°F)</Label>
-                  <input className={EDIT_INPUT_CLS}
-                    id="edit-winter-temp"
-                    type="text" inputMode="decimal"
-                    step="0.1"
-                    value={editData.winterDesignTemp}
-                    onChange={(e) => setEditData(prev => ({ ...prev, winterDesignTemp: e.target.value }))}
-                    placeholder={(project.winterDesignTemp ?? project.data?.winterDesignTemp ?? 30).toString()}
-                  />
-                </div>
-                <div className="space-y-2">
-                  <Label htmlFor="edit-winter-humidity">Humidity (%)</Label>
-                  <input className={EDIT_INPUT_CLS}
-                    id="edit-winter-humidity"
-                    type="text" inputMode="decimal"
-                    step="0.1"
-                    value={editData.winterDesignHumidity}
-                    onChange={(e) => setEditData(prev => ({ ...prev, winterDesignHumidity: e.target.value }))}
-                    placeholder={(project.winterDesignHumidity ?? project.data?.winterDesignHumidity ?? 30).toString()}
-                  />
-                </div>
-              </div>
-            </div>
-            )}
-            <Separator />
-            <div className="space-y-2">
-              <Label className="font-semibold">Inside Design Conditions</Label>
-              <div className="grid grid-cols-2 gap-4">
-                <div className="space-y-2">
-                  <Label htmlFor="edit-inside-summer-temp">Summer Temp (°F)</Label>
-                  <input className={EDIT_INPUT_CLS}
-                    id="edit-inside-summer-temp"
-                    type="text" inputMode="decimal"
-                    step="0.1"
-                    value={editData.insideSummerTemp}
-                    onChange={(e) => setEditData(prev => ({ ...prev, insideSummerTemp: e.target.value }))}
-                    placeholder={(project.insideSummerTemp ?? project.data?.insideSummerTemp ?? 75).toString()}
-                  />
-                </div>
-                <div className="space-y-2">
-                  <Label htmlFor="edit-inside-summer-rh">Summer RH (%)</Label>
-                  <input className={EDIT_INPUT_CLS}
-                    id="edit-inside-summer-rh"
-                    type="text" inputMode="decimal"
-                    step="0.1"
-                    value={editData.insideSummerHumidity}
-                    onChange={(e) => setEditData(prev => ({ ...prev, insideSummerHumidity: e.target.value }))}
-                    placeholder={(project.insideSummerHumidity ?? project.data?.insideSummerHumidity ?? 50).toString()}
-                  />
-                </div>
-              </div>
-              {editData.includeMonsoon && (
-                <div className="grid grid-cols-2 gap-4">
-                  <div className="space-y-2">
-                    <Label htmlFor="edit-inside-monsoon-temp">Monsoon Temp (°F)</Label>
-                    <input className={EDIT_INPUT_CLS}
-                      id="edit-inside-monsoon-temp"
-                      type="text" inputMode="decimal"
-                      step="0.1"
-                      value={editData.insideMonsoonTemp}
-                      onChange={(e) => setEditData(prev => ({ ...prev, insideMonsoonTemp: e.target.value }))}
-                      placeholder={(project.insideMonsoonTemp ?? project.data?.insideMonsoonTemp ?? project.insideSummerTemp ?? 75).toString()}
-                    />
-                  </div>
-                  <div className="space-y-2">
-                    <Label htmlFor="edit-inside-monsoon-rh">Monsoon RH (%)</Label>
-                    <input className={EDIT_INPUT_CLS}
-                      id="edit-inside-monsoon-rh"
-                      type="text" inputMode="decimal"
-                      step="0.1"
-                      value={editData.insideMonsoonHumidity}
-                      onChange={(e) => setEditData(prev => ({ ...prev, insideMonsoonHumidity: e.target.value }))}
-                      placeholder={(project.insideMonsoonHumidity ?? project.data?.insideMonsoonHumidity ?? 55).toString()}
-                    />
-                  </div>
-                </div>
-              )}
-              {editData.includeWinter && (
-              <div className="grid grid-cols-2 gap-4">
-                <div className="space-y-2">
-                  <Label htmlFor="edit-inside-winter-temp">Winter Temp (°F)</Label>
-                  <input className={EDIT_INPUT_CLS}
-                    id="edit-inside-winter-temp"
-                    type="text" inputMode="decimal"
-                    step="0.1"
-                    value={editData.insideWinterTemp}
-                    onChange={(e) => setEditData(prev => ({ ...prev, insideWinterTemp: e.target.value }))}
-                    placeholder={(project.insideWinterTemp ?? project.data?.insideWinterTemp ?? 72).toString()}
-                  />
-                </div>
-                <div className="space-y-2">
-                  <Label htmlFor="edit-inside-winter-rh">Winter RH (%)</Label>
-                  <input className={EDIT_INPUT_CLS}
-                    id="edit-inside-winter-rh"
-                    type="text" inputMode="decimal"
-                    step="0.1"
-                    value={editData.insideWinterHumidity}
-                    onChange={(e) => setEditData(prev => ({ ...prev, insideWinterHumidity: e.target.value }))}
-                    placeholder={(project.insideWinterHumidity ?? project.data?.insideWinterHumidity ?? 40).toString()}
-                  />
-                </div>
-              </div>
-              )}
-            </div>
-          </div>
-          <DialogFooter>
-            <Button
-              variant="outline"
-              onClick={() => {
-                setEditData({
-                  name: '',
-                  location: '',
-                  longitude: '',
-                  latitude: '',
-                  altitude: '',
-                  includeMonsoon: false,
-                  includeWinter: false,
-                  summerDesignTemp: '',
-                  summerDesignHumidity: '',
-                  monsoonDesignTemp: '',
-                  monsoonDesignHumidity: '',
-                  winterDesignTemp: '',
-                  winterDesignHumidity: '',
-                  insideSummerTemp: '',
-                  insideSummerHumidity: '',
-                  insideMonsoonTemp: '',
-                  insideMonsoonHumidity: '',
-                  insideWinterTemp: '',
-                  insideWinterHumidity: '',
-                });
-                setEditModalOpen(false);
-              }}
-              disabled={editLoading}
-            >
-              Cancel
-            </Button>
-            <Button onClick={saveProjectData} disabled={editLoading} className="bg-blue-600 hover:bg-blue-700">
-              {editLoading ? 'Saving...' : 'Save Changes'}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+          </DialogContent>
+        </Dialog>
+        );
+      })()}
 
       {/* Met Data Importer — opened from inside the Edit Project dialog. Read-only utility:
           parses pasted 10-yr monthly Min/Max/RH, computes ASHRAE-style design conditions at

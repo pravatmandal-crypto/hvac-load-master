@@ -2,6 +2,7 @@ import { ReactNode } from 'react';
 import { User, signOut } from 'firebase/auth';
 import { auth } from '../lib/firebase';
 import { Button } from './ui/button';
+import { OfflineStatusIndicator } from './OfflineStatusIndicator';
 import {
   Menu,
   LogOut,
@@ -181,6 +182,9 @@ export default function AppLayout({
               {menuItems.find(m => m.page === currentPage)?.label ?? 'HVAC Load Master'}
             </h2>
             <div className="flex items-center gap-2">
+              {/* Offline status indicator */}
+              <OfflineStatusIndicator />
+              
               {/* Dark / Light toggle */}
               <button
                 onClick={toggleTheme}

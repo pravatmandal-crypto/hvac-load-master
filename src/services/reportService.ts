@@ -10,6 +10,7 @@ import {
   calculateParasiticGains,
   calculatePsychrometrics,
   getRecommendedAch,
+  getMinAdp,
   calculateSingleElementGain,
 } from '../lib/hvac-logic';
 
@@ -54,6 +55,8 @@ type DC = {
   altitude: number;
   winterOutdoorTemp: number;
   winterOutdoorHumidity: number;
+  winterIndoorTemp?: number;
+  winterIndoorHumidity?: number;
 };
 
 type DetailedMetrics = {
@@ -110,6 +113,7 @@ type DetailedMetrics = {
   indicatedAdp: number;
   selectedAdp: number;
   rshf: number;
+  adpUnreachable: boolean;
   // Heating with safety factors (populated for winter DC calls)
   heatingSafetyPct: number;
   heatingPickupPct: number;
@@ -117,6 +121,8 @@ type DetailedMetrics = {
   hVentRaw: number;
   hTransSafe: number;
   hVentSafe: number;
+  hSlabRaw: number;
+  hSlabSafe: number;
   hHumLoad: number;
   heatingSubtotal: number;
   designHeatingLoad: number;
@@ -178,12 +184,6 @@ const DEFAULT_THEME = makeTheme(false);
 
 const PAGE = { left: 12, right: 12, top: 20, bottom: 16 };
 
-const getMinAdp = (systemType?: string): number => {
-  const st = String(systemType || '').toLowerCase();
-  if (st === 'chiller') return 44;
-  if (st === 'vrf' || st === 'hybrid') return 42;
-  return 44;
-};
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -549,10 +549,20 @@ const computeTotalInstalledPlant = (systems: any[]): string => {
 
 const resolveEntityDC = (entity: EntityRecord, season: SeasonProfile, project: any): DC => {
   const alt = asNum(project?.altitude ?? project?.data?.altitude, 0);
+  // Always populate the winter* fields so calculateHeatingLoad has a valid input
+  // regardless of which season DC is being built.
+  const wOutT  = asNum(project?.winterDesignTemp     ?? project?.data?.winterDesignTemp,     40);
+  const wOutRH = asNum(project?.winterDesignHumidity ?? project?.data?.winterDesignHumidity, 30);
+  const wInT   = asNum(project?.insideWinterTemp     ?? project?.data?.insideWinterTemp,     70);
+  const wInRH  = asNum(project?.insideWinterHumidity ?? project?.data?.insideWinterHumidity, 40);
   if (season.key === 'winter') {
-    const wT  = asNum(project?.winterDesignTemp     ?? project?.data?.winterDesignTemp,     season.outdoorTemp);
-    const wRH = asNum(project?.winterDesignHumidity ?? project?.data?.winterDesignHumidity, season.outdoorHumidity);
-    return { outdoorTemp: wT, outdoorHumidity: wRH, indoorTemp: season.indoorTemp, indoorHumidity: season.indoorHumidity, altitude: alt, winterOutdoorTemp: wT, winterOutdoorHumidity: wRH };
+    return {
+      outdoorTemp: wOutT, outdoorHumidity: wOutRH,
+      indoorTemp: season.indoorTemp, indoorHumidity: season.indoorHumidity,
+      altitude: alt,
+      winterOutdoorTemp: wOutT, winterOutdoorHumidity: wOutRH,
+      winterIndoorTemp: wInT, winterIndoorHumidity: wInRH,
+    };
   }
   return {
     outdoorTemp:     asNum(entity.outdoorTemp,     season.outdoorTemp),
@@ -560,8 +570,8 @@ const resolveEntityDC = (entity: EntityRecord, season: SeasonProfile, project: a
     indoorTemp:      asNum(entity.indoorTemp,      season.indoorTemp),
     indoorHumidity:  asNum(entity.indoorHumidity,  season.indoorHumidity),
     altitude: alt,
-    winterOutdoorTemp:     asNum(project?.winterDesignTemp     ?? project?.data?.winterDesignTemp,     40),
-    winterOutdoorHumidity: asNum(project?.winterDesignHumidity ?? project?.data?.winterDesignHumidity, 30),
+    winterOutdoorTemp: wOutT, winterOutdoorHumidity: wOutRH,
+    winterIndoorTemp: wInT, winterIndoorHumidity: wInRH,
   };
 };
 
@@ -610,8 +620,10 @@ const computeDetailed = (room: any, elements: any[], dc: DC, project: any): Deta
 
   const hTransRaw  = heating.transmissionLoss;
   const hVentRaw   = heating.ventilationHeating;
+  const hSlabRaw   = heating.slabLoss ?? 0;
   const hTransSafe = hTransRaw * (1 + heatingSafetyPct / 100);
   const hVentSafe  = hVentRaw  * (1 + heatingSafetyPct / 100);
+  const hSlabSafe  = hSlabRaw  * (1 + heatingSafetyPct / 100);
 
   // Humidification: only relevant when outdoor W < indoor W (winter)
   const LATENT_HFG = 1061;
@@ -631,7 +643,7 @@ const computeDetailed = (room: any, elements: any[], dc: DC, project: any): Deta
     ? Math.min(100, Math.round((wOut / wSatIndoor.humidityRatio) * 100))
     : 0;
   const hHumLoad       = includeHumidifier && humNeeded ? humEnergyBTU : 0;
-  const heatingSubtotal   = hTransSafe + hVentSafe + hHumLoad;
+  const heatingSubtotal   = hTransSafe + hVentSafe + hSlabSafe + hHumLoad;
   const designHeatingLoad = heatingSubtotal * (1 + heatingPickupPct / 100);
 
   return {
@@ -662,9 +674,10 @@ const computeDetailed = (room: any, elements: any[], dc: DC, project: any): Deta
     indicatedAdp: coil.indicatedADP,
     selectedAdp:  coil.selectedADP,
     rshf:         coil.rshf,
+    adpUnreachable: coil.adpUnreachable,
     // Heating with safety
     heatingSafetyPct, heatingPickupPct, includeHumidifier,
-    hTransRaw, hVentRaw, hTransSafe, hVentSafe,
+    hTransRaw, hVentRaw, hTransSafe, hVentSafe, hSlabRaw, hSlabSafe,
     hHumLoad, heatingSubtotal, designHeatingLoad,
     // Humidification
     humNeeded, humFreshCFM,
@@ -690,6 +703,277 @@ const ensureSpace = (doc: jsPDF, y: number, needed: number, project: any) => {
     return startBody(doc, project);
   }
   return y;
+};
+
+// ─── ENGINEERING REVIEW ─────────────────────────────────────────────────────
+// Auto-detected design findings shown as a project-level review section near
+// the end of the report. Complements the per-room "Designer's Note" callouts.
+
+type FindingSeverity = 'critical' | 'warning' | 'info';
+type Finding = {
+  severity: FindingSeverity;
+  scope: string;        // e.g. "Project", "Room IGLOO 1", "System Chiller Plant"
+  title: string;        // one-line headline
+  description: string;  // 1-2 sentence explanation of what was detected
+  recommendation: string; // what to change / verify
+};
+
+// Reheat estimate matching the per-room calc at line ~1486 (target SHR 0.75).
+const estimateReheatBTU = (m: DetailedMetrics): number => {
+  const tSHR = 0.75;
+  const cSHR = m.coilSensible / Math.max(1, m.coilSensible + m.coilLatent);
+  if (cSHR >= tSHR) return 0;
+  return Math.max(0, (m.coilLatent * tSHR) / (1 - tSHR) - m.coilSensible);
+};
+
+const buildEngineeringReview = (
+  project: any,
+  entities: EntityRecord[],
+  envelopeElementsMap: Record<string, any[]>,
+  effectiveEquipSystems: any[],
+  summer: SeasonProfile,
+  winter: SeasonProfile | undefined,
+): Finding[] => {
+  const findings: Finding[] = [];
+  const altitude = asNum(project?.altitude ?? project?.data?.altitude, 0);
+
+  // ── PROJECT-LEVEL: indoor target review ────────────────────────────────
+  const sIndoorT  = asNum(project?.insideSummerTemp     ?? project?.summerIndoorTemp     ?? project?.data?.insideSummerTemp,     75);
+  const sIndoorRH = asNum(project?.insideSummerHumidity ?? project?.summerIndoorHumidity ?? project?.data?.insideSummerHumidity, 50);
+  if (sIndoorT > 76) {
+    findings.push({
+      severity: 'critical',
+      scope: 'Project',
+      title: `Summer indoor design ${sIndoorT}°F is above the comfort range`,
+      description: `Standard comfort cooling design is 74-76°F / 45-55% RH. Higher setpoints feel warm to occupants and force the system into low-SHR operation that requires reheat.`,
+      recommendation: `Reduce summer indoor target to 75°F / 50% RH unless this is a process or cold-storage space with a justified higher setpoint.`,
+    });
+  }
+  if (sIndoorRH > 55) {
+    findings.push({
+      severity: 'critical',
+      scope: 'Project',
+      title: `Summer indoor RH ${sIndoorRH}% exceeds typical comfort RH (45-55%)`,
+      description: `RH above 55% drives mold/IAQ risk and a very low coil SHR — meaning very large reheat or desiccant systems are needed.`,
+      recommendation: `Reduce indoor RH target to 50% (standard) or 45% (drier-comfort spaces). Verify with the client before sizing equipment.`,
+    });
+  }
+
+  // ASHRAE 62.1-2022 §5.9 humidity ratio cap (87 gr/lb at any altitude)
+  const indoorPsy = calculatePsychrometrics(sIndoorT, sIndoorRH, altitude);
+  const wInGr = indoorPsy.humidityRatio * 7000;
+  if (wInGr > 87) {
+    findings.push({
+      severity: 'critical',
+      scope: 'Project',
+      title: `Indoor humidity ratio ${wInGr.toFixed(0)} gr/lb exceeds ASHRAE 62.1-2022 §5.9 cap (87 gr/lb)`,
+      description: `Continuously maintaining indoor air at this humidity creates condensation and mould risk and is non-compliant with current IAQ standards.`,
+      recommendation: `Lower indoor RH target. At 75°F max RH ≈ 55%; at 78°F max RH ≈ 49%; at 70°F max RH ≈ 70%.`,
+    });
+  }
+
+  // Winter indoor target check (only if winter enabled)
+  if (winter) {
+    const wIndoorT  = asNum(project?.insideWinterTemp     ?? project?.winterIndoorTemp     ?? project?.data?.insideWinterTemp,     70);
+    const wIndoorRH = asNum(project?.insideWinterHumidity ?? project?.winterIndoorHumidity ?? project?.data?.insideWinterHumidity, 40);
+    if (wIndoorT > 74 || wIndoorRH > 45) {
+      findings.push({
+        severity: 'warning',
+        scope: 'Project',
+        title: `Winter indoor target ${wIndoorT}°F / ${wIndoorRH}% RH is above typical winter comfort`,
+        description: `Standard winter comfort design is 68-72°F / 30-40% RH. Higher targets dramatically increase humidifier energy in dry winter air.`,
+        recommendation: `Use 70°F / 35-40% RH for winter unless process needs justify the higher setpoint. For Indian climates, humidification is rarely needed.`,
+      });
+    }
+  }
+
+  // ── ROOM-LEVEL CHECKS ──────────────────────────────────────────────────
+  for (const entity of entities) {
+    for (const room of entity.rooms) {
+      const roomElements = envelopeElementsMap[room.id] || [];
+      const sumDc = resolveEntityDC(entity, summer, project);
+      const winDc = winter ? resolveEntityDC(entity, winter, project) : null;
+      const sm = computeDetailed(room, roomElements, sumDc, project);
+      const wm = winDc ? computeDetailed(room, roomElements, winDc, project) : null;
+      const roomLabel = `Room ${room.name || room.id || 'Unnamed'}`;
+
+      // Reheat as % of cooling
+      const reheatBTU = estimateReheatBTU(sm);
+      if (sm.grandTotal > 0 && reheatBTU > 0.5 * sm.grandTotal) {
+        findings.push({
+          severity: 'critical',
+          scope: roomLabel,
+          title: `Reheat (${n0(reheatBTU)} BTU/h) exceeds 50% of cooling load (${n0(sm.grandTotal)} BTU/h)`,
+          description: `Coil SHR ${sm.rshf.toFixed(2)} is well below 0.75 (typical comfort target). Air must be over-cooled to dehumidify, then reheated — wasting energy.`,
+          recommendation: `Verify fresh air rate (currently ${asNum(room.facph, 0)} ACH = ${n0(sm.faCfm)} CFM). If not driven by occupant IAQ, reduce facph. For very-low-SHR loads consider desiccant dehumidification instead of reheat.`,
+        });
+      }
+
+      // ADP unreachable
+      if (sm.adpUnreachable) {
+        findings.push({
+          severity: 'warning',
+          scope: roomLabel,
+          title: `Indicated ADP (${n1(sm.indicatedAdp)}°F) is unreachable on the saturation curve`,
+          description: `Coil GSHF ${sm.rshf.toFixed(2)} is below the minimum SHF a saturated cooling coil can produce in the search range. Reheat at the coil is mandatory.`,
+          recommendation: `Either accept the reheat penalty (already calculated above), use desiccant/chemical dehumidification, or correct the inputs causing the very low SHR (high ventilation, low internal sensible).`,
+        });
+      }
+
+      // Mixed wall U-values — likely partition modeling issue
+      const walls = roomElements.filter((e: any) => String(e.type || '').toLowerCase() === 'wall');
+      if (walls.length >= 2) {
+        const us = walls.map((w: any) => asNum(w.uValue, 0)).filter((u: number) => u > 0);
+        if (us.length >= 2) {
+          const maxU = Math.max(...us);
+          const minU = Math.min(...us);
+          if (maxU > 0.2 && minU < 0.05) {
+            findings.push({
+              severity: 'info',
+              scope: roomLabel,
+              title: `Mixed wall U-values (${minU.toFixed(3)} to ${maxU.toFixed(3)}) — verify partition modeling`,
+              description: `Some walls are heavily insulated (U≈0.03 typical of cold-storage panels) while others are exterior-grade (U≈0.35 typical of brick/uninsulated).`,
+              recommendation: `Walls bordering other conditioned rooms should be modeled as Partition elements with the actual ΔT to the neighbour (often 0-5°F), not as exterior walls receiving full outdoor ΔT and solar.`,
+            });
+          }
+        }
+      }
+
+      // Over-ventilation per person
+      const peopleCount = asNum(room.peopleCount, 0);
+      if (peopleCount > 0 && sm.faCfm > 0) {
+        const cfmPerPerson = sm.faCfm / peopleCount;
+        if (cfmPerPerson > 200) {
+          findings.push({
+            severity: 'warning',
+            scope: roomLabel,
+            title: `Fresh air ${n0(cfmPerPerson)} CFM/person — likely over-ventilated for occupant IAQ`,
+            description: `${n0(sm.faCfm)} CFM ÷ ${peopleCount} occupant(s). ASHRAE 62.1 minimum is 10-20 CFM/person for offices/factories.`,
+            recommendation: `If high ventilation is for process/exhaust make-up, that's fine — confirm the process basis. If for occupants only, reduce facph; every extra CFM adds significant summer/monsoon dehumidification cost.`,
+          });
+        }
+      }
+
+      // Winter humidifier dominance
+      if (wm && wm.hHumLoad > 0 && wm.designHeatingLoad > 0) {
+        const humPct = (wm.hHumLoad / wm.designHeatingLoad) * 100;
+        if (humPct > 40) {
+          findings.push({
+            severity: 'warning',
+            scope: roomLabel,
+            title: `Winter humidifier is ${humPct.toFixed(0)}% of total heating load`,
+            description: `${n0(wm.hHumLoad)} BTU/h humidifier vs ${n0(wm.designHeatingLoad)} BTU/h total winter heating. Humidification is dominating the winter design.`,
+            recommendation: `Lower indoor RH target in winter (e.g. 70°F / 40%). For most Indian climates with mild winters and naturally humid outdoor air, humidification is unnecessary.`,
+          });
+        }
+      }
+    }
+  }
+
+  // ── EQUIPMENT-LEVEL CHECKS ─────────────────────────────────────────────
+  for (const sys of effectiveEquipSystems) {
+    const workingTR = asNum(sys.workingCapacityTR ?? sys.totalCapacityTR ?? sys.capacityTR, 0);
+    const standbyTR = asNum(sys.standbyCapacityTR ?? sys.redundancyTR, 0);
+    if (workingTR > 0 && standbyTR > 0) {
+      const standbyPct = (standbyTR / workingTR) * 100;
+      if (standbyPct > 33) {
+        findings.push({
+          severity: 'info',
+          scope: `System ${sys.name || sys.id}`,
+          title: `Standby capacity ${standbyPct.toFixed(0)}% (${n0(standbyTR)} TR standby / ${n0(workingTR)} TR working) is above typical N+1 redundancy`,
+          description: `Standard N+1 redundancy gives 25-33% standby. Above that suggests N+N or oversized backup — higher capex and footprint than needed for typical reliability targets.`,
+          recommendation: `Confirm with client whether full backup is required, or use 25-33% N+1 design (e.g. 3 units at 33% capacity each, 1 standby).`,
+        });
+      }
+    }
+  }
+
+  return findings;
+};
+
+const renderEngineeringReview = (
+  doc: jsPDF,
+  findings: Finding[],
+  project: any,
+  C: Theme,
+  pageW: number,
+): void => {
+  if (findings.length === 0) return;
+
+  // Sort: critical → warning → info
+  const order: Record<FindingSeverity, number> = { critical: 0, warning: 1, info: 2 };
+  findings.sort((a, b) => order[a.severity] - order[b.severity]);
+
+  const colors: Record<FindingSeverity, { bg: [number,number,number]; border: [number,number,number]; ink: [number,number,number]; label: string }> = {
+    critical: { bg: [254, 226, 226], border: [220,  38,  38], ink: [127,  29,  29], label: 'CRITICAL' },
+    warning:  { bg: [254, 243, 199], border: [217, 119,   6], ink: [120,  53,  15], label: 'WARNING'  },
+    info:     { bg: [219, 234, 254], border: [ 37,  99, 235], ink: [ 30,  58, 138], label: 'NOTE'     },
+  };
+
+  let y = startBody(doc, project);
+  y = sectionBanner(doc, 'ENGINEERING REVIEW & RECOMMENDATIONS', y, C);
+  y += 4;
+
+  // Intro line
+  doc.setFont('helvetica', 'italic');
+  doc.setFontSize(7.5);
+  doc.setTextColor(...C.subInk);
+  const introLines = doc.splitTextToSize(
+    `Auto-detected design findings (${findings.length}) based on project inputs and computed loads. Items marked CRITICAL materially affect equipment sizing or compliance and should be resolved before issuing for procurement. WARNING items merit client confirmation. NOTE items are advisory.`,
+    pageW - PAGE.left - PAGE.right,
+  );
+  doc.text(introLines, PAGE.left, y);
+  y += (introLines.length * 3.5) + 4;
+
+  const usableW = pageW - PAGE.left - PAGE.right;
+  const innerW = usableW - 6;
+
+  for (const f of findings) {
+    const c = colors[f.severity];
+
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(8);
+    const titleLines = doc.splitTextToSize(f.title, innerW);
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(7);
+    const descLines = doc.splitTextToSize(f.description, innerW);
+    doc.setFont('helvetica', 'italic');
+    const recLines  = doc.splitTextToSize(`Recommendation: ${f.recommendation}`, innerW);
+
+    const blockH = 5 /*chip+gap*/ + (titleLines.length * 4) + 1.5 + (descLines.length * 3.4) + 1.5 + (recLines.length * 3.4) + 4;
+
+    y = ensureSpace(doc, y, blockH + 3, project);
+
+    doc.setFillColor(...c.bg);
+    doc.setDrawColor(...c.border);
+    doc.setLineWidth(0.3);
+    doc.rect(PAGE.left, y, usableW, blockH, 'FD');
+
+    // Severity chip + scope
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(6.5);
+    doc.setTextColor(...c.ink);
+    doc.text(`[${c.label}]  ${f.scope}`, PAGE.left + 3, y + 4);
+
+    // Title
+    doc.setFontSize(8);
+    doc.text(titleLines, PAGE.left + 3, y + 8.5);
+    let yCur = y + 8.5 + (titleLines.length * 4);
+
+    // Description
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(7);
+    doc.setTextColor(60, 60, 60);
+    doc.text(descLines, PAGE.left + 3, yCur + 1.5);
+    yCur += 1.5 + (descLines.length * 3.4);
+
+    // Recommendation
+    doc.setFont('helvetica', 'italic');
+    doc.setTextColor(...c.ink);
+    doc.text(recLines, PAGE.left + 3, yCur + 1.5);
+
+    y += blockH + 3;
+  }
 };
 
 // ─── MAIN EXPORT ─────────────────────────────────────────────────────────────
@@ -1418,7 +1702,10 @@ export const generatePDFReport = (
         // ── ADP / CFM / TR summary panel ──
         y = ensureSpace(doc, y, 20, project);
         const panelCols = [
-          ['Indicated ADP', `${n1(m.indicatedAdp)} °F`],
+          // When adpUnreachable, the indicated ADP value is just the closest match
+          // to actual GSHF — no real ADP intersection exists, so flag it so the
+          // engineer knows reheat (or chemical dehumidification) is required.
+          ['Indicated ADP', m.adpUnreachable ? `${n1(m.indicatedAdp)} °F (unreachable — reheat req.)` : `${n1(m.indicatedAdp)} °F`],
           ['Selected ADP',  `${n0(m.selectedAdp)} °F`],
           ['RSHF',          n2(m.rshf)],
           ['Design CFM',    `${n0(m.designCfm)} CFM`],
@@ -1800,6 +2087,9 @@ export const generatePDFReport = (
       const humRow: string[][] = wm.includeHumidifier && wm.humNeeded
         ? [['Humidifier Energy  (ṁ × h_fg)', `—`, `${n0(wm.hHumLoad)} BTU/h`]]
         : [];
+      const slabRow: string[][] = wm.hSlabRaw > 0
+        ? [['Slab-Edge Loss  (F × Perimeter × ΔT)',   `${n0(wm.hSlabRaw)}`,     `${n0(wm.hSlabSafe)}`]]
+        : [];
 
       autoTable(doc, {
         startY: y,
@@ -1807,6 +2097,7 @@ export const generatePDFReport = (
         body: [
           ['Transmission Loss  (U × A × ΔT)',         `${n0(wm.hTransRaw)}`,    `${n0(wm.hTransSafe)}`],
           ['Ventilation Heating  (1.08 × CFM × ΔT)',  `${n0(wm.hVentRaw)}`,     `${n0(wm.hVentSafe)}`],
+          ...slabRow,
           ...humRow,
           [`Subtotal  (safety ${wm.heatingSafetyPct.toFixed(0)}% applied)`,   '—', `${n0(wm.heatingSubtotal)}`],
           [`Pickup / Warm-up Allowance  (+${wm.heatingPickupPct.toFixed(0)}%)`, '—', `${n0(wm.designHeatingLoad - wm.heatingSubtotal)}`],
@@ -1894,7 +2185,13 @@ export const generatePDFReport = (
         },
         margin: { left: PAGE.left, right: PAGE.right },
       });
-      y = (doc as any).lastAutoTable.finalY + 8;
+      y = (doc as any).lastAutoTable.finalY + 4;
+
+      // Designer's Note (Indoor Target Review) was previously rendered here for
+      // warm/humid winter indoor targets, but it has been moved to the standalone
+      // "Engineering Review" PDF (internal QA only). The client load-calculation
+      // submission must not contain auto-generated designer commentary.
+      y += 4;
       } // end if (winter)
     }
   }
@@ -2398,5 +2695,107 @@ export const generateEquipmentSchedulePDF = (
   }
 
   const fileName = `${String(project?.name || 'Equipment').replace(/[^a-zA-Z0-9_]/g, '_')}_Equipment_Schedule.pdf`;
+  doc.save(fileName);
+};
+
+// ─── ENGINEERING REVIEW PDF (standalone — internal QA, not for client submission) ─
+
+export const generateEngineeringReviewPDF = (
+  project: any,
+  systems: any[],
+  zones: any[],
+  rooms: Record<string, any[]>,
+  envelopeElementsMap: Record<string, any[]>,
+  equipSystems: any[] = [],
+  hvacHierarchy?: HvacHierarchyData,
+  eco = false,
+) => {
+  const C = makeTheme(eco);
+  const effectiveSystems     = hvacHierarchy ? hvacHierarchy.systems : systems;
+  const effectiveZones       = hvacHierarchy ? Object.values(hvacHierarchy.zonesBySystem).flat() : zones;
+  const effectiveRooms       = hvacHierarchy ? hvacHierarchy.rooms : rooms;
+  const effectiveEquipSystems = hvacHierarchy && equipSystems.length === 0 ? hvacHierarchy.systems : equipSystems;
+
+  const seasons = getSeasonProfiles(project);
+  const summer  = seasons.find((s) => s.key === 'summer')!;
+  const winter  = seasons.find((s) => s.key === 'winter');
+  const entities = buildEntityRecords(project, effectiveSystems, effectiveZones, effectiveRooms, effectiveEquipSystems);
+
+  const findings = buildEngineeringReview(
+    project, entities, envelopeElementsMap, effectiveEquipSystems, summer, winter,
+  );
+
+  const doc = new jsPDF({ unit: 'mm', format: 'a4' });
+  const pageW = doc.internal.pageSize.getWidth();
+
+  // ── Cover strip ──────────────────────────────────────────────────────────
+  doc.setFillColor(...C.accent);
+  doc.rect(0, 0, pageW, 42, 'F');
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(20);
+  doc.setTextColor(...C.grandFg);
+  doc.text('ENGINEERING REVIEW', PAGE.left, 18);
+  doc.text('& RECOMMENDATIONS', PAGE.left, 30);
+  doc.setFont('helvetica', 'normal');
+  doc.setFontSize(9);
+  doc.setTextColor(...C.coverText);
+  doc.text(
+    `${String(project?.name || 'Project')}  ·  ${new Date().toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' })}`,
+    PAGE.left, 38,
+  );
+
+  // ── Project info table ───────────────────────────────────────────────────
+  let y = 52;
+  autoTable(doc, {
+    startY: y,
+    body: [
+      ['Project Name',  String(project?.name     || '—')],
+      ['Location',      String(project?.location || project?.place || '—')],
+      ['System Type',   String(project?.systemType || '—')],
+      ['Findings',      `${findings.length} item(s) detected`],
+    ],
+    theme: 'grid',
+    styles:       { fontSize: 8.5, cellPadding: 2.2, textColor: C.ink },
+    columnStyles: { 0: { fontStyle: 'bold', fillColor: C.panel, cellWidth: 48 } },
+    margin: { left: PAGE.left, right: PAGE.right },
+  });
+  y = (doc as any).lastAutoTable.finalY + 4;
+
+  // ── Internal-use disclaimer ──────────────────────────────────────────────
+  doc.setFillColor(255, 248, 220);
+  doc.setDrawColor(200, 150, 30);
+  doc.setLineWidth(0.25);
+  const discLines = doc.splitTextToSize(
+    'INTERNAL USE — design QA review. Not part of the client load-calculation submission. Use these findings to verify project inputs and resolve issues before issuing the official report for procurement.',
+    pageW - PAGE.left - PAGE.right - 6,
+  );
+  const discH = (discLines.length * 3.4) + 5;
+  doc.rect(PAGE.left, y, pageW - PAGE.left - PAGE.right, discH, 'FD');
+  doc.setFont('helvetica', 'italic');
+  doc.setFontSize(7.5);
+  doc.setTextColor(120, 80, 0);
+  doc.text(discLines, PAGE.left + 3, y + 3.5);
+  y += discH + 4;
+
+  // Empty-state message
+  if (findings.length === 0) {
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(10);
+    doc.setTextColor(...C.ink);
+    doc.text('No design findings detected — all checks passed.', PAGE.left, y + 8);
+  } else {
+    // Render findings on a fresh body page so the cover stays clean.
+    renderEngineeringReview(doc, findings, project, C, pageW);
+  }
+
+  // ── Headers / footers ────────────────────────────────────────────────────
+  const totalPages = doc.getNumberOfPages();
+  for (let p = 1; p <= totalPages; p++) {
+    doc.setPage(p);
+    if (p > 1) drawHeader(doc, project, p - 1, totalPages - 1, C);
+    drawFooter(doc, C);
+  }
+
+  const fileName = `${String(project?.name || 'Project').replace(/[^a-zA-Z0-9_]/g, '_')}_Engineering_Review.pdf`;
   doc.save(fileName);
 };

@@ -85,8 +85,13 @@ export const calculateCoilParameters = (
   maxAdpF: number = 65,
   selectedAdpMinF: number = 54
 ): CoilParameters => {
-  // Room Sensible Heat Factor (RSHF) = Sensible Load / Total Load
-  const rshf = roomSensible / (roomSensible + roomLatent);
+  // Sensible Heat Factor for the load passed in. Note: callers typically pass
+  // COIL-level sensible/latent (room load + OA + parasitic), so this is GSHF
+  // not RSHF. The variable is named `rshf` for backward compatibility with
+  // existing callers, but mathematically it's the GSHF used to find ADP.
+  const totalLoad = roomSensible + roomLatent;
+  // Guard divide-by-zero — if no load, return neutral all-sensible result.
+  const rshf = totalLoad > 0 ? roomSensible / totalLoad : 1;
 
   // Find Indicated ADP by solving for coil surface temperature
   let indicatedADP = 50; // Default fallback
@@ -159,6 +164,14 @@ export const calculateCoilParameters = (
     ASHRAE_CONSTANTS.SENSIBLE_COOLING_CONSTANT * minAdpDeltaT * contactFactor
   );
 
+  // ADP unreachable when actual GSHF lies below the minimum SHF achievable on
+  // the saturation curve in the search range. Threshold of 0.02 absorbs grid
+  // resolution noise while still flagging genuinely off-curve cases (e.g. a
+  // cold-storage room with GSHF=0.37 vs achievable minimum ~0.53). When true,
+  // the indicated ADP is just the closest match — not a real intersection —
+  // and reheat or chemical dehumidification is required at the coil level.
+  const adpUnreachable = totalLoad > 0 && minDiff > 0.02;
+
   return {
     rshf,
     indicatedADP,
@@ -167,5 +180,6 @@ export const calculateCoilParameters = (
     minAdpSensibleCFM,
     dehumidifiedCFM,
     bypassFactor,
+    adpUnreachable,
   };
 };

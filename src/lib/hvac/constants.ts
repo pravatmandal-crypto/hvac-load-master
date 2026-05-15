@@ -18,6 +18,10 @@ export interface DesignConditions {
   designMonth?: number;
   designHour?: number;
   dailyRange?: number; // °F outdoor daily temperature range (for CLTD correction)
+  // Winter infiltration ACH (uncontrolled leakage). Used only for heating —
+  // distinct from facph (designed fresh-air ACH) which oversizes heating.
+  // Typical values: 0.3 (tight), 0.5 (moderate), 1.0 (loose).
+  winterInfiltrationACH?: number;
 }
 
 export interface WallType {
@@ -128,6 +132,11 @@ export interface RoomDetails {
   lightsWattsPerSqft: number;
   equipmentKW: number;
   othersKW: number;
+  // Ground-floor slab edge heat loss (ASHRAE Ch.18 F-factor method).
+  // Only used for winter heating; cooling ignores slab gain.
+  isGroundFloor?: boolean;
+  slabPerimeter?: number; // ft — exposed slab edge perimeter (typically wall length on grade)
+  slabFFactor?: number;   // Btu/(h·ft·°F) — 0.73 uninsulated, 0.55 R-5 edge, 0.48 R-10 edge
 }
 
 export type WallColor = 'Dark' | 'Medium' | 'Light';
@@ -173,6 +182,21 @@ export interface CoilParameters {
   minAdpSensibleCFM: number;
   dehumidifiedCFM: number;
   bypassFactor: number;
+  // True when actual GSHF lies below the minimum SHF achievable on the saturation
+  // curve in the search range — meaning no real ADP intersection exists and
+  // reheat (or chemical dehumidification) is required at the coil level.
+  adpUnreachable: boolean;
+}
+
+// Minimum apparatus dew point (selected ADP floor) by system type.
+// Single source of truth — was previously duplicated across 6 files with
+// inconsistent values (42/44/50 for chiller, 38/42/54 for VRF). Canonical
+// values match standard practice: 44°F chilled-water coils, 42°F DX/VRF.
+export function getMinAdp(systemType?: string): number {
+  const st = String(systemType || '').toLowerCase();
+  if (st === 'chiller' || st === 'hydronic') return 44;
+  if (st === 'vrf' || st === 'hybrid') return 42;
+  return 44; // CAC, VAV, Package, Split, AHU, unknown — standard DX floor
 }
 
 export interface VentilationLoadResult {
@@ -188,8 +212,10 @@ export interface VentilationLoadResult {
 export interface HeatingLoadResult {
   transmissionLoss: number;
   ventilationHeating: number;
-  totalHeatingLoad: number;
+  slabLoss: number;
+  totalHeatingLoad: number; // raw, pre-safety-factor
   cfm: number;
+  warning?: string; // populated when winter inputs are missing/invalid
 }
 
 export interface DuctSizingResult {

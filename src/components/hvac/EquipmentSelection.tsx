@@ -24,7 +24,7 @@ import type { EquipmentModel } from '../../constants/equipment-catalog';
 import GlobalEquipmentLibrary from './GlobalEquipmentLibrary';
 import { getLibraryItemsByType, GLOBAL_LIB_COLLECTION } from '../../services/equipmentLibraryService';
 import { ComboboxInput } from '../ui/combobox-input';
-import { calculateCoilParameters, calculatePsychrometrics, EZ_OPTIONS, calcZoneVentilation, calcSystemVentilation62, calculateEnvelopeGain, calculateInternalGains, calculateVentilationLoad, calculateParasiticGains, getRecommendedAch } from '../../lib/hvac';
+import { calculateCoilParameters, calculatePsychrometrics, EZ_OPTIONS, calcZoneVentilation, calcSystemVentilation62, calculateEnvelopeGain, calculateInternalGains, calculateVentilationLoad, calculateParasiticGains, getRecommendedAch, getMinAdp } from '../../lib/hvac';
 import { calculateRoomVolume } from '../../lib/hvac/geometry';
 import SpecSheet from './SpecSheet';
 import type {
@@ -1433,13 +1433,6 @@ const CATEGORY_CONFIG: Record<string, {
   'Chiller+FCU':  { type: 'Chiller', condenserType: 'water-cooled', autoName: 'Chiller Plant' },
 };
 
-// Minimum ADP temperature by system type (mirrors LoadCalculator)
-function getMinAdp(systemType?: string): number {
-  const t = String(systemType || '').toLowerCase();
-  if (t === 'vrf') return 38;
-  if (t === 'chiller' || t === 'hydronic') return 42;
-  return 40;
-}
 
 // Derive hvacSystemCategory from legacy project.systemType when no explicit category is set
 function deriveCategory(projectSystemType?: string): string {

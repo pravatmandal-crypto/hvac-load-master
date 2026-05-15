@@ -54,30 +54,53 @@ export const calculateHeatingLoad = (
   elements: EnvelopeElement[],
   design: DesignConditions
 ): HeatingLoadResult => {
-  // Use winter design conditions (fallback if not specified)
-  const heatingOutdoorTemp = design.winterOutdoorTemp ?? (design.outdoorTemp - 50);
-  const heatingIndoorTemp = design.winterIndoorTemp ?? design.indoorTemp;
+  // Winter temps MUST be explicitly set — no engineering-bogus fallback from summer.
+  const hasWinterOutdoor = typeof design.winterOutdoorTemp === 'number';
+  const hasWinterIndoor = typeof design.winterIndoorTemp === 'number';
+
+  if (!hasWinterOutdoor || !hasWinterIndoor) {
+    return {
+      transmissionLoss: 0,
+      ventilationHeating: 0,
+      slabLoss: 0,
+      totalHeatingLoad: 0,
+      cfm: 0,
+      warning:
+        'Winter design temperatures missing. Set winter outdoor and indoor temps in project design conditions to compute heating load.',
+    };
+  }
+
+  const heatingOutdoorTemp = design.winterOutdoorTemp!;
+  const heatingIndoorTemp = design.winterIndoorTemp!;
   const deltaT = Math.max(0, heatingIndoorTemp - heatingOutdoorTemp);
 
-  // 1. Transmission Losses through envelope
+  // 1. Transmission Losses through envelope (simple steady-state U × A × ΔT — no CLTD for heating)
   let transmissionLoss = 0;
   elements.forEach((el) => {
-    // For heating, use simple U × A × ΔT (no CLTD corrections)
     transmissionLoss += el.uValue * el.area * deltaT;
   });
 
-  // 2. Infiltration/Ventilation Heating Load
+  // 2. Infiltration Heating Load — use winter infiltration ACH, NOT facph (designed fresh air).
+  //    facph is sized for ventilation/IAQ (5-10 ACH for offices) and grossly oversizes heating.
+  //    Real building infiltration is typically 0.3-1.0 ACH. Default 0.5 (moderate construction).
+  const infiltrationACH = design.winterInfiltrationACH ?? 0.5;
   const volume = calculateRoomVolume(room);
-  const cfm = (volume * room.facph) / ASHRAE_CONSTANTS.CFM_TO_VOLUME_CORRECTION;
-
-  // Q_heating = 1.08 × CFM × ΔT
+  const cfm = (volume * infiltrationACH) / ASHRAE_CONSTANTS.CFM_TO_VOLUME_CORRECTION;
   const ventilationHeating = ASHRAE_CONSTANTS.SENSIBLE_COOLING_CONSTANT * cfm * deltaT;
 
-  const totalHeatingLoad = transmissionLoss + ventilationHeating;
+  // 3. Slab-edge perimeter loss (ASHRAE Ch.18 F-factor method) — only if room is on grade.
+  let slabLoss = 0;
+  if (room.isGroundFloor && room.slabPerimeter && room.slabPerimeter > 0) {
+    const fFactor = room.slabFFactor ?? 0.73; // uninsulated slab default
+    slabLoss = fFactor * room.slabPerimeter * deltaT;
+  }
+
+  const totalHeatingLoad = transmissionLoss + ventilationHeating + slabLoss;
 
   return {
     transmissionLoss,
     ventilationHeating,
+    slabLoss,
     totalHeatingLoad,
     cfm,
   };

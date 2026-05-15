@@ -12,6 +12,9 @@ import { db, auth, handleFirestoreError, OperationType } from '../../lib/firebas
 import { collection, addDoc, query, where, onSnapshot, serverTimestamp, deleteDoc, doc, updateDoc } from 'firebase/firestore';
 import { toast } from 'sonner';
 import { calculatePsychrometrics } from '../../lib/hvac-logic';
+import { RegionSelector } from '../RegionSelector';
+import { ISCodeAdapter } from '../../lib/is-code-adapter';
+import { AutoConfiguredDesignCondition } from '../../lib/regional-design-conditions';
 
 interface Project {
   id: string;
@@ -45,6 +48,10 @@ interface Project {
   designHour?: number;
   createdAt: any;
   userId: string;
+  // IS Code fields
+  isCodeCity?: string;
+  isCodeStandard?: 'IS_CODE' | 'ASHRAE';
+  isCodeLocked?: boolean;
 }
 
 export default function ProjectManager({ onSelectProject, userProfile }: { onSelectProject: (project: Project) => void, userProfile: any }) {
@@ -53,6 +60,8 @@ export default function ProjectManager({ onSelectProject, userProfile }: { onSel
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [editingProject, setEditingProject] = useState<Project | null>(null);
   const [isFetching, setIsFetching] = useState(false);
+  const [selectedISCodeRegion, setSelectedISCodeRegion] = useState<AutoConfiguredDesignCondition | null>(null);
+  const [selectedISCodeStandard, setSelectedISCodeStandard] = useState<'IS_CODE' | 'ASHRAE'>('ASHRAE');
   const [newProject, setNewProject] = useState({
     name: '',
     place: '',
@@ -215,6 +224,10 @@ export default function ProjectManager({ onSelectProject, userProfile }: { onSel
         summerIndoorHumidity: newProject.insideSummerHumidity,
         winterIndoorTemp: newProject.insideWinterTemp,
         winterIndoorHumidity: newProject.insideWinterHumidity,
+        // IS Code fields
+        isCodeCity: newProject.isCodeCity,
+        isCodeStandard: newProject.isCodeStandard,
+        isCodeLocked: newProject.isCodeLocked,
       };
 
       if (editingProject) {
@@ -278,6 +291,33 @@ export default function ProjectManager({ onSelectProject, userProfile }: { onSel
     }
   };
 
+  const handleISCodeRegionSelect = (config: AutoConfiguredDesignCondition, standard: 'IS_CODE' | 'ASHRAE') => {
+    setSelectedISCodeRegion(config);
+    setSelectedISCodeStandard(standard);
+    
+    // Auto-fill design conditions from IS Code
+    setNewProject(prev => ({
+      ...prev,
+      // Summary: India selected → auto-fill IS Code design conditions
+      latitude: config.summer.db, // Will be overridden if user fetches location
+      place: config.city,
+      summerDesignTemp: config.summer.db_f,
+      summerDesignHumidity: config.summer.rh,
+      monsoonDesignTemp: config.monsoon ? Math.round(config.monsoon.db * 9/5 + 32) : prev.monsoonDesignTemp,
+      monsoonDesignHumidity: config.monsoon?.rh ?? prev.monsoonDesignHumidity,
+      winterDesignTemp: config.winter ? config.winter.db : prev.winterDesignTemp,
+      winterDesignHumidity: config.winter?.rh ?? prev.winterDesignHumidity,
+      includeMonsoon: true,
+      includeWinter: true,
+      // IS Code fields
+      isCodeCity: config.city,
+      isCodeStandard: standard,
+      isCodeLocked: true,
+    }));
+    
+    toast.success(`✓ ${config.city} (IS Code) auto-configured`);
+  };
+
   const handleDeleteProject = async (e: React.MouseEvent, id: string) => {
     e.stopPropagation();
     
@@ -318,9 +358,13 @@ export default function ProjectManager({ onSelectProject, userProfile }: { onSel
       {canCreate && (
         <Dialog open={isModalOpen} onOpenChange={(open) => {
           setIsModalOpen(open);
-          if (!open) setEditingProject(null);
+          if (!open) {
+            setEditingProject(null);
+            setSelectedISCodeRegion(null);
+            setSelectedISCodeStandard('ASHRAE');
+          }
         }}>
-          <DialogContent className="sm:max-w-[425px]">
+          <DialogContent className="sm:max-w-[425px] max-h-[90vh] overflow-y-auto">
             <DialogHeader>
               <DialogTitle>{editingProject ? 'Edit Project' : 'Create New Project'}</DialogTitle>
               <DialogDescription>
@@ -359,6 +403,16 @@ export default function ProjectManager({ onSelectProject, userProfile }: { onSel
                   </Button>
                 </div>
               </div>
+              
+              {/* IS Code Region Selector - for India projects */}
+              <div className="border-t pt-4 bg-yellow-100 p-4 border-2 border-yellow-500">
+                <p className="text-sm font-bold text-yellow-900 mb-2">DEBUG: RegionSelector component test</p>
+                <RegionSelector 
+                  onRegionSelect={handleISCodeRegionSelect}
+                  defaultRegion="delhi"
+                />
+              </div>
+
               <div className="grid gap-2">
                 <Label htmlFor="owner">Owner / Client</Label>
                 <Input 
@@ -616,6 +670,8 @@ export default function ProjectManager({ onSelectProject, userProfile }: { onSel
               <Button variant="outline" onClick={() => {
                 setIsModalOpen(false);
                 setEditingProject(null);
+                setSelectedISCodeRegion(null);
+                setSelectedISCodeStandard('ASHRAE');
               }}>Cancel</Button>
               <Button onClick={handleCreateProject} className="bg-orange-600 hover:bg-orange-700">
                 {editingProject ? 'Update Project' : 'Create Project'}
