@@ -1537,7 +1537,7 @@ export default function EquipmentSelection({
   // Active tab — controlled so Summary tab can jump back to System Design
   const [activeTab, setActiveTab] = useState('systems');
 
-  const [drawings, setDrawings] = useState<{ id: string; name: string; type: string; format: string; version: string; downloadURL: string; uploadedAt?: any }[]>([]);
+  const [drawings, setDrawings] = useState<{ id: string; name: string; type: string; format: string; version: string; downloadURL: string; uploadedAt?: any; sizeBytes?: number }[]>([]);
   const [uploadingDrawing, setUploadingDrawing] = useState(false);
   const drawingFileRef = useRef<HTMLInputElement>(null);
 
@@ -1768,6 +1768,7 @@ export default function EquipmentSelection({
         downloadURL,
         storagePath: path,
         uploadedAt: serverTimestamp(),
+        sizeBytes: file.size,
       });
       toast.success(`"${file.name}" uploaded`);
     } catch (err) {
@@ -6265,31 +6266,44 @@ export default function EquipmentSelection({
                       <TableHead>Type</TableHead>
                       <TableHead>Format</TableHead>
                       <TableHead>Version</TableHead>
+                      <TableHead>Date</TableHead>
+                      <TableHead className="text-right">Size (MB)</TableHead>
                       <TableHead className="text-right">Action</TableHead>
                     </TableRow>
                   </TableHeader>
                   <TableBody>
-                    {drawings.map(d => (
-                      <TableRow key={d.id}>
-                        <TableCell className="font-medium dark:text-slate-200">{d.name}</TableCell>
-                        <TableCell><Badge variant="outline" className="text-xs">{d.type}</Badge></TableCell>
-                        <TableCell className="text-sm text-slate-500 dark:text-slate-400">{d.format}</TableCell>
-                        <TableCell className="text-sm text-slate-500 dark:text-slate-400">{d.version}</TableCell>
-                        <TableCell className="text-right">
-                          <div className="flex items-center justify-end gap-1">
-                            <a href={d.downloadURL} target="_blank" rel="noopener noreferrer"
-                              className="inline-flex items-center gap-1.5 h-8 px-3 text-sm text-blue-600 dark:text-blue-400 hover:text-blue-800 dark:hover:text-blue-300">
-                              <ExternalLink className="w-3.5 h-3.5" /> View
-                            </a>
-                            <Button size="sm" variant="ghost"
-                              className="h-8 w-8 p-0 text-slate-400 hover:text-red-600 dark:hover:text-red-400"
-                              onClick={() => handleDrawingDelete(d)}>
-                              <Trash2 className="w-3.5 h-3.5" />
-                            </Button>
-                          </div>
-                        </TableCell>
-                      </TableRow>
-                    ))}
+                    {drawings.map(d => {
+                      const dateMs = d.uploadedAt?.toMillis?.() ?? null;
+                      const dateStr = dateMs
+                        ? new Date(dateMs).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' })
+                        : '—';
+                      const sizeStr = typeof d.sizeBytes === 'number'
+                        ? (d.sizeBytes / (1024 * 1024)).toFixed(2)
+                        : '—';
+                      return (
+                        <TableRow key={d.id}>
+                          <TableCell className="font-medium dark:text-slate-200">{d.name}</TableCell>
+                          <TableCell><Badge variant="outline" className="text-xs">{d.type}</Badge></TableCell>
+                          <TableCell className="text-sm text-slate-500 dark:text-slate-400">{d.format}</TableCell>
+                          <TableCell className="text-sm text-slate-500 dark:text-slate-400">{d.version}</TableCell>
+                          <TableCell className="text-sm text-slate-500 dark:text-slate-400 whitespace-nowrap">{dateStr}</TableCell>
+                          <TableCell className="text-sm text-slate-500 dark:text-slate-400 text-right tabular-nums">{sizeStr}</TableCell>
+                          <TableCell className="text-right">
+                            <div className="flex items-center justify-end gap-1">
+                              <a href={d.downloadURL} target="_blank" rel="noopener noreferrer"
+                                className="inline-flex items-center gap-1.5 h-8 px-3 text-sm text-blue-600 dark:text-blue-400 hover:text-blue-800 dark:hover:text-blue-300">
+                                <ExternalLink className="w-3.5 h-3.5" /> View
+                              </a>
+                              <Button size="sm" variant="ghost"
+                                className="h-8 w-8 p-0 text-slate-400 hover:text-red-600 dark:hover:text-red-400"
+                                onClick={() => handleDrawingDelete(d)}>
+                                <Trash2 className="w-3.5 h-3.5" />
+                              </Button>
+                            </div>
+                          </TableCell>
+                        </TableRow>
+                      );
+                    })}
                   </TableBody>
                 </Table>
               )}
