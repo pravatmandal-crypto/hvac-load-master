@@ -91,6 +91,11 @@ export default function ProjectManager({ onSelectProject, userProfile }: { onSel
     insideWinterHumidity: 40,
     designMonth: 7,
     designHour: 15,
+    // IS Code regional locking — populated by handleRegionSelect when a city
+    // (e.g. Delhi, Mumbai) is chosen via RegionSelector. Defaults to ASHRAE/unlocked.
+    isCodeCity: '' as string,
+    isCodeStandard: 'ASHRAE' as 'IS_CODE' | 'ASHRAE',
+    isCodeLocked: false as boolean,
   });
 
   useEffect(() => {
@@ -124,6 +129,9 @@ export default function ProjectManager({ onSelectProject, userProfile }: { onSel
         insideWinterHumidity: editingProject.insideWinterHumidity || editingProject.winterIndoorHumidity || 40,
         designMonth: editingProject.designMonth || 7,
         designHour: editingProject.designHour || 15,
+        isCodeCity: editingProject.isCodeCity ?? '',
+        isCodeStandard: editingProject.isCodeStandard ?? 'ASHRAE',
+        isCodeLocked: editingProject.isCodeLocked ?? false,
       });
     } else {
       setNewProject({
@@ -155,6 +163,9 @@ export default function ProjectManager({ onSelectProject, userProfile }: { onSel
         insideWinterHumidity: 40,
         designMonth: 7,
         designHour: 15,
+        isCodeCity: '',
+        isCodeStandard: 'ASHRAE',
+        isCodeLocked: false,
       });
     }
   }, [editingProject]);
