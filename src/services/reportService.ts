@@ -718,12 +718,16 @@ type Finding = {
   recommendation: string; // what to change / verify
 };
 
-// Reheat estimate matching the per-room calc at line ~1486 (target SHR 0.75).
+// Reheat estimate matching the per-room PDF calc — sizes against ROOM SHF
+// (effective room sensible / latent with safety factors), not coil/grand SHF.
+// See the inline calc in renderRoomBody for the full rationale.
 const estimateReheatBTU = (m: DetailedMetrics): number => {
   const tSHR = 0.75;
-  const cSHR = m.coilSensible / Math.max(1, m.coilSensible + m.coilLatent);
-  if (cSHR >= tSHR) return 0;
-  return Math.max(0, (m.coilLatent * tSHR) / (1 - tSHR) - m.coilSensible);
+  const roomTot = m.ersh + m.erlh;
+  if (roomTot <= 0) return 0;
+  const rSHR = m.ersh / roomTot;
+  if (rSHR >= tSHR) return 0;
+  return Math.max(0, (m.erlh * tSHR) / (1 - tSHR) - m.ersh);
 };
 
 const buildEngineeringReview = (
@@ -797,15 +801,18 @@ const buildEngineeringReview = (
       const wm = winDc ? computeDetailed(room, roomElements, winDc, project) : null;
       const roomLabel = `Room ${room.name || room.id || 'Unnamed'}`;
 
-      // Reheat as % of cooling
+      // Reheat as % of cooling — sized against ROOM SHF, so threshold is
+      // "reheat is large vs cooling load" (>30% is genuinely a problem).
       const reheatBTU = estimateReheatBTU(sm);
-      if (sm.grandTotal > 0 && reheatBTU > 0.5 * sm.grandTotal) {
+      const roomTot = sm.ersh + sm.erlh;
+      const rSHR = roomTot > 0 ? sm.ersh / roomTot : 1;
+      if (sm.grandTotal > 0 && reheatBTU > 0.3 * sm.grandTotal) {
         findings.push({
           severity: 'critical',
           scope: roomLabel,
-          title: `Reheat (${n0(reheatBTU)} BTU/h) exceeds 50% of cooling load (${n0(sm.grandTotal)} BTU/h)`,
-          description: `Coil SHR ${sm.rshf.toFixed(2)} is well below 0.75 (typical comfort target). Air must be over-cooled to dehumidify, then reheated — wasting energy.`,
-          recommendation: `Verify fresh air rate (currently ${asNum(room.facph, 0)} ACH = ${n0(sm.faCfm)} CFM). If not driven by occupant IAQ, reduce facph. For very-low-SHR loads consider desiccant dehumidification instead of reheat.`,
+          title: `Reheat (${n0(reheatBTU)} BTU/h) is ${((reheatBTU / sm.grandTotal) * 100).toFixed(0)}% of cooling load (${n0(sm.grandTotal)} BTU/h)`,
+          description: `Room SHR ${rSHR.toFixed(2)} is below 0.75 (typical comfort target). Supply air would over-cool the room while dehumidifying — reheat is needed to prevent this.`,
+          recommendation: `Verify fresh air rate (currently ${asNum(room.facph, 0)} ACH = ${n0(sm.faCfm)} CFM). If not driven by occupant IAQ, reduce facph. For persistently low Room SHR, consider desiccant dehumidification or raising indoor RH target.`,
         });
       }
 
@@ -1705,13 +1712,20 @@ export const generatePDFReport = (
 
         // ── ADP / CFM / TR summary panel ──
         y = ensureSpace(doc, y, 20, project);
+        // RSHF here is the true Room Sensible Heat Factor (room sensible / room
+        // total, with safety factors applied) — what engineers expect when they
+        // see "RSHF". The m.rshf field actually stores GSHF (coil-level), kept
+        // unrenamed for backward compatibility but not used in display.
+        const panelRoomTot = m.ersh + m.erlh;
+        const panelRSHF = panelRoomTot > 0 ? m.ersh / panelRoomTot : 1;
+
         const panelCols = [
           // When adpUnreachable, the indicated ADP value is just the closest match
           // to actual GSHF — no real ADP intersection exists, so flag it so the
           // engineer knows reheat (or chemical dehumidification) is required.
           ['Indicated ADP', m.adpUnreachable ? `${n1(m.indicatedAdp)} °F (unreachable — reheat req.)` : `${n1(m.indicatedAdp)} °F`],
           ['Selected ADP',  `${n0(m.selectedAdp)} °F`],
-          ['RSHF',          n2(m.rshf)],
+          ['RSHF',          n2(panelRSHF)],
           ['Design CFM',    `${n0(m.designCfm)} CFM`],
           ['Governing TR',  `${n2(m.governingTr)} TR`],
           ...(includeWinter ? [['Winter Load', `${n0(m.designHeatingLoad)} BTU/h`]] : []),
@@ -1754,11 +1768,18 @@ export const generatePDFReport = (
         const dwCoil   = Math.max(0, (indoorPsycho.humidityRatio - wSup) * 7000);
         const moisRate = Math.max(0, m.coilLatent / LHV_PDF);
         const moisAct  = m.coilLatent > 50 ? 'Dehumidify' : m.coilLatent < -50 ? 'Humidify' : 'Balanced';
-        const coilTot  = m.coilSensible + m.coilLatent;
-        const cSHR     = coilTot > 0 ? m.coilSensible / coilTot : 1;
+        // Reheat sizing — based on ROOM SHF (RSHF), not coil/grand SHF (GSHF).
+        // Reheat exists to prevent room overcooling, so what matters is whether
+        // the room's own sensible:total ratio drops below the comfort threshold
+        // (typically 0.75). Using GSHF inflates reheat by including OA + parasitic
+        // sensible+latent in the ratio, which would size reheat against the coil's
+        // discharge condition rather than the room load — yielding unrealistically
+        // large numbers (e.g. ~900k BTU/h for an over-ventilated low-RSHF room).
+        const roomTot  = m.ersh + m.erlh;
+        const cSHR     = roomTot > 0 ? m.ersh / roomTot : 1;
         const tSHR     = 0.75;
         const needRH   = !isWinter && cSHR < tSHR;
-        const rhBTU    = needRH ? Math.max(0, (m.coilLatent * tSHR) / (1 - tSHR) - m.coilSensible) : 0;
+        const rhBTU    = needRH ? Math.max(0, (m.erlh * tSHR) / (1 - tSHR) - m.ersh) : 0;
 
         autoTable(doc, {
           startY: y,
@@ -1770,10 +1791,12 @@ export const generatePDFReport = (
           ] : [
             ['Dry Bulb Temp (°F)',       n1(dc.outdoorTemp),                      n1(dc.indoorTemp),                      n1(tSup),           `ADP ${n0(m.selectedAdp)} °F  (Ind. ${n1(m.indicatedAdp)} °F)`],
             ['Humidity Ratio (gr/lb)',   n1(outdoorPsycho.humidityRatio * 7000), n1(indoorPsycho.humidityRatio * 7000), n1(wSup * 7000),    `ΔW coil = ${n1(dwCoil)} gr/lb`],
-            ['Enthalpy h (BTU/lb)',      n2(outdoorPsycho.enthalpy),             n2(indoorPsycho.enthalpy),              n2(hSup),           `RSHF = ${n2(m.rshf)}`],
+            // RSHF (room) drives reheat sizing; GSHF (coil incl. OA + parasitic)
+            // drives ADP. Show both since they answer different questions.
+            ['Enthalpy h (BTU/lb)',      n2(outdoorPsycho.enthalpy),             n2(indoorPsycho.enthalpy),              n2(hSup),           `RSHF = ${n2(cSHR)}  ·  GSHF = ${n2(m.rshf)}`],
             ['Moisture Action',          moisAct,                                 '—',                                    '—',                `Rate = ${moisRate.toFixed(2)} lbs/hr`],
             ['Coil Latent (BTU/h)',      '—',                                     '—',                                    '—',                n0(m.coilLatent)],
-            [needRH ? 'Reheat  ★ REQD' : 'Reheat', needRH ? `SHR ${n2(cSHR)} < ${tSHR}` : `SHR = ${n2(cSHR)}`, '—', '—', needRH ? `${n0(rhBTU)} BTU/h required` : 'Not required'],
+            [needRH ? 'Reheat  ★ REQD' : 'Reheat', needRH ? `Room SHR ${n2(cSHR)} < ${tSHR}` : `Room SHR = ${n2(cSHR)}`, '—', '—', needRH ? `${n0(rhBTU)} BTU/h required` : 'Not required'],
           ],
           theme: 'grid',
           styles:     { fontSize: 7.5, cellPadding: 1.6, textColor: C.ink },
