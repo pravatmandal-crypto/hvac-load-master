@@ -10,7 +10,8 @@ import {
   closestCorners,
 } from '@dnd-kit/core';
 import { sortableKeyboardCoordinates } from '@dnd-kit/sortable';
-import { Plus, Download, Building, BookOpen, Pencil, Loader2 } from 'lucide-react';
+import { Plus, Download, Building, BookOpen, Pencil, Loader2, BarChart3 } from 'lucide-react';
+import { MetDataImporterDialog } from './MetDataImporterDialog';
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogFooter } from '../ui/dialog';
 import { Input } from '../ui/input';
 import { Label } from '../ui/label';
@@ -18,7 +19,7 @@ import { Button } from '../ui/button';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../ui/select';
 import { Separator } from '../ui/separator';
 import { db } from '../../lib/firebase';
-import { collection, addDoc, getDocs, onSnapshot, doc, deleteDoc, updateDoc, setDoc, deleteField } from 'firebase/firestore';
+import { collection, addDoc, getDocs, onSnapshot, doc, deleteDoc, updateDoc, setDoc, deleteField, writeBatch, serverTimestamp } from 'firebase/firestore';
 import { toast } from 'sonner';
 import {
   getCLTD,
@@ -114,6 +115,12 @@ function mergeZones(fsZones: Zone[], roomZones: Zone[]): Zone[] {
   return merged;
 }
 
+// Native-input className matching the shadcn/base-ui Input style.
+// Used in the Edit Project dialog because the base-ui FieldControl wrapper had
+// a bug where typing did not flush state to the displayed value for non-first
+// inputs (e.g. on a cloned project, only Project Name was editable).
+const EDIT_INPUT_CLS = "h-8 w-full min-w-0 rounded-lg border border-input bg-transparent px-2.5 py-1 text-base transition-colors outline-none placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 disabled:pointer-events-none disabled:cursor-not-allowed disabled:bg-input/50 disabled:opacity-50 md:text-sm dark:bg-input/30";
+
 const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProfile: any; onNavigate?: (id: string) => void; onUnsavedChangesChange?: (has: boolean) => void; reloadKey?: number }>(
   function LoadCalculator({ project, userProfile, onNavigate, onUnsavedChangesChange, reloadKey }, ref) {
   const analysisBackfillDoneRef = useRef<Set<string>>(new Set());
@@ -122,6 +129,10 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
   const backfillRunningRef = useRef(false);
   const migrationRunningRef = useRef(false);
   const hasAutoExpandedZoneRef = useRef(false);
+  // Declared up here (instead of next to the migration useEffect) so the room-listener
+  // useEffect can clear them on project switch.
+  const zoneRenameMigrationDoneRef = useRef<Set<string>>(new Set());
+  const zoneRenameMigrationRunningRef = useRef(false);
   const legacyDefaultOaFacph = Number(project?.legacyDefaultOaFacph ?? project?.data?.legacyDefaultOaFacph ?? 1.5);
 
   const normalizeRoom = (r: any): Room => {
@@ -179,6 +190,8 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
   
   // Edit Project Data state
   const [editModalOpen, setEditModalOpen] = useState(false);
+  // Met Data Importer modal — opened from inside the Edit dialog
+  const [metDataDialogOpen, setMetDataDialogOpen] = useState(false);
   const [editData, setEditData] = useState({
     name: '',
     location: '',
@@ -544,12 +557,22 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
 
     const outdoorPsych = calculatePsychrometrics(dc.outdoorTemp, dc.outdoorHumidity, dc.altitude || 0);
     const indoorPsych = calculatePsychrometrics(dc.indoorTemp, dc.indoorHumidity, dc.altitude || 0);
-    const totalMoistureLbsHr = Math.abs(coilLatent / 1050);
+    // Moisture analysis — pick the governing season (monsoon usually wets the coil
+    // harder than summer in Indian climates). Keep per-season breakdown so the
+    // PDF / room table can show both rates.
+    const summerMoistureLbsHr  = Math.abs(coilLatent) / 1050;
+    const monsoonMoistureLbsHr = includeMonsoon ? Math.abs(monsoonCoilLat) / 1050 : 0;
+    const monsoonMoistGoverns  = includeMonsoon && monsoonMoistureLbsHr > summerMoistureLbsHr;
+    const govMoistLatent       = monsoonMoistGoverns ? monsoonCoilLat : coilLatent;
+    const govMoistLbsHr        = monsoonMoistGoverns ? monsoonMoistureLbsHr : summerMoistureLbsHr;
     const moisture = {
-      rate: totalMoistureLbsHr,
-      action: coilLatent > 0 ? 'Dehumidify' : coilLatent < 0 ? 'Humidify' : 'None',
+      rate: govMoistLbsHr,
+      action: govMoistLatent > 0 ? 'Dehumidify' : govMoistLatent < 0 ? 'Humidify' : 'None',
       unit: 'lbs/hr',
-      loadBTU: coilLatent,
+      loadBTU: govMoistLatent,
+      summerRate: parseFloat(summerMoistureLbsHr.toFixed(2)),
+      monsoonRate: parseFloat(monsoonMoistureLbsHr.toFixed(2)),
+      governs: monsoonMoistGoverns ? 'monsoon' : 'summer',
     };
     const reheat = calculateReheat(coilSensible, coilLatent);
 
@@ -612,6 +635,10 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
       _calcOverallGoverningTR: parseFloat(overallGoverningTR.toFixed(3)),
       _calcOverallRequiredTR: parseFloat(overallRequiredTR.toFixed(3)),
       _calcOverallDesignCFM: parseFloat(overallDesignCFM.toFixed(0)),
+      // Winter heating BTU/h — flat field so ES, LC row badges, and PDF can read it
+      // without parsing the nested analysis.heating object. Always written (even when winter
+      // isn't enabled in project settings) so toggling the season doesn't require a re-save.
+      _calcWinterHeatingBTUH: parseFloat((heating.totalHeatingLoad || 0).toFixed(0)),
       updatedAt: new Date(),
     });
 
@@ -643,6 +670,7 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
               _calcOverallGoverningTR: parseFloat(overallGoverningTR.toFixed(3)),
               _calcOverallRequiredTR: parseFloat(overallRequiredTR.toFixed(3)),
               _calcOverallDesignCFM: parseFloat(overallDesignCFM.toFixed(0)),
+              _calcWinterHeatingBTUH: parseFloat((heating.totalHeatingLoad || 0).toFixed(0)),
             }
           : r
       ),
@@ -845,19 +873,72 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
     const zoneIds = new Set(fsZoneDocsRef.current.map(z => z.id));
     const sysIds  = new Set([...zoneIds, ...fsSystemDocsRef.current.map(s => s.id)]);
     const liveRooms = liveAllRoomsRef.current;
+    // ES system ids referenced by any live room (direct via zoneId or via systemId).
+    const esIdsWithRooms = new Set<string>();
+    for (const rs of Object.values(liveRooms)) {
+      for (const r of rs as any[]) {
+        if (r.systemId) esIdsWithRooms.add(r.systemId);
+      }
+    }
+    // Sub-zone name lookup from ES system docs so we can re-name legacy room-derived zones
+    // (where room.zoneName === systemName) to their canonical sub-zone name.
+    const esSubZoneNameById: Record<string, string> = {};
+    for (const es of fsEquipSystemDocsRef.current as any[]) {
+      for (const z of (es.zones ?? []) as any[]) {
+        if (z?.id && z?.name) esSubZoneNameById[z.id] = z.name;
+      }
+    }
+    // Surface every ES sub-zone (system.zones[]) as a zone in LC's tree — including ones
+    // that don't yet have any rooms. Without this, "+ Add Zone" creates an ES sub-zone
+    // but LC wouldn't render it until the first room is added.
+    const esSubZonesAsZones = (fsEquipSystemDocsRef.current as any[]).flatMap((es: any) =>
+      ((es.zones ?? []) as any[])
+        .filter((z: any) => z?.id)
+        .map((z: any) => ({ id: z.id, name: z.name ?? 'Zone', systemId: es.id })),
+    );
+
     fsZonesRef.current = [
       ...fsZoneDocsRef.current,
       ...fsSystemDocsRef.current.filter(s => !zoneIds.has(s.id)),
-      // SD equipment systems: only show as a zone if at least one live room references it.
-      // Stale assignedRoomIds (pointing to deleted rooms) are not sufficient.
-      ...fsEquipSystemDocsRef.current.filter(es =>
-        !sysIds.has(es.id) && (liveRooms[es.id]?.length ?? 0) > 0
-      ),
+      // SD equipment systems become parent rows in LC; sub-zones attach via zone.systemId === system.id.
+      // Stamp `description` so the ZoneList `isSystem` check (zone.description !== undefined) recognises them.
+      ...fsEquipSystemDocsRef.current
+        .filter(es => !sysIds.has(es.id) && esIdsWithRooms.has(es.id))
+        .map((es: any) => ({
+          ...es,
+          description: es.description ?? (es.type ? `${es.type} System` : 'Equipment System'),
+        })),
+      // Empty / non-empty ES sub-zones (deduped against /zones and /systems by id)
+      ...esSubZonesAsZones.filter((z: any) => !zoneIds.has(z.id) && !sysIds.has(z.id)),
     ];
-    setZones(prev => mergeZones(fsZonesRef.current, prev));
+    // Rewrite previous room-derived zone NAMES from ES sub-zones so late-loading ES doc fixes stale labels.
+    setZones(prev => {
+      // CRITICAL: mergeZones preserves prev entries not in fsZones, but that path
+      // keeps phantom rows alive forever (e.g. a zone that was in es.zones[] yesterday
+      // but cleanup removed today). Filter prev to entries that have CURRENT backing:
+      // either appear in fsZonesRef.current, or have live rooms referencing them.
+      const fsIds = new Set(fsZonesRef.current.map(z => z.id));
+      const liveRooms = liveAllRoomsRef.current;
+      const kept = prev.filter(z => fsIds.has(z.id) || (liveRooms[z.id]?.length ?? 0) > 0);
+      const renamed = kept.map(z =>
+        esSubZoneNameById[z.id] ? { ...z, name: esSubZoneNameById[z.id] } : z,
+      );
+      return mergeZones(fsZonesRef.current, renamed);
+    });
   });
   useEffect(() => {
     if (!project.id || !userProfile) return;
+    // Reset stale FS-document refs / state from any previous project before subscribing.
+    // Otherwise Igloo Test loads with R&R Resort's ES systems still in memory until
+    // the new snapshots arrive — duplicates and orphan zones flash on screen.
+    fsZoneDocsRef.current = [];
+    fsSystemDocsRef.current = [];
+    fsEquipSystemDocsRef.current = [];
+    fsZonesRef.current = [];
+    setEquipSystems([]);
+    setSystems([]);
+    setZones([]);
+
     const unsubZones = onSnapshot(
       collection(db, 'projects', project.id, 'zones'),
       (snap) => {
@@ -869,13 +950,41 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
       collection(db, 'projects', project.id, 'systems'),
       (snap) => {
         fsSystemDocsRef.current = snap.docs.map(d => ({ id: d.id, ...d.data() } as Zone));
+        // Also mirror to React state so addSystem / deleteSystem can read it.
+        setSystems(snap.docs.map(d => ({ id: d.id, ...d.data() } as HVACSystem)));
         rebuildFsZonesRef.current();
       },
     );
     const unsubEquipSystems = onSnapshot(
       collection(db, 'projects', project.id, 'equipmentSystems'),
       (snap) => {
-        const docs = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+        const raw = snap.docs.map(d => ({ id: d.id, ...d.data() } as any));
+        // Apply the same dedup that EquipmentSelection uses, so LC sees one entry per
+        // (type, name) combination. Without this, legacy duplicate ES system docs (created
+        // before today's flow) leak through and render as phantom rows in LC.
+        // 1) dedup by id (no-op for unique ids)
+        const seenIds = new Set<string>();
+        const idDeduped = raw.filter(s => {
+          if (seenIds.has(s.id)) return false;
+          seenIds.add(s.id);
+          return true;
+        });
+        // 2) dedup by (type, name) — keep most recently updated
+        const nameKey = (s: any) => `${String(s.type || '')}|${String(s.name || s.id).toLowerCase().trim()}`;
+        const nameMap = new Map<string, any[]>();
+        idDeduped.forEach(s => {
+          const k = nameKey(s);
+          if (!nameMap.has(k)) nameMap.set(k, []);
+          nameMap.get(k)!.push(s);
+        });
+        const docs = Array.from(nameMap.values()).map(group => {
+          if (group.length === 1) return group[0];
+          return group.reduce((best, s) => {
+            const tBest = (best as any).updatedAt?.seconds ?? 0;
+            const tS    = (s as any).updatedAt?.seconds    ?? 0;
+            return tS > tBest ? s : best;
+          }, group[0]);
+        });
         fsEquipSystemDocsRef.current = docs as Zone[];
         setEquipSystems(docs);
         rebuildFsZonesRef.current();
@@ -891,6 +1000,14 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
     analysisBackfillDoneRef.current.clear();
     oaFacphMigrationDoneRef.current.clear();
     loadedEnvelopeRoomsRef.current.clear();
+    // Zone-rename migration cache must reset per project — otherwise an old project's
+    // (sys.id, subZone.id, room.id) tuples could shadow new-project work.
+    zoneRenameMigrationDoneRef.current.clear();
+    zoneRenameMigrationRunningRef.current = false;
+    // Clear stale per-room state. The listener will repopulate from the new project.
+    liveAllRoomsRef.current = {};
+    setRooms({});
+    setEnvelopeElements({});
     setDataLoading(true);
 
     const unsub = onSnapshot(
@@ -898,16 +1015,35 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
       async (snap) => {
         const rList = snap.docs.map(d => normalizeRoom({ id: d.id, ...d.data() }));
 
+        // Build a lookup so legacy rooms (zoneName === systemName) get re-named from the
+        // authoritative sub-zone label stored in the ES system doc (system.zones[]).
+        const esSubZoneNameById: Record<string, string> = {};
+        // Map of system id → system type (used to detect Split/DOAS, which don't use sub-zones).
+        const esSystemTypeById: Record<string, string> = {};
+        for (const es of fsEquipSystemDocsRef.current as any[]) {
+          if (es?.id && es?.type) esSystemTypeById[es.id] = es.type;
+          for (const z of (es.zones ?? []) as any[]) {
+            if (z?.id && z?.name) esSubZoneNameById[z.id] = z.name;
+          }
+        }
+
         const allRooms: Record<string, Room[]> = {};
         const zoneMap: Record<string, { id: string; name: string; systemId?: string }> = {};
         for (const room of rList) {
-          const key = (room as any).zoneId ?? 'default';
-          const zName = (room as any).zoneName ?? 'Zone';
-          const zSystemId = (room as any).systemId as string | undefined;
+          const rSystemId = (room as any).systemId as string | undefined;
+          const sysType = rSystemId ? esSystemTypeById[rSystemId] : undefined;
+          // Split & DOAS: collapse zone layer — group all rooms under the system id directly,
+          // so the LC system card lists rooms flat (no Zone 1/Zone 2 intermediate row).
+          const isFlatSystem = sysType === 'Split' || sysType === 'DOAS';
+          const key = isFlatSystem && rSystemId
+            ? rSystemId
+            : ((room as any).zoneId ?? 'default');
+          const subZoneName = esSubZoneNameById[key];
+          const zName = subZoneName ?? (room as any).zoneName ?? 'Zone';
           if (!allRooms[key]) allRooms[key] = [];
           allRooms[key].push(room);
           if (!zoneMap[key]) {
-            zoneMap[key] = { id: key, name: zName, ...(zSystemId ? { systemId: zSystemId } : {}) };
+            zoneMap[key] = { id: key, name: zName, ...(rSystemId ? { systemId: rSystemId } : {}) };
           }
         }
 
@@ -934,17 +1070,35 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
         // Keep the live-rooms ref in sync so rebuildFsZonesRef can use actual room data.
         liveAllRoomsRef.current = allRooms;
 
+        // ES systems referenced by any live room (directly via zoneId, or via systemId on sub-zoned rooms).
+        // These become parent rows in LC. Stamped with `description` so ZoneList.isSystemRow detects them.
+        const esIdsReferenced = new Set<string>();
+        for (const r of rList) {
+          const sid = (r as any).systemId;
+          if (sid) esIdsReferenced.add(sid);
+        }
+        const esSystemsAsZones: Zone[] = (fsEquipSystemDocsRef.current as any[])
+          .filter(es => esIdsReferenced.has(es.id))
+          .map(es => ({
+            ...es,
+            description: es.description ?? (es.type ? `${es.type} System` : 'Equipment System'),
+          })) as Zone[];
+
         // Merge room-derived zones with Firestore zone documents so that:
         // 1. Empty zones (no rooms yet) are preserved from Firestore
         // 2. Zone names / design-condition overrides from Firestore take precedence
-        // Equipment system zones with no live rooms are stripped here as a safety net
-        // (handles the case where rebuildFsZonesRef ran before rooms loaded).
+        // ES systems are sourced exclusively from esSystemsAsZones (above) to avoid duplicates.
+        // Sub-zones whose systemId points to a system not in current ES collection are orphans
+        // (e.g. cached sub-zones from a deleted system); drop them so phantom rows can't survive.
         const equipSystemIds = new Set(fsEquipSystemDocsRef.current.map(es => es.id));
         const filteredFsZones = fsZonesRef.current.filter(z =>
-          !equipSystemIds.has(z.id) || (allRooms[z.id]?.length ?? 0) > 0
+          !equipSystemIds.has(z.id) &&
+          (!(z as any).systemId || equipSystemIds.has((z as any).systemId)),
         );
         const roomDerivedZones = Object.values(zoneMap) as Zone[];
-        const mergedZones = mergeZones(filteredFsZones, roomDerivedZones);
+        // Order matters: put ES systems first (as FS zones) so they render as parent rows,
+        // then sub-zones merged in from rooms.
+        const mergedZones = mergeZones([...esSystemsAsZones, ...filteredFsZones], roomDerivedZones);
         setZones(mergedZones);
         setRooms(allRooms);
         setDataLoading(false);
@@ -1080,6 +1234,100 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [dataLoading]);
 
+  // One-time per-session migration: rewrite legacy room.zoneId / zoneName / systemId / systemName
+  // to the canonical values from the ES system docs (system.zones[].roomIds[]).
+  // Idempotent — only touches fields that are out of sync, never deletes or touches envelope/calc data.
+  // The user's pre-existing room geometry, envelope elements, and load results are preserved.
+  // (refs declared near the top so listeners can clear them on project switch)
+  useEffect(() => {
+    if (dataLoading) return;
+    if (zoneRenameMigrationRunningRef.current) return;
+    if (!project?.id) return;
+    if (!equipSystems || equipSystems.length === 0) return;
+
+    const run = async () => {
+      zoneRenameMigrationRunningRef.current = true;
+      try {
+        // Flatten room state into a roomId -> room lookup
+        const roomById = new Map<string, any>();
+        for (const rs of Object.values(rooms)) {
+          for (const r of rs as any[]) roomById.set(r.id, r);
+        }
+
+        let batch = writeBatch(db);
+        let opCount = 0;
+        let totalUpdated = 0;
+
+        for (const sys of equipSystems as any[]) {
+          const subZones = (sys.zones ?? []) as any[];
+          for (const subZone of subZones) {
+            if (!subZone?.id || !subZone?.name) continue;
+            for (const roomId of (subZone.roomIds ?? []) as string[]) {
+              const key = `${sys.id}:${subZone.id}:${roomId}`;
+              if (zoneRenameMigrationDoneRef.current.has(key)) continue;
+
+              const r = roomById.get(roomId);
+              if (!r) { zoneRenameMigrationDoneRef.current.add(key); continue; }
+
+              // Stale-roomIds guard: if the room is currently assigned to a DIFFERENT system,
+              // this system's zones[].roomIds[] is stale (an old reference that wasn't cleaned
+              // up). Don't claim the room back — let the Cleanup tool handle the orphan ref.
+              // Without this guard, two systems each listing the same room id will ping-pong
+              // forever, firing the migration toast on every snapshot.
+              if (r.systemId && r.systemId !== sys.id) {
+                zoneRenameMigrationDoneRef.current.add(key);
+                continue;
+              }
+
+              const needsUpdate =
+                r.zoneId       !== subZone.id   ||
+                r.zoneName     !== subZone.name ||
+                r.systemId     !== sys.id       ||
+                r.systemName   !== (sys.name ?? null);
+              if (!needsUpdate) { zoneRenameMigrationDoneRef.current.add(key); continue; }
+
+              batch.update(doc(db, 'projects', project.id, 'rooms', roomId), {
+                zoneId:        subZone.id,
+                zoneName:      subZone.name,
+                systemId:      sys.id,
+                systemName:    sys.name ?? null,
+                hvacZoneId:    subZone.id,
+                hvacZoneName:  subZone.name,
+                hvacSystemId:  sys.id,
+                hvacSystemName: sys.name ?? null,
+                ahuGroupId:    subZone.id,
+                ahuGroupName:  subZone.name,
+                updatedAt:     serverTimestamp(),
+              });
+              opCount++;
+              totalUpdated++;
+              zoneRenameMigrationDoneRef.current.add(key);
+
+              // Firestore caps batches at 500 ops; commit and start a fresh batch at 400.
+              if (opCount >= 400) {
+                await batch.commit();
+                batch = writeBatch(db);
+                opCount = 0;
+              }
+            }
+          }
+        }
+
+        if (opCount > 0) await batch.commit();
+        if (totalUpdated > 0) {
+          toast.success(`Normalized ${totalUpdated} room${totalUpdated === 1 ? '' : 's'} — zone labels now match Equipment Selection`);
+        }
+      } catch (error) {
+        console.error('[LoadCalculator] Failed zone-rename migration:', error);
+      } finally {
+        zoneRenameMigrationRunningRef.current = false;
+      }
+    };
+
+    void run();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dataLoading, equipSystems]);
+
   const addSystem = async () => {
     try {
       const systemData: any = {
@@ -1101,6 +1349,26 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
     if (addingZone) return;
     setAddingZone(true);
     try {
+      // If parent is an ES system, write the new zone as an ES sub-zone (system.zones[]).
+      // This keeps LC and ES sharing one zone hierarchy — adding in LC is reflected in ES.
+      const esSys = systemId
+        ? (equipSystems.find((s: any) => s.id === systemId) as any)
+        : null;
+      if (esSys) {
+        const subZones = (esSys.zones ?? []) as any[];
+        const newZoneId = `zone-${Date.now()}`;
+        const name = `Zone ${subZones.length + 1}`;
+        const newSubZone = { id: newZoneId, name, roomIds: [] as string[] };
+        await updateDoc(doc(db, 'projects', project.id, 'equipmentSystems', systemId!), {
+          zones: [...subZones, newSubZone],
+          updatedAt: serverTimestamp(),
+        });
+        setZones(prev => [...prev, { id: newZoneId, name, systemId } as Zone]);
+        setExpandedZone(newZoneId);
+        toast.success('Zone added');
+        return;
+      }
+
       const name = `Zone ${zones.filter(z => z.systemId === systemId).length + 1}`;
       const path = systemId
         ? collection(db, 'projects', project.id, 'systems', systemId, 'zones')
@@ -1227,6 +1495,28 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
       setRooms(prev => ({ ...prev, [zoneId]: [...(prev[zoneId] || []), newRoom] }));
       setExpandedZone(zoneId);
       setExpandedRoom(ref.id);
+
+      // Sync to ES: if this room belongs to an ES sub-zone, append its id to the
+      // sub-zone's roomIds[] array so the room appears under that zone in Equipment
+      // Selection automatically (engineer doesn't have to manually re-add it in ES).
+      if (systemId && zoneId !== systemId) {
+        const esSys = equipSystems.find((s: any) => s.id === systemId) as any;
+        const subZones = (esSys?.zones ?? []) as any[];
+        const idx = subZones.findIndex((z: any) => z.id === zoneId);
+        if (idx >= 0 && !(subZones[idx].roomIds ?? []).includes(ref.id)) {
+          const updated = [...subZones];
+          updated[idx] = { ...updated[idx], roomIds: [...(updated[idx].roomIds ?? []), ref.id] };
+          try {
+            await updateDoc(doc(db, 'projects', project.id, 'equipmentSystems', systemId), {
+              zones: updated,
+              updatedAt: serverTimestamp(),
+            });
+          } catch (err) {
+            console.error('[LoadCalculator] Failed to append room to ES sub-zone:', err);
+          }
+        }
+      }
+
       await persistRoomAnalysisSnapshot(zoneId, newRoom.id, systemId, newRoom, []);
       toast.success('Room added');
     } catch (error) {
@@ -1581,9 +1871,11 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
     }
 
     // Batch expensive analysis writes while the user is actively editing.
+    // 1500ms keeps the snapshot fresh enough that Equipment Selection / row badges
+    // reflect edits within ~2s of the user pausing typing.
     analysisDbTimersRef.current[key] = setTimeout(() => {
       void runPendingAnalysisWrite(key);
-    }, 5000);
+    }, 1500);
   }
 
   const updateEnvelopeElementDebounced = useCallback(
@@ -1690,77 +1982,112 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
     };
   }, [flushPendingWrites, hasPendingWrites]);
 
+  // In-place room move. Keeps the same room.id so:
+  //  • the envelope elements subcollection (rooms/{id}/envelopeElements) stays attached
+  //  • ES references (system.zones[].roomIds, system.iduSelections[roomId]) stay valid
+  //  • the IDU/ODU selection the engineer made is preserved across moves
+  // Also keeps ES system.zones[].roomIds[] in sync by removing the room from the source
+  // sub-zone and adding it to the target sub-zone.
   const moveRoom = async (room: Room, sourceZoneId: string, targetZoneId: string) => {
     try {
-      const targetZone = zones.find(z => z.id === targetZoneId) || systems.find(s => s.id === targetZoneId);
+      if (sourceZoneId === targetZoneId) return;
 
+      const targetZone = zones.find(z => z.id === targetZoneId) || systems.find(s => s.id === targetZoneId);
       if (!targetZone) return;
+      const targetZoneName = (targetZone as any).name ?? 'Zone';
 
       const targetSystemId = (targetZone as any).systemId as string | undefined;
       const targetSystemName: string | undefined = targetSystemId
         ? (targetSystemId === targetZoneId
-            ? (targetZone as any).name
-            : systems.find(s => s.id === targetSystemId)?.name)
+            ? targetZoneName
+            : (systems.find(s => s.id === targetSystemId)?.name
+                ?? (equipSystems.find((s: any) => s.id === targetSystemId) as any)?.name))
         : undefined;
 
-      // 1. Get elements
-      const elements = envelopeElements[room.id] || [];
+      const sourceZone = zones.find(z => z.id === sourceZoneId);
+      const sourceSystemId = (sourceZone as any)?.systemId as string | undefined;
 
-      // 2. Create new room at flat path with updated zoneId/zoneName
-      // Strip transient + undefined fields — Firestore rejects undefined values
-      const {
-        id: oldId,
-        _oaFacphWasMissingOnLoad,
-        _oaFacphMigrationSource,
-        _oaFacphMigratedAt,
-        analysis,
-        ...roomData
-      } = room as any;
-      const rawRoomData: Record<string, unknown> = {
-        ...roomData,
-        zoneId: targetZoneId,
-        zoneName: (targetZone as any).name ?? 'Zone',
-        ...(targetSystemId ? { systemId: targetSystemId, systemName: targetSystemName } : {}),
-        // Re-include migration fields only when they have actual values
-        ...(_oaFacphMigrationSource != null ? { _oaFacphMigrationSource } : {}),
-        ...(_oaFacphMigratedAt != null ? { _oaFacphMigratedAt } : {}),
+      // 1. In-place update of the room document — preserves room.id, envelope elements, ES refs.
+      const firestoreUpdate: Record<string, any> = {
+        zoneId:        targetZoneId,
+        zoneName:      targetZoneName,
+        hvacZoneId:    targetZoneId,
+        hvacZoneName:  targetZoneName,
+        ahuGroupId:    targetZoneId,
+        ahuGroupName:  targetZoneName,
+        updatedAt:     serverTimestamp(),
       };
-      // Final pass: strip any remaining undefined values (e.g. from room fields)
-      const newRoomData = Object.fromEntries(Object.entries(rawRoomData).filter(([, v]) => v !== undefined));
-      const newRoomRef = await addDoc(collection(db, 'projects', project.id, 'rooms'), newRoomData);
-      const newRoomId = newRoomRef.id;
+      if (targetSystemId) {
+        firestoreUpdate.systemId      = targetSystemId;
+        firestoreUpdate.systemName    = targetSystemName ?? null;
+        firestoreUpdate.hvacSystemId  = targetSystemId;
+        firestoreUpdate.hvacSystemName = targetSystemName ?? null;
+      } else {
+        firestoreUpdate.systemId      = deleteField();
+        firestoreUpdate.systemName    = deleteField();
+        firestoreUpdate.hvacSystemId  = deleteField();
+        firestoreUpdate.hvacSystemName = deleteField();
+      }
+      await updateDoc(doc(db, 'projects', project.id, 'rooms', room.id), firestoreUpdate);
 
-      // 3. Copy elements
-      const copiedElements: EnvelopeElement[] = [];
-      for (const el of elements) {
-        const { id: elOldId, ...elData } = el;
-        const elPath = collection(db, 'projects', project.id, 'rooms', newRoomId, 'envelopeElements');
-        const newElementRef = await addDoc(elPath, elData);
-        copiedElements.push({ id: newElementRef.id, ...elData } as EnvelopeElement);
+      // 2. Sync ES sub-zone roomIds[]. Group updates per ES system so cross-zone moves
+      //    within the same system don't issue two conflicting writes on the same doc.
+      const esZonesUpdates: Record<string, any[]> = {};
+      if (sourceSystemId) {
+        const sourceSys = equipSystems.find((s: any) => s.id === sourceSystemId) as any;
+        const sourceSubZones = (sourceSys?.zones ?? []) as any[];
+        if (sourceSubZones.some((z: any) => (z.roomIds ?? []).includes(room.id))) {
+          esZonesUpdates[sourceSystemId] = sourceSubZones.map((z: any) =>
+            (z.roomIds ?? []).includes(room.id)
+              ? { ...z, roomIds: (z.roomIds ?? []).filter((id: string) => id !== room.id) }
+              : z,
+          );
+        }
+      }
+      if (targetSystemId && targetZoneId !== targetSystemId) {
+        const baseZones = esZonesUpdates[targetSystemId]
+          ?? ((equipSystems.find((s: any) => s.id === targetSystemId) as any)?.zones ?? []);
+        const idx = baseZones.findIndex((z: any) => z.id === targetZoneId);
+        if (idx >= 0 && !(baseZones[idx].roomIds ?? []).includes(room.id)) {
+          const updated = [...baseZones];
+          updated[idx] = { ...updated[idx], roomIds: [...(updated[idx].roomIds ?? []), room.id] };
+          esZonesUpdates[targetSystemId] = updated;
+        }
+      }
+      const esSysIds = Object.keys(esZonesUpdates);
+      if (esSysIds.length > 0) {
+        const batch = writeBatch(db);
+        for (const sysId of esSysIds) {
+          batch.update(doc(db, 'projects', project.id, 'equipmentSystems', sysId), {
+            zones: esZonesUpdates[sysId],
+            updatedAt: serverTimestamp(),
+          });
+        }
+        await batch.commit();
       }
 
-      // 4. Delete old room
-      await deleteDoc(doc(db, 'projects', project.id, 'rooms', room.id));
-
-      // 5. Update local UI state immediately
+      // 3. Update local UI state immediately for snappy feel
+      const mergedRoom: any = { ...room, zoneId: targetZoneId, zoneName: targetZoneName };
+      if (targetSystemId) {
+        mergedRoom.systemId = targetSystemId;
+        if (targetSystemName) mergedRoom.systemName = targetSystemName;
+      } else {
+        delete mergedRoom.systemId;
+        delete mergedRoom.systemName;
+      }
+      const normalizedRoom = normalizeRoom(mergedRoom);
       setRooms((prev) => {
         const next = { ...prev };
         next[sourceZoneId] = (next[sourceZoneId] || []).filter((r) => r.id !== room.id);
-        next[targetZoneId] = [...(next[targetZoneId] || []), normalizeRoom({ id: newRoomId, ...newRoomData })];
+        next[targetZoneId] = [...(next[targetZoneId] || []), normalizedRoom];
         return next;
       });
-      setEnvelopeElements((prev) => {
-        const next = { ...prev };
-        delete next[room.id];
-        next[newRoomId] = copiedElements;
-        return next;
-      });
-      await persistRoomAnalysisSnapshot(targetZoneId, newRoomId, targetSystemId, normalizeRoom({ id: newRoomId, ...newRoomData }), copiedElements);
-      if (expandedRoom === room.id) {
-        setExpandedRoom(newRoomId);
-      }
 
-      toast.success(`Moved ${room.name} to ${(targetZone as any).name}`);
+      // 4. Re-run room analysis with the target zone's design conditions
+      const elements = envelopeElements[room.id] || [];
+      await persistRoomAnalysisSnapshot(targetZoneId, room.id, targetSystemId, normalizedRoom, elements);
+
+      toast.success(`Moved ${room.name} to ${targetZoneName}`);
     } catch (error) {
       console.error('Move failed:', error);
       toast.error('Failed to move room');
@@ -2020,7 +2347,7 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
             </div>
             <div className="rounded-lg border border-orange-200 dark:border-orange-800 bg-orange-50 dark:bg-orange-950/20 px-3 py-2">
               <p className="font-semibold text-orange-700 dark:text-orange-400">Step 2</p>
-              <p className="text-orange-600 dark:text-orange-400">Zones & Rooms</p>
+              <p className="text-orange-600 dark:text-orange-400">Systems, Zones & Rooms</p>
             </div>
             <div className="rounded-lg border border-blue-200 dark:border-blue-800 bg-blue-50 dark:bg-blue-950/20 px-3 py-2">
               <p className="font-semibold text-blue-700 dark:text-blue-400">Step 3</p>
@@ -2253,11 +2580,18 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
               <h3 className="font-semibold text-gray-900 dark:text-slate-100 text-sm">
                 Step 2:
                 <span className="ml-1">
-                Zones &amp; Rooms
+                Systems, Zones &amp; Rooms
                 </span>
               </h3>
               <p className="text-xs text-gray-400 mt-0.5">
-                {zones.length} zone{zones.length !== 1 ? 's' : ''}{systems.length > 0 ? ` · ${systems.length} system${systems.length !== 1 ? 's' : ''}` : ''}
+                {(() => {
+                  const sysCount = zones.filter((z: any) => z.description !== undefined).length;
+                  const zoneCount = zones.length - sysCount;
+                  const parts: string[] = [];
+                  if (sysCount > 0) parts.push(`${sysCount} system${sysCount !== 1 ? 's' : ''}`);
+                  if (zoneCount > 0) parts.push(`${zoneCount} zone${zoneCount !== 1 ? 's' : ''}`);
+                  return parts.length > 0 ? parts.join(' · ') : '0 zones';
+                })()}
               </p>
             </div>
             {canEdit && (
@@ -2334,53 +2668,53 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
           <div className="space-y-4 py-4">
             <div className="space-y-2">
               <Label htmlFor="edit-name">Project Name</Label>
-              <Input
+              <input className={EDIT_INPUT_CLS}
                 id="edit-name"
                 value={editData.name}
-                onChange={(e) => setEditData({...editData, name: e.target.value})}
+                onChange={(e) => setEditData(prev => ({ ...prev, name: e.target.value }))}
                 placeholder={project.name || 'Project name'}
               />
             </div>
             <div className="space-y-2">
               <Label htmlFor="edit-location">Location</Label>
-              <Input
+              <input className={EDIT_INPUT_CLS}
                 id="edit-location"
                 value={editData.location}
-                onChange={(e) => setEditData({...editData, location: e.target.value})}
+                onChange={(e) => setEditData(prev => ({ ...prev, location: e.target.value }))}
                 placeholder={project.location || 'City, State'}
               />
             </div>
             <div className="grid grid-cols-2 gap-4">
               <div className="space-y-2">
                 <Label htmlFor="edit-latitude">Latitude</Label>
-                <Input
+                <input className={EDIT_INPUT_CLS}
                   id="edit-latitude"
-                  type="number"
+                  type="text" inputMode="decimal"
                   step="0.0001"
                   value={editData.latitude}
-                  onChange={(e) => setEditData({...editData, latitude: e.target.value})}
+                  onChange={(e) => setEditData(prev => ({ ...prev, latitude: e.target.value }))}
                   placeholder={(project.latitude ?? project.data?.latitude)?.toString() || 'Latitude'}
                 />
               </div>
               <div className="space-y-2">
                 <Label htmlFor="edit-longitude">Longitude</Label>
-                <Input
+                <input className={EDIT_INPUT_CLS}
                   id="edit-longitude"
-                  type="number"
+                  type="text" inputMode="decimal"
                   step="0.0001"
                   value={editData.longitude}
-                  onChange={(e) => setEditData({...editData, longitude: e.target.value})}
+                  onChange={(e) => setEditData(prev => ({ ...prev, longitude: e.target.value }))}
                   placeholder={(project.longitude ?? project.data?.longitude)?.toString() || 'Longitude'}
                 />
               </div>
             </div>
             <div className="space-y-2">
               <Label htmlFor="edit-altitude">Altitude (ft)</Label>
-              <Input
+              <input className={EDIT_INPUT_CLS}
                 id="edit-altitude"
-                type="number"
+                type="text" inputMode="decimal"
                 value={editData.altitude}
-                onChange={(e) => setEditData({...editData, altitude: e.target.value})}
+                onChange={(e) => setEditData(prev => ({ ...prev, altitude: e.target.value }))}
                 placeholder={(project.altitude ?? project.data?.altitude)?.toString() || 'Elevation in feet'}
               />
             </div>
@@ -2390,7 +2724,7 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
                 id="edit-include-monsoon"
                 type="checkbox"
                 checked={editData.includeMonsoon}
-                onChange={(e) => setEditData({ ...editData, includeMonsoon: e.target.checked })}
+                onChange={(e) => setEditData(prev => ({ ...prev, includeMonsoon: e.target.checked }))}
                 className="h-4 w-4"
               />
             </div>
@@ -2400,33 +2734,39 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
                 id="edit-include-winter"
                 type="checkbox"
                 checked={editData.includeWinter}
-                onChange={(e) => setEditData({ ...editData, includeWinter: e.target.checked })}
+                onChange={(e) => setEditData(prev => ({ ...prev, includeWinter: e.target.checked }))}
                 className="h-4 w-4"
               />
             </div>
             <Separator />
+            <div className="flex justify-end">
+              <Button type="button" size="sm" variant="outline" className="text-xs gap-1.5"
+                onClick={() => setMetDataDialogOpen(true)}>
+                <BarChart3 className="w-3.5 h-3.5" /> Import from Met Data
+              </Button>
+            </div>
             <div className="space-y-2">
               <Label className="font-semibold">Summer Design Conditions</Label>
               <div className="grid grid-cols-2 gap-4">
                 <div className="space-y-2">
                   <Label htmlFor="edit-summer-temp">Temperature (°F)</Label>
-                  <Input
+                  <input className={EDIT_INPUT_CLS}
                     id="edit-summer-temp"
-                    type="number"
+                    type="text" inputMode="decimal"
                     step="0.1"
                     value={editData.summerDesignTemp}
-                    onChange={(e) => setEditData({...editData, summerDesignTemp: e.target.value})}
+                    onChange={(e) => setEditData(prev => ({ ...prev, summerDesignTemp: e.target.value }))}
                     placeholder={(project.summerDesignTemp ?? project.data?.summerDesignTemp ?? 95).toString()}
                   />
                 </div>
                 <div className="space-y-2">
                   <Label htmlFor="edit-summer-humidity">Humidity (%)</Label>
-                  <Input
+                  <input className={EDIT_INPUT_CLS}
                     id="edit-summer-humidity"
-                    type="number"
+                    type="text" inputMode="decimal"
                     step="0.1"
                     value={editData.summerDesignHumidity}
-                    onChange={(e) => setEditData({...editData, summerDesignHumidity: e.target.value})}
+                    onChange={(e) => setEditData(prev => ({ ...prev, summerDesignHumidity: e.target.value }))}
                     placeholder={(project.summerDesignHumidity ?? project.data?.summerDesignHumidity ?? 50).toString()}
                   />
                 </div>
@@ -2438,23 +2778,23 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
                 <div className="grid grid-cols-2 gap-4">
                   <div className="space-y-2">
                     <Label htmlFor="edit-monsoon-temp">Temperature (°F)</Label>
-                    <Input
+                    <input className={EDIT_INPUT_CLS}
                       id="edit-monsoon-temp"
-                      type="number"
+                      type="text" inputMode="decimal"
                       step="0.1"
                       value={editData.monsoonDesignTemp}
-                      onChange={(e) => setEditData({ ...editData, monsoonDesignTemp: e.target.value })}
+                      onChange={(e) => setEditData(prev => ({ ...prev, monsoonDesignTemp: e.target.value }))}
                       placeholder={(project.monsoonDesignTemp ?? project.data?.monsoonDesignTemp ?? 85).toString()}
                     />
                   </div>
                   <div className="space-y-2">
                     <Label htmlFor="edit-monsoon-humidity">Humidity (%)</Label>
-                    <Input
+                    <input className={EDIT_INPUT_CLS}
                       id="edit-monsoon-humidity"
-                      type="number"
+                      type="text" inputMode="decimal"
                       step="0.1"
                       value={editData.monsoonDesignHumidity}
-                      onChange={(e) => setEditData({ ...editData, monsoonDesignHumidity: e.target.value })}
+                      onChange={(e) => setEditData(prev => ({ ...prev, monsoonDesignHumidity: e.target.value }))}
                       placeholder={(project.monsoonDesignHumidity ?? project.data?.monsoonDesignHumidity ?? 85).toString()}
                     />
                   </div>
@@ -2467,23 +2807,23 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
               <div className="grid grid-cols-2 gap-4">
                 <div className="space-y-2">
                   <Label htmlFor="edit-winter-temp">Temperature (°F)</Label>
-                  <Input
+                  <input className={EDIT_INPUT_CLS}
                     id="edit-winter-temp"
-                    type="number"
+                    type="text" inputMode="decimal"
                     step="0.1"
                     value={editData.winterDesignTemp}
-                    onChange={(e) => setEditData({...editData, winterDesignTemp: e.target.value})}
+                    onChange={(e) => setEditData(prev => ({ ...prev, winterDesignTemp: e.target.value }))}
                     placeholder={(project.winterDesignTemp ?? project.data?.winterDesignTemp ?? 30).toString()}
                   />
                 </div>
                 <div className="space-y-2">
                   <Label htmlFor="edit-winter-humidity">Humidity (%)</Label>
-                  <Input
+                  <input className={EDIT_INPUT_CLS}
                     id="edit-winter-humidity"
-                    type="number"
+                    type="text" inputMode="decimal"
                     step="0.1"
                     value={editData.winterDesignHumidity}
-                    onChange={(e) => setEditData({...editData, winterDesignHumidity: e.target.value})}
+                    onChange={(e) => setEditData(prev => ({ ...prev, winterDesignHumidity: e.target.value }))}
                     placeholder={(project.winterDesignHumidity ?? project.data?.winterDesignHumidity ?? 30).toString()}
                   />
                 </div>
@@ -2496,23 +2836,23 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
               <div className="grid grid-cols-2 gap-4">
                 <div className="space-y-2">
                   <Label htmlFor="edit-inside-summer-temp">Summer Temp (°F)</Label>
-                  <Input
+                  <input className={EDIT_INPUT_CLS}
                     id="edit-inside-summer-temp"
-                    type="number"
+                    type="text" inputMode="decimal"
                     step="0.1"
                     value={editData.insideSummerTemp}
-                    onChange={(e) => setEditData({ ...editData, insideSummerTemp: e.target.value })}
+                    onChange={(e) => setEditData(prev => ({ ...prev, insideSummerTemp: e.target.value }))}
                     placeholder={(project.insideSummerTemp ?? project.data?.insideSummerTemp ?? 75).toString()}
                   />
                 </div>
                 <div className="space-y-2">
                   <Label htmlFor="edit-inside-summer-rh">Summer RH (%)</Label>
-                  <Input
+                  <input className={EDIT_INPUT_CLS}
                     id="edit-inside-summer-rh"
-                    type="number"
+                    type="text" inputMode="decimal"
                     step="0.1"
                     value={editData.insideSummerHumidity}
-                    onChange={(e) => setEditData({ ...editData, insideSummerHumidity: e.target.value })}
+                    onChange={(e) => setEditData(prev => ({ ...prev, insideSummerHumidity: e.target.value }))}
                     placeholder={(project.insideSummerHumidity ?? project.data?.insideSummerHumidity ?? 50).toString()}
                   />
                 </div>
@@ -2521,23 +2861,23 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
                 <div className="grid grid-cols-2 gap-4">
                   <div className="space-y-2">
                     <Label htmlFor="edit-inside-monsoon-temp">Monsoon Temp (°F)</Label>
-                    <Input
+                    <input className={EDIT_INPUT_CLS}
                       id="edit-inside-monsoon-temp"
-                      type="number"
+                      type="text" inputMode="decimal"
                       step="0.1"
                       value={editData.insideMonsoonTemp}
-                      onChange={(e) => setEditData({ ...editData, insideMonsoonTemp: e.target.value })}
+                      onChange={(e) => setEditData(prev => ({ ...prev, insideMonsoonTemp: e.target.value }))}
                       placeholder={(project.insideMonsoonTemp ?? project.data?.insideMonsoonTemp ?? project.insideSummerTemp ?? 75).toString()}
                     />
                   </div>
                   <div className="space-y-2">
                     <Label htmlFor="edit-inside-monsoon-rh">Monsoon RH (%)</Label>
-                    <Input
+                    <input className={EDIT_INPUT_CLS}
                       id="edit-inside-monsoon-rh"
-                      type="number"
+                      type="text" inputMode="decimal"
                       step="0.1"
                       value={editData.insideMonsoonHumidity}
-                      onChange={(e) => setEditData({ ...editData, insideMonsoonHumidity: e.target.value })}
+                      onChange={(e) => setEditData(prev => ({ ...prev, insideMonsoonHumidity: e.target.value }))}
                       placeholder={(project.insideMonsoonHumidity ?? project.data?.insideMonsoonHumidity ?? 55).toString()}
                     />
                   </div>
@@ -2547,23 +2887,23 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
               <div className="grid grid-cols-2 gap-4">
                 <div className="space-y-2">
                   <Label htmlFor="edit-inside-winter-temp">Winter Temp (°F)</Label>
-                  <Input
+                  <input className={EDIT_INPUT_CLS}
                     id="edit-inside-winter-temp"
-                    type="number"
+                    type="text" inputMode="decimal"
                     step="0.1"
                     value={editData.insideWinterTemp}
-                    onChange={(e) => setEditData({ ...editData, insideWinterTemp: e.target.value })}
+                    onChange={(e) => setEditData(prev => ({ ...prev, insideWinterTemp: e.target.value }))}
                     placeholder={(project.insideWinterTemp ?? project.data?.insideWinterTemp ?? 72).toString()}
                   />
                 </div>
                 <div className="space-y-2">
                   <Label htmlFor="edit-inside-winter-rh">Winter RH (%)</Label>
-                  <Input
+                  <input className={EDIT_INPUT_CLS}
                     id="edit-inside-winter-rh"
-                    type="number"
+                    type="text" inputMode="decimal"
                     step="0.1"
                     value={editData.insideWinterHumidity}
-                    onChange={(e) => setEditData({ ...editData, insideWinterHumidity: e.target.value })}
+                    onChange={(e) => setEditData(prev => ({ ...prev, insideWinterHumidity: e.target.value }))}
                     placeholder={(project.insideWinterHumidity ?? project.data?.insideWinterHumidity ?? 40).toString()}
                   />
                 </div>
@@ -2608,6 +2948,12 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {/* Met Data Importer — opened from inside the Edit Project dialog. Read-only utility:
+          parses pasted 10-yr monthly Min/Max/RH, computes ASHRAE-style design conditions at
+          1% or 4% basis, and shows results with copy buttons. User pastes values back into
+          the design-condition fields above. No schema change. */}
+      <MetDataImporterDialog open={metDataDialogOpen} onClose={() => setMetDataDialogOpen(false)} />
     </DndContext>
   );
 });

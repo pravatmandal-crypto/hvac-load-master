@@ -29,6 +29,9 @@ interface EquipmentPickerDialogProps {
   governingTR?: number;
   designCFM?: number;
   achGovernsAirflow?: boolean;
+  // Re-frames the sizing pill for chiller-fed AHU/FCU selection: Coil Duty + Design CFM
+  // are independent — the 400 CFM/TR conversion shown for packaged DX is misleading here.
+  systemType?: string;
 }
 
 // ── Fit helpers ───────────────────────────────────────────────────────────────
@@ -93,8 +96,9 @@ export default function EquipmentPickerDialog({
   open, onClose, projectId,
   roomId, roomName, zoneId, zoneName,
   requiredTR, loadTR, cfmTR, governingTR,
-  designCFM, achGovernsAirflow,
+  designCFM, achGovernsAirflow, systemType,
 }: EquipmentPickerDialogProps) {
+  const isChillerAHU = String(systemType ?? '').toLowerCase() === 'chiller';
 
   // ── Catalog state ─────────────────────────────────────────────────────────
   const [searchTerm, setSearchTerm]   = useState('');
@@ -272,26 +276,51 @@ export default function EquipmentPickerDialog({
             </div>
           </DialogTitle>
 
-          {/* Sizing requirements */}
-          {requiredTR && requiredTR > 0 && (
-            <div className="mt-2 flex flex-wrap gap-3 p-2.5 rounded-lg bg-violet-50 border border-violet-200 text-xs">
-              <Info className="w-3.5 h-3.5 text-violet-500 mt-0.5 shrink-0" />
-              <span className="text-slate-600">Load: <strong>{loadTR?.toFixed(2)} TR</strong></span>
-              <span className="text-slate-600">CFM: <strong>{cfmTR?.toFixed(2)} TR</strong></span>
-              <span className="font-bold text-violet-800">Governing: {governingTR?.toFixed(2)} TR</span>
-              <span className="font-bold text-orange-700">Required (×1.10): {requiredTR.toFixed(2)} TR</span>
-              <span className="text-slate-400 italic">Fits range: {requiredTR.toFixed(2)}–{(requiredTR * 1.3).toFixed(2)} TR</span>
-            </div>
-          )}
-          {designCFM && designCFM > 0 && (
-            <div className={cn(
-              "mt-1.5 flex flex-wrap gap-3 p-2.5 rounded-lg text-xs border",
-              achGovernsAirflow ? "bg-amber-50 border-amber-200 text-amber-800" : "bg-slate-50 border-slate-200 text-slate-600"
-            )}>
-              {achGovernsAirflow && <span className="font-bold">⚠ ACH governs:</span>}
-              <span>Design Supply CFM: <strong>{Math.round(designCFM)}</strong></span>
-              {achGovernsAirflow && <span className="italic">Select unit with rated airflow ≥ {Math.round(designCFM)} CFM</span>}
-            </div>
+          {/* Sizing requirements — chiller AHUs use Coil Duty + Design CFM as two
+              independent properties; packaged / VRF use the 400 CFM/TR governing-TR rule. */}
+          {isChillerAHU ? (
+            (requiredTR && requiredTR > 0) || (designCFM && designCFM > 0) ? (
+              <div className="mt-2 flex flex-wrap items-start gap-3 p-2.5 rounded-lg bg-indigo-50 border border-indigo-200 text-xs">
+                <Info className="w-3.5 h-3.5 text-indigo-500 mt-0.5 shrink-0" />
+                <div className="flex flex-col gap-0.5">
+                  <div className="flex flex-wrap gap-3">
+                    {loadTR != null && loadTR > 0 && (
+                      <span className="text-slate-700">Coil Duty: <strong className="text-indigo-800">{loadTR.toFixed(2)} TR</strong></span>
+                    )}
+                    {designCFM != null && designCFM > 0 && (
+                      <span className="text-slate-700">Design CFM: <strong className="text-indigo-800">{Math.round(designCFM).toLocaleString()}</strong></span>
+                    )}
+                  </div>
+                  <span className="text-[10.5px] text-slate-500 italic leading-snug">
+                    Chiller AHU — Coil Duty (thermal load) and Design CFM (dehumidified airflow) are independent.
+                    The 400 CFM/TR rule does not apply. OEM builds the coil to the duty.
+                  </span>
+                </div>
+              </div>
+            ) : null
+          ) : (
+            <>
+              {requiredTR && requiredTR > 0 && (
+                <div className="mt-2 flex flex-wrap gap-3 p-2.5 rounded-lg bg-violet-50 border border-violet-200 text-xs">
+                  <Info className="w-3.5 h-3.5 text-violet-500 mt-0.5 shrink-0" />
+                  <span className="text-slate-600">Load: <strong>{loadTR?.toFixed(2)} TR</strong></span>
+                  <span className="text-slate-600">CFM: <strong>{cfmTR?.toFixed(2)} TR</strong></span>
+                  <span className="font-bold text-violet-800">Governing: {governingTR?.toFixed(2)} TR</span>
+                  <span className="font-bold text-orange-700">Required (×1.10): {requiredTR.toFixed(2)} TR</span>
+                  <span className="text-slate-400 italic">Fits range: {requiredTR.toFixed(2)}–{(requiredTR * 1.3).toFixed(2)} TR</span>
+                </div>
+              )}
+              {designCFM && designCFM > 0 && (
+                <div className={cn(
+                  "mt-1.5 flex flex-wrap gap-3 p-2.5 rounded-lg text-xs border",
+                  achGovernsAirflow ? "bg-amber-50 border-amber-200 text-amber-800" : "bg-slate-50 border-slate-200 text-slate-600"
+                )}>
+                  {achGovernsAirflow && <span className="font-bold">⚠ ACH governs:</span>}
+                  <span>Design Supply CFM: <strong>{Math.round(designCFM)}</strong></span>
+                  {achGovernsAirflow && <span className="italic">Select unit with rated airflow ≥ {Math.round(designCFM)} CFM</span>}
+                </div>
+              )}
+            </>
           )}
 
           {/* ── Custom equipment creator form ── */}
@@ -352,13 +381,13 @@ export default function EquipmentPickerDialog({
                 </div>
                 <div>
                   <label className="text-[10px] text-slate-500 mb-0.5 block">Capacity TR *</label>
-                  <Input placeholder="e.g. 3.5" type="number" min="0" step="0.25" value={form.capacityTR} onChange={e => setF('capacityTR', e.target.value)} className="h-7 text-xs" />
+                  <Input placeholder="e.g. 3.5" type="text" inputMode="decimal" min="0" step="0.25" value={form.capacityTR} onChange={e => setF('capacityTR', e.target.value)} className="h-7 text-xs" />
                 </div>
               </div>
               <div className="grid grid-cols-5 gap-2">
                 <div>
                   <label className="text-[10px] text-slate-500 mb-0.5 block">Airflow CFM</label>
-                  <Input placeholder="e.g. 4000" type="number" min="0" value={form.ratedAirflowCFM} onChange={e => setF('ratedAirflowCFM', e.target.value)} className="h-7 text-xs" />
+                  <Input placeholder="e.g. 4000" type="text" inputMode="decimal" min="0" value={form.ratedAirflowCFM} onChange={e => setF('ratedAirflowCFM', e.target.value)} className="h-7 text-xs" />
                 </div>
                 <div>
                   <label className={`text-[10px] mb-0.5 block font-medium ${['AHU','DuctableSplit','VRF-IDU','FCU'].includes(form.type) ? 'text-orange-600' : 'text-slate-500'}`}>
@@ -366,18 +395,18 @@ export default function EquipmentPickerDialog({
                   </label>
                   <Input
                     placeholder={form.type === 'AHU' ? 'e.g. 150' : form.type === 'FCU' ? 'e.g. 30' : 'e.g. 60'}
-                    type="number" min="0" value={form.staticPressurePa}
+                    type="text" inputMode="decimal" min="0" value={form.staticPressurePa}
                     onChange={e => setF('staticPressurePa', e.target.value)}
                     className={`h-7 text-xs ${['AHU','DuctableSplit','VRF-IDU'].includes(form.type) ? 'border-orange-300 focus:border-orange-400' : ''}`}
                   />
                 </div>
                 <div>
                   <label className="text-[10px] text-slate-500 mb-0.5 block">Power kW</label>
-                  <Input placeholder="e.g. 3.2" type="number" min="0" step="0.1" value={form.powerInputKW} onChange={e => setF('powerInputKW', e.target.value)} className="h-7 text-xs" />
+                  <Input placeholder="e.g. 3.2" type="text" inputMode="decimal" min="0" step="0.1" value={form.powerInputKW} onChange={e => setF('powerInputKW', e.target.value)} className="h-7 text-xs" />
                 </div>
                 <div>
                   <label className="text-[10px] text-slate-500 mb-0.5 block">EER</label>
-                  <Input placeholder="e.g. 11.5" type="number" min="0" step="0.1" value={form.eer} onChange={e => setF('eer', e.target.value)} className="h-7 text-xs" />
+                  <Input placeholder="e.g. 11.5" type="text" inputMode="decimal" min="0" step="0.1" value={form.eer} onChange={e => setF('eer', e.target.value)} className="h-7 text-xs" />
                 </div>
                 <div>
                   <label className="text-[10px] text-slate-500 mb-0.5 block">

@@ -1035,19 +1035,19 @@ function ProjectDialog({
                 <Label className="text-sm font-medium flex items-center gap-1.5">
                   <MapPin className="h-3.5 w-3.5 text-slate-400" /> Latitude
                 </Label>
-                <Input type="number" step="0.0001" placeholder="e.g. 28.6315"
+                <Input type="text" inputMode="decimal" step="0.0001" placeholder="e.g. 28.6315"
                   value={form.latitude} onChange={(e) => setField('latitude', e.target.value)} className="h-9" />
               </div>
               <div className="space-y-1.5">
                 <Label className="text-sm font-medium flex items-center gap-1.5">
                   <MapPin className="h-3.5 w-3.5 text-slate-400" /> Longitude
                 </Label>
-                <Input type="number" step="0.0001" placeholder="e.g. 77.2167"
+                <Input type="text" inputMode="decimal" step="0.0001" placeholder="e.g. 77.2167"
                   value={form.longitude} onChange={(e) => setField('longitude', e.target.value)} className="h-9" />
               </div>
               <div className="space-y-1.5">
                 <Label className="text-sm font-medium">Altitude (ft)</Label>
-                <Input type="number" step="1" placeholder="e.g. 745"
+                <Input type="text" inputMode="decimal" step="1" placeholder="e.g. 745"
                   value={form.altitude} onChange={(e) => setField('altitude', e.target.value)} className="h-9" />
               </div>
             </div>

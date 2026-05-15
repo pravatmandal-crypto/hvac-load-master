@@ -237,18 +237,18 @@ function EquipmentForm({
         </div>
         <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
           <F label="Cooling Capacity" required hint="(TR)">
-            <UnitInput type="number" unit="TR" placeholder="e.g. 1.5" value={numField(form.capacityTR)} onChange={numInput('capacityTR')} />
+            <UnitInput type="text" inputMode="decimal" unit="TR" placeholder="e.g. 1.5" value={numField(form.capacityTR)} onChange={numInput('capacityTR')} />
           </F>
           <F label="Rated Airflow" hint="(CFM)">
-            <UnitInput type="number" unit="CFM" placeholder="e.g. 600" value={numField(form.ratedAirflowCFM)} onChange={numInput('ratedAirflowCFM')} />
+            <UnitInput type="text" inputMode="decimal" unit="CFM" placeholder="e.g. 600" value={numField(form.ratedAirflowCFM)} onChange={numInput('ratedAirflowCFM')} />
           </F>
           {showEsp && (
             <F label="Static Pressure" hint="(external)">
-              <UnitInput type="number" unit="Pa" placeholder="e.g. 80" value={numField(form.staticPressurePa)} onChange={numInput('staticPressurePa')} />
+              <UnitInput type="text" inputMode="decimal" unit="Pa" placeholder="e.g. 80" value={numField(form.staticPressurePa)} onChange={numInput('staticPressurePa')} />
             </F>
           )}
           <F label="Power Input" hint="(kW)">
-            <UnitInput type="number" unit="kW" placeholder="e.g. 4.5" value={numField(form.powerInputKW)} onChange={numInput('powerInputKW')} />
+            <UnitInput type="text" inputMode="decimal" unit="kW" placeholder="e.g. 4.5" value={numField(form.powerInputKW)} onChange={numInput('powerInputKW')} />
           </F>
         </div>
       </div>
@@ -262,12 +262,12 @@ function EquipmentForm({
         <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
           {showPerf && (
             <F label="EER" hint="(energy efficiency ratio)">
-              <Input type="number" className="h-9 text-sm" placeholder="e.g. 11.8" value={numField(form.eer)} onChange={numInput('eer')} />
+              <Input type="text" inputMode="decimal" className="h-9 text-sm" placeholder="e.g. 11.8" value={numField(form.eer)} onChange={numInput('eer')} />
             </F>
           )}
           {showPerf && (
             <F label="COP" hint="(coeff. of performance)">
-              <Input type="number" className="h-9 text-sm" placeholder="e.g. 3.5" value={numField(form.cop)} onChange={numInput('cop')} />
+              <Input type="text" inputMode="decimal" className="h-9 text-sm" placeholder="e.g. 3.5" value={numField(form.cop)} onChange={numInput('cop')} />
             </F>
           )}
           <F label="Refrigerant">
@@ -310,10 +310,10 @@ function EquipmentForm({
               </Select>
             </F>
             <F label="Min IDU Connection" hint="(% of ODU capacity)">
-              <UnitInput type="number" unit="%" placeholder="e.g. 50" value={numField(form.minConnectionPct)} onChange={numInput('minConnectionPct')} />
+              <UnitInput type="text" inputMode="decimal" unit="%" placeholder="e.g. 50" value={numField(form.minConnectionPct)} onChange={numInput('minConnectionPct')} />
             </F>
             <F label="Max IDU Connection" hint="(% of ODU capacity)">
-              <UnitInput type="number" unit="%" placeholder="e.g. 130" value={numField(form.maxConnectionPct)} onChange={numInput('maxConnectionPct')} />
+              <UnitInput type="text" inputMode="decimal" unit="%" placeholder="e.g. 130" value={numField(form.maxConnectionPct)} onChange={numInput('maxConnectionPct')} />
             </F>
           </div>
           <p className="mt-3 text-xs text-slate-400 dark:text-slate-500">
@@ -875,7 +875,7 @@ export default function GlobalEquipmentLibrary() {
           </span>
           <div className="flex items-center gap-1.5">
             <Input
-              type="number"
+              type="text" inputMode="decimal"
               className="h-9 text-sm w-[72px] bg-white dark:bg-slate-900"
               placeholder={trRange ? String(trRange.min) : 'Min'}
               value={filterMinTR}
@@ -883,7 +883,7 @@ export default function GlobalEquipmentLibrary() {
             />
             <span className="text-slate-400 text-xs">—</span>
             <Input
-              type="number"
+              type="text" inputMode="decimal"
               className="h-9 text-sm w-[72px] bg-white dark:bg-slate-900"
               placeholder={trRange ? String(trRange.max) : 'Max'}
               value={filterMaxTR}

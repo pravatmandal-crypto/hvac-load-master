@@ -1200,9 +1200,20 @@ function RoomDetail({
               <p className="text-[10px] text-gray-500 dark:text-slate-400 uppercase tracking-wide mb-0.5">Action Required</p>
               <p className={`text-sm font-bold ${actionColor}`}>{calc.moisture.action}</p>
             </div>
-            <div className="bg-white dark:bg-slate-800 border border-emerald-100 dark:border-emerald-900 rounded-lg px-3 py-2 text-center">
-              <p className="text-[10px] text-gray-500 dark:text-slate-400 uppercase tracking-wide mb-0.5">Moisture Rate</p>
+            <div className="bg-white dark:bg-slate-800 border border-emerald-100 dark:border-emerald-900 rounded-lg px-3 py-2 text-center"
+                 title={(calc.moisture as any)?.governs
+                   ? `Summer: ${((calc.moisture as any).summerRate ?? 0).toFixed(2)} lbs/hr · Monsoon: ${((calc.moisture as any).monsoonRate ?? 0).toFixed(2)} lbs/hr — ${(calc.moisture as any).governs} governs`
+                   : ''}>
+              <p className="text-[10px] text-gray-500 dark:text-slate-400 uppercase tracking-wide mb-0.5">
+                Moisture Rate
+                {(calc.moisture as any)?.governs === 'monsoon' && <span className="ml-1 text-[9px] font-bold text-blue-600 dark:text-blue-400">(M↑)</span>}
+              </p>
               <p className="text-sm font-bold text-gray-800 dark:text-slate-100">{calc.moisture.rate.toFixed(2)} lbs/hr</p>
+              {(calc.moisture as any)?.summerRate != null && (calc.moisture as any)?.monsoonRate > 0 && (
+                <p className="text-[9px] text-gray-400 dark:text-slate-500 mt-0.5">
+                  S: {(calc.moisture as any).summerRate.toFixed(1)} · M: {(calc.moisture as any).monsoonRate.toFixed(1)}
+                </p>
+              )}
             </div>
             <div className="bg-white dark:bg-slate-800 border border-emerald-100 dark:border-emerald-900 rounded-lg px-3 py-2 text-center">
               <p className="text-[10px] text-gray-500 dark:text-slate-400 uppercase tracking-wide mb-0.5">Coil Latent Load</p>

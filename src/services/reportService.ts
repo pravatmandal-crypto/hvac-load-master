@@ -290,12 +290,21 @@ const getSeasonProfiles = (project: any): SeasonProfile[] => {
   return profiles;
 };
 
-const buildEntityRecords = (project: any, systems: any[], zones: any[], rooms: Record<string, any[]>): EntityRecord[] => {
+const buildEntityRecords = (project: any, systems: any[], zones: any[], rooms: Record<string, any[]>, equipSystems: any[] = []): EntityRecord[] => {
   // Use zones when available — all project types now use flat zone architecture.
   // Fallback to systems only for legacy VRF projects that have systems but no separate zones.
   if (zones.length > 0) {
-    return zones.map((zone: any) => {
-      const parent = systems.find((s: any) => s.id === (zone.systemId ?? zone.id));
+    // LC surfaces ES SYSTEMS as zones-with-description (so the LC tree can render
+    // System > Zone > Room). Those are parent rows, NOT data zones — filter them out
+    // before generating per-zone PDF entries to avoid duplicate "ZONE DETAIL — System N"
+    // pages with 0 rooms.
+    const equipSystemIds = new Set((equipSystems ?? []).map((s: any) => s.id));
+    const realZones = zones.filter((z: any) => !equipSystemIds.has(z.id) && z.description === undefined);
+    return realZones.map((zone: any) => {
+      // Parent system can live in /systems (legacy LC VRF) OR /equipmentSystems (ES sub-zones)
+      const parent =
+        systems.find((s: any) => s.id === (zone.systemId ?? zone.id))
+        ?? (equipSystems ?? []).find((s: any) => s.id === zone.systemId);
       return {
         id: zone.id, type: 'Zone' as const, name: zone.name || `Zone ${zone.id}`,
         parentSystem: parent?.name,
@@ -439,6 +448,103 @@ const computeTotalInstalledIDU = (eqSystems: any[]): { tr: number; cfm: number }
     }
   }
   return { tr, cfm };
+};
+
+// Compute total installed plant/ODU capacity broken down by system type and Working/Standby role.
+// Only the outdoor/plant equipment is counted (not IDUs/FCUs).
+// For chillers, uses Actual TR (site-condition, OEM-confirmed) when available, else Nominal.
+// Compute a chiller zone's coil duty TR (thermal load on the coil) and design CFM
+// (dehumidified airflow), summed from the rooms assigned to the zone. These are the
+// project-specific design values the OEM needs to build the coil to — NOT the catalog
+// rating of the selected AHU/FCU model.
+//
+// Coil duty = max(summer thermal load TR, monsoon thermal load TR) across rooms.
+// Design CFM = max(summer design CFM, monsoon design CFM) across rooms.
+// Returns null if no calc data is found on the rooms (offline / not yet calculated).
+const computeZoneCoilDuty = (zone: any, flatRooms: any[]): { coilTR: number; designCFM: number } | null => {
+  const roomIds = new Set<string>(zone.roomIds ?? []);
+  if (roomIds.size === 0) return null;
+  let trSum = 0;
+  let cfmSum = 0;
+  let foundAny = false;
+  for (const r of flatRooms) {
+    if (!roomIds.has(r.id)) continue;
+    const summerTR  = Number(r._calcLoadTR ?? 0);
+    const monsoonTR = Number(r._calcMonsoonLoadTR ?? 0);
+    const thermalTR = Math.max(summerTR, monsoonTR);
+    const summerCFM  = Number(r._calcDesignCFM ?? r.designSupplyCFM ?? 0);
+    const monsoonCFM = Number(r._calcMonsoonDesignCFM ?? 0);
+    const designCFM = Math.max(summerCFM, monsoonCFM);
+    if (thermalTR > 0 || designCFM > 0) foundAny = true;
+    trSum += thermalTR;
+    cfmSum += designCFM;
+  }
+  return foundAny ? { coilTR: trSum, designCFM: cfmSum } : null;
+};
+
+// Returns a per-system summary of the diversity factor for VRF and Chiller plants.
+// Example: "VRF System 1: 75%  |  Chiller Plant: 80%". Returns '—' when no system
+// has a non-unity diversity factor.
+const formatDiversitySummary = (systems: any[]): string => {
+  const parts: string[] = [];
+  for (const sys of systems) {
+    const t = String(sys.type ?? '');
+    if (t !== 'VRF' && t !== 'Chiller') continue;
+    const df = sys.diversityFactor;
+    if (df == null || df === 1) continue;
+    parts.push(`${sys.name ?? sys.id}: ${(df * 100).toFixed(0)}%`);
+  }
+  return parts.length > 0 ? parts.join('  |  ') : '—  (all systems at 100%)';
+};
+
+const hasAnyChillerActualOverride = (systems: any[]): boolean => {
+  for (const sys of systems) {
+    if (String(sys.type ?? '') !== 'Chiller') continue;
+    const units: any[] = sys.chillerUnits ?? [];
+    if (units.some(u => u.actualTR != null && u.actualTR > 0)) return true;
+  }
+  return false;
+};
+
+const computeTotalInstalledPlant = (systems: any[]): string => {
+  let chillerWorking = 0, chillerStandby = 0;
+  let vrfTR = 0, packageTR = 0, ahuTR = 0;
+
+  for (const sys of systems) {
+    const t = String(sys.type ?? '');
+    if (t === 'Chiller') {
+      const units: any[] = sys.chillerUnits?.length
+        ? sys.chillerUnits
+        : (sys.unitSelection ? [{ ...sys.unitSelection, quantity: sys.unitSelection.quantity ?? 1 }] : []);
+      for (const u of units) {
+        const perUnit = (u.actualTR != null && u.actualTR > 0) ? u.actualTR : (u.trCapacity ?? 0);
+        const tr = perUnit * (u.quantity ?? 1);
+        if (u.role === 'standby') chillerStandby += tr; else chillerWorking += tr;
+      }
+    }
+    if (t === 'VRF') {
+      const odu = sys.oduSelection;
+      if (odu) vrfTR += odu.effectiveTR ?? ((odu.trCapacity ?? 0) * (odu.modules ?? 1));
+    }
+    if (t === 'Package' || t === 'DuctableSplit') {
+      if (sys.unitSelection) packageTR += (sys.unitSelection.trCapacity ?? 0) * (sys.unitSelection.quantity ?? 1);
+    }
+    if (t === 'AHU') {
+      const units: any[] = sys.ahuUnits?.length ? sys.ahuUnits : (sys.unitSelection ? [sys.unitSelection] : []);
+      for (const u of units) ahuTR += (u.trCapacity ?? 0) * (u.quantity ?? 1);
+    }
+  }
+
+  const parts: string[] = [];
+  if (chillerWorking > 0 || chillerStandby > 0) {
+    let s = `Chiller: ${n2(chillerWorking)} TR Working`;
+    if (chillerStandby > 0) s += ` + ${n2(chillerStandby)} TR Standby`;
+    parts.push(s);
+  }
+  if (vrfTR    > 0) parts.push(`VRF ODU: ${n2(vrfTR)} TR`);
+  if (packageTR > 0) parts.push(`Package: ${n2(packageTR)} TR`);
+  if (ahuTR    > 0) parts.push(`AHU (DX): ${n2(ahuTR)} TR`);
+  return parts.length > 0 ? parts.join('  |  ') : '—  (no plant / ODU selected)';
 };
 
 const resolveEntityDC = (entity: EntityRecord, season: SeasonProfile, project: any): DC => {
@@ -616,7 +722,7 @@ export const generatePDFReport = (
   const pageW    = doc.internal.pageSize.getWidth();
   const pageH    = doc.internal.pageSize.getHeight();
   const seasons  = getSeasonProfiles(project);
-  const entities = buildEntityRecords(project, effectiveSystems, effectiveZones, effectiveRooms);
+  const entities = buildEntityRecords(project, effectiveSystems, effectiveZones, effectiveRooms, effectiveEquipSystems);
   const includeMonsoon = seasons.some((s) => s.key === 'monsoon');
   const includeWinter  = seasons.some((s) => s.key === 'winter');
   const summer  = seasons.find((s) => s.key === 'summer')!;
@@ -773,19 +879,23 @@ export const generatePDFReport = (
   const totalIDUStr = totalIDU.tr > 0
     ? `${n2(totalIDU.tr)} TR  ·  ${n0(totalIDU.cfm)} CFM`
     : '—  (no equipment selected)';
+  const totalPlantStr = computeTotalInstalledPlant(activeEquipSystems);
+  const diversityStr = formatDiversitySummary(activeEquipSystems);
   autoTable(doc, {
     startY: y,
     body: [
-      ['Total Systems',             n0(Math.max(effectiveSystems.length, activeEquipSystems.length))],
-      ['Total Zones',               n0(effectiveZones.length)],
-      ['Total Rooms',               n0(allRooms.length)],
-      ['Peak Governing Season',     `${peakSeason.season}  (${n2(peakSeason.governingTr)} TR  ·  ${n0(peakSeason.cfm)} CFM)`],
-      ['Recommended Submission Basis', `${n2(recTR)} TR  and  ${n0(recCFM)} CFM`],
-      ['Total Installed IDU Capacity', totalIDUStr],
+      ['Total Systems',                    n0(Math.max(effectiveSystems.length, activeEquipSystems.length))],
+      ['Total Zones',                      n0(effectiveZones.length)],
+      ['Total Rooms',                      n0(allRooms.length)],
+      ['Peak Governing Season',            `${peakSeason.season}  (${n2(peakSeason.governingTr)} TR  ·  ${n0(peakSeason.cfm)} CFM)`],
+      ['Recommended Submission Basis',     `${n2(recTR)} TR  and  ${n0(recCFM)} CFM`],
+      ['Total Installed IDU / FCU Capacity', totalIDUStr],
+      ['Total Installed Plant / ODU Capacity', totalPlantStr],
+      ['Diversity Factor Applied',         diversityStr],
     ],
     theme: 'grid',
     styles:       { fontSize: 9, cellPadding: 2.8, textColor: C.ink },
-    columnStyles: { 0: { fontStyle: 'bold', fillColor: C.panel, cellWidth: 75 }, 1: {} },
+    columnStyles: { 0: { fontStyle: 'bold', fillColor: C.panel, cellWidth: 80 }, 1: {} },
     willDrawCell: (data: any) => {
       if (data.section === 'body' && data.row.index === 4) {
         data.cell.styles.fillColor = C.total;
@@ -796,10 +906,33 @@ export const generatePDFReport = (
         data.cell.styles.textColor = C.grandFg;
         data.cell.styles.fontStyle = 'bold';
       }
+      if (data.section === 'body' && data.row.index === 6) {
+        data.cell.styles.fillColor = C.grandBg;
+        data.cell.styles.textColor = C.grandFg;
+        data.cell.styles.fontStyle = 'bold';
+      }
     },
     margin: { left: PAGE.left, right: PAGE.right },
   });
   y = (doc as any).lastAutoTable.finalY + 5;
+
+  // Chiller-sizing convention note (only when at least one chiller has an Actual TR override)
+  if (hasAnyChillerActualOverride(activeEquipSystems)) {
+    doc.setFont('helvetica', 'italic');
+    doc.setFontSize(7.5);
+    doc.setTextColor(...C.subInk);
+    const noteLines = doc.splitTextToSize(
+      'Chiller plant capacity above is the minimum required Actual TR at the project\'s site conditions ' +
+      '(entering CW/air temp, LCW temp, altitude, fouling) — OEM to confirm in their technical proposal. ' +
+      'Catalog Nominal TR — rated at AHRI 550/590 standard conditions — typically runs 5–15% higher and is ' +
+      'shown in the Equipment Schedule for reference only.',
+      doc.internal.pageSize.getWidth() - PAGE.left - PAGE.right
+    );
+    doc.text(noteLines, PAGE.left, y + 2);
+    y += noteLines.length * 3.6 + 2;
+    doc.setFont('helvetica', 'normal');
+    doc.setTextColor(...C.ink);
+  }
 
   // Season summary table
   const sumHead = [
@@ -1934,13 +2067,43 @@ const renderEquipmentScheduleBody = (
     }
     if (sysType === 'Chiller') {
       const units: any[] = sys.chillerUnits?.length ? sys.chillerUnits : (sys.unitSelection ? [{ ...sys.unitSelection, quantity: sys.unitSelection.quantity ?? 1 }] : []);
-      units.forEach((u: any) => eqBody.push([sysName, 'Chiller', String(u.brand || sysBrand),
-        ms(u), '—', n2(u.trCapacity ?? 0), '—', String(u.quantity ?? 1)]));
-      if (sys.ctSelection) {
-        const ct = sys.ctSelection;
-        eqBody.push([sysName, 'Cooling Tower', String(ct.brand || sysBrand),
-          ms(ct), '—', n2(ct.trCapacity ?? 0), ct.cfmRated ? n0(ct.cfmRated) : '—', String(ct.quantity ?? 1)]);
+      let anyActualOverride = false;
+      units.forEach((u: any) => {
+        const roleLabel = u.role === 'standby' ? 'Standby' : (u.role === 'working' ? 'Working (Duty)' : '—');
+        const hasActual = u.actualTR != null && u.actualTR > 0;
+        if (hasActual) anyActualOverride = true;
+        // Show "Actual / Nominal" when overridden, else just the catalog value (which the
+        // user has confirmed equals Actual). PDF column is "TR (Actual / Nominal)".
+        const trCell = hasActual ? `${n2(u.actualTR)} / ${n2(u.trCapacity ?? 0)}` : n2(u.trCapacity ?? 0);
+        eqBody.push([sysName, 'Chiller', String(u.brand || sysBrand),
+          ms(u), roleLabel, trCell, '—', String(u.quantity ?? 1)]);
+      });
+      if (anyActualOverride) {
+        eqBody.push([{
+          content: '  TR = minimum required Actual at site conditions (OEM to confirm in technical proposal) / Catalog Nominal at AHRI 550/590. Plant sizing uses Actual.',
+          colSpan: 8,
+          styles: { fontStyle: 'italic' as const, fontSize: 7, textColor: C.subInk }
+        }]);
       }
+      // Diversity note — chiller plant sizing accounts for non-simultaneous zone peaks.
+      // Σ Connected = sum of zone AHU/FCU TR; Effective Plant Required = Σ × diversity.
+      const cdf = sys.diversityFactor;
+      if (cdf && cdf !== 1) {
+        let connTR = 0;
+        dedupedZones.forEach((z: any) => {
+          if (z.unitSelections?.length) connTR += (z.unitSelections as any[]).reduce((s: number, u: any) => s + (u.trCapacity ?? 0) * (u.quantity ?? 1), 0);
+          else if (z.selection) connTR += (z.selection.trCapacity ?? 0) * (z.selection.quantity ?? 1);
+        });
+        const note = connTR > 0
+          ? `  Diversity Factor: ${(cdf * 100).toFixed(0)}%  ·  Σ Connected AHU / FCU: ${n2(connTR)} TR  →  Effective Plant Required: ${n2(connTR * cdf)} TR`
+          : `  Diversity Factor: ${(cdf * 100).toFixed(0)}%  (applied to Σ zone peak loads for plant sizing)`;
+        eqBody.push([{ content: note, colSpan: 8, styles: { fontStyle: 'italic' as const, fontSize: 7, textColor: C.subInk } }]);
+      }
+      const ctUnits: any[] = sys.ctUnits?.length ? sys.ctUnits : (sys.ctSelection ? [{ ...sys.ctSelection, quantity: sys.ctSelection.quantity ?? 1 }] : []);
+      ctUnits.forEach((ct: any) => {
+        eqBody.push([sysName, 'Cooling Tower', String(ct.brand || sysBrand),
+          ms(ct), '—', n2(ct.trCapacity ?? 0), '—', String(ct.quantity ?? 1)]);
+      });
     }
     if (sysType === 'AHU' && sys.unitSelection) {
       const u = sys.unitSelection;
@@ -1966,18 +2129,54 @@ const renderEquipmentScheduleBody = (
     }
 
     // Zone-level IDUs
+    let chillerCoilDutyShown = false;
     dedupedZones.forEach((zone: any) => {
       const zoneName = String(zone.name || `Zone ${zone.id}`);
       const unitSels = (zone.unitSelections ?? []) as any[];
+      // For chiller AHU/FCU rows: prefer Coil Duty (thermal load) and Design CFM
+      // (dehumidified airflow) from room calcs over the catalog rating of the picked
+      // model. Custom AHUs are built to the project's duty, not catalog-rated TR.
+      const zoneDuty = sysType === 'Chiller' ? computeZoneCoilDuty(zone, flatRooms) : null;
+      if (zoneDuty) chillerCoilDutyShown = true;
       if (unitSels.length > 0) {
+        // Multi-different-model zone: if we have a zone duty, split it equally across
+        // selected models (we don't know the manual split). Single-model multi-qty uses
+        // full zone duty divided by qty per unit.
+        const totalQty = unitSels.reduce((s, u) => s + (u.quantity ?? 1), 0);
         unitSels.forEach((u: any) => {
           const lbl = sysType === 'Chiller' ? 'FCU' : sysType === 'AHU' ? 'AHU-DX' : 'IDU';
-          eqBody.push([zoneName, lbl, String(u.brand || sysBrand), ms(u), String(u.subType || '—'), n2(u.trCapacity ?? 0), n0(u.cfmRated ?? 0), String(u.quantity ?? 1)]);
+          const qty = u.quantity ?? 1;
+          if (zoneDuty && totalQty > 0) {
+            const trPer = zoneDuty.coilTR * (qty / totalQty) / qty;
+            const cfmPer = zoneDuty.designCFM * (qty / totalQty) / qty;
+            eqBody.push([zoneName, lbl, String(u.brand || sysBrand), ms(u), String(u.subType || '—'), n2(trPer), n0(cfmPer), String(qty)]);
+          } else {
+            eqBody.push([zoneName, lbl, String(u.brand || sysBrand), ms(u), String(u.subType || '—'), n2(u.trCapacity ?? 0), n0(u.cfmRated ?? 0), String(qty)]);
+          }
         });
       } else if (zone.selection) {
         const sel = zone.selection;
         const lbl = sysType === 'Chiller' ? 'FCU / AHU' : sysType === 'AHU' ? 'AHU-DX' : 'IDU';
-        eqBody.push([zoneName, lbl, String(sel.brand || sysBrand), ms(sel), String(sel.subType || '—'), n2(sel.trCapacity ?? 0), n0(sel.cfmRated ?? 0), String(sel.quantity ?? 1)]);
+        const qty = sel.quantity ?? 1;
+        if (zoneDuty && qty > 0) {
+          // Split zone duty across qty same-spec AHUs
+          const trPer = zoneDuty.coilTR / qty;
+          const cfmPer = zoneDuty.designCFM / qty;
+          eqBody.push([zoneName, lbl, String(sel.brand || sysBrand), ms(sel), String(sel.subType || '—'), n2(trPer), n0(cfmPer), String(qty)]);
+        } else {
+          eqBody.push([zoneName, lbl, String(sel.brand || sysBrand), ms(sel), String(sel.subType || '—'), n2(sel.trCapacity ?? 0), n0(sel.cfmRated ?? 0), String(qty)]);
+        }
+        // Multi-AHU same-spec zone: annotate so engineers reading the BOM know it's
+        // not a typo and that each AHU has its own duct.
+        if (qty > 1) {
+          const totalTR  = zoneDuty ? zoneDuty.coilTR    : (sel.trCapacity ?? 0) * qty;
+          const totalCFM = zoneDuty ? zoneDuty.designCFM : (sel.cfmRated ?? 0) * qty;
+          eqBody.push([{
+            content: `  ↳ Multi-AHU zone — ${qty} × same-spec, each with own dedicated duct. Total: ${n2(totalTR)} TR · ${n0(totalCFM)} CFM`,
+            colSpan: 8,
+            styles: { fontStyle: 'italic' as const, fontSize: 6.5, textColor: C.subInk, fillColor: C.panel as [number,number,number] },
+          }]);
+        }
       }
     });
 
@@ -2003,6 +2202,17 @@ const renderEquipmentScheduleBody = (
       Object.entries(sys.roomSelections as Record<string, any>).forEach(([rId, idus]: [string, any]) => {
         (idus as any[]).forEach((u: any) => eqBody.push([String(rId), 'Split IDU', String(u.brand || sysBrand), ms(u), String(u.subType || '—'), n2(u.trCapacity ?? 0), n0(u.cfmRated ?? 0), String(u.quantity ?? 1)]));
       });
+    }
+    // Chiller AHU/FCU column-meaning note. When the row values come from room calcs
+    // (coil duty + design CFM), the 400 CFM/TR rule does NOT apply — that rule is a
+    // packaged-DX convention. Spell it out so OEMs don't build an oversized coil to
+    // hit a nominal ratio.
+    if (sysType === 'Chiller' && chillerCoilDutyShown) {
+      eqBody.push([{
+        content: '  AHU / FCU rows: TR = Coil Duty (project thermal load, not catalog rating)  ·  CFM = Design dehumidified airflow. The 400 CFM/TR rule does not apply to chiller-fed AHUs.',
+        colSpan: 8,
+        styles: { fontStyle: 'italic' as const, fontSize: 7, textColor: C.subInk }
+      }]);
     }
     // Skip systems with no equipment — avoids ghost/placeholder system blocks in the PDF
     if (eqBody.length === 0) continue;
@@ -2041,9 +2251,12 @@ const renderEquipmentScheduleBody = (
     });
     if (ahuZones.length > 0) {
       const ahuRows: any[][] = [];
+      let hasMultiAhuZone = false;
       ahuZones.forEach((zone: any) => {
         const cfg: any = { ...AHU_DEFAULTS, ...(sys as any).ahuConfig, ...zone.ahuConfig };
         const zoneName = String(zone.name || `Zone ${zone.id}`);
+        const ahuQty = Number(zone.selection?.quantity ?? 1) || 1;
+        if (ahuQty > 1) hasMultiAhuZone = true;
         const fanWheel = cfg.fanCurve === 'forward-curved' ? 'Fwd Curved' : cfg.fanCurve === 'backward-curved' ? 'Bwd Curved' : '—';
         const drive    = cfg.fanDrive === 'plug-fan' ? 'Plug Fan' : cfg.fanDrive === 'belt-driven' ? 'Belt' : '—';
         const esp      = cfg.extStaticPa != null ? `${cfg.extStaticPa} Pa` : '—';
@@ -2055,29 +2268,53 @@ const renderEquipmentScheduleBody = (
         if (cfg.filters?.hepa) filters.push(String(cfg.hepaFilterGrade || 'HEPA'));
         const filtration = filters.length ? filters.join(' + ') : 'None';
         const fahu: any = zone.fahu ?? {};
-        const humidifier = fahu.hasHumidifier ? `${fahu.humidifierKgHr ?? '—'} kg/hr` : '—';
-        ahuRows.push([zoneName, fanWheel, drive, esp, mixBox, coilRows, filtration, humidifier]);
+        // BOM-correct: each AHU has its own physical accessories. If zone uses qty=N AHUs,
+        // the total is N × the per-unit value.
+        const heater = fahu.hasElectricHeater
+          ? (ahuQty > 1
+              ? `${ahuQty} × ${fahu.electricHeaterKW ?? '—'} kW`
+              : `${fahu.electricHeaterKW ?? '—'} kW`)
+          : '—';
+        const humidifier = fahu.hasHumidifier
+          ? (ahuQty > 1
+              ? `${ahuQty} × ${fahu.humidifierKgHr ?? '—'} kg/hr`
+              : `${fahu.humidifierKgHr ?? '—'} kg/hr`)
+          : '—';
+        const qtyLabel = ahuQty > 1 ? `${ahuQty}×` : '1';
+        ahuRows.push([zoneName, qtyLabel, fanWheel, drive, esp, mixBox, coilRows, filtration, heater, humidifier]);
       });
       if (ahuRows.length > 0) {
-        y = ensureSpace(doc, y, 12 + ahuRows.length * 6, project);
+        y = ensureSpace(doc, y, 14 + ahuRows.length * 6 + (hasMultiAhuZone ? 6 : 0), project);
         doc.setFont('helvetica', 'bold'); doc.setFontSize(7); doc.setTextColor(...C.subInk);
         doc.text('AHU CONFIGURATION', PAGE.left, y);
         y += 3;
         autoTable(doc, {
           startY: y,
-          head: [['Zone', 'Fan Wheel', 'Drive', 'ESP', 'Mixing Box', 'Coil', 'Filtration', 'Humidifier']],
+          head: [['Zone', 'Qty', 'Fan Wheel', 'Drive', 'ESP', 'Mixing Box', 'Coil', 'Filtration', 'Heater', 'Humidifier']],
           body: ahuRows, theme: 'grid',
           styles:     { fontSize: 7, cellPadding: 1.8, textColor: C.ink },
           headStyles: { fillColor: C.panelDark as [number,number,number], textColor: C.ink as [number,number,number], fontStyle: 'bold', fontSize: 6.5 },
           columnStyles: {
-            0: { cellWidth: 28, fontStyle: 'bold' }, 1: { cellWidth: 18 }, 2: { cellWidth: 14 },
-            3: { cellWidth: 14, halign: 'right' as const }, 4: { cellWidth: 16, halign: 'center' as const },
-            5: { cellWidth: 24 }, 6: { cellWidth: 'auto' as const },
-            7: { cellWidth: 18, halign: 'right' as const },
+            0: { cellWidth: 26, fontStyle: 'bold' },
+            1: { cellWidth: 10, halign: 'center' as const, fontStyle: 'bold' },
+            2: { cellWidth: 16 }, 3: { cellWidth: 12 },
+            4: { cellWidth: 12, halign: 'right' as const }, 5: { cellWidth: 14, halign: 'center' as const },
+            6: { cellWidth: 22 }, 7: { cellWidth: 'auto' as const },
+            8: { cellWidth: 16, halign: 'right' as const },
+            9: { cellWidth: 18, halign: 'right' as const },
           },
           margin: { left: PAGE.left, right: PAGE.right },
         });
-        y = (doc as any).lastAutoTable.finalY + 6;
+        y = (doc as any).lastAutoTable.finalY + 2;
+        if (hasMultiAhuZone) {
+          doc.setFont('helvetica', 'italic'); doc.setFontSize(6.5); doc.setTextColor(...C.subInk);
+          doc.text(
+            'Note: Multi-AHU zones use same-spec AHUs with their own dedicated duct each. Accessories listed as "N × value" represent the per-zone total (each AHU has its own physical heater/humidifier).',
+            PAGE.left, y + 2, { maxWidth: doc.internal.pageSize.getWidth() - PAGE.left - PAGE.right },
+          );
+          y += 6;
+        }
+        y += 4;
       }
     }
   }
@@ -2132,6 +2369,23 @@ export const generateEquipmentSchedulePDF = (
   // ── Section banner ────────────────────────────────────────────────────────
   y = sectionBanner(doc, 'INSTALLED EQUIPMENT SCHEDULE', y, C);
   y += 4;
+
+  // Chiller-sizing convention note (only when at least one chiller has an Actual TR override)
+  if (hasAnyChillerActualOverride(effectiveEquipSystems)) {
+    doc.setFont('helvetica', 'italic');
+    doc.setFontSize(7.5);
+    doc.setTextColor(...C.subInk);
+    const noteLines = doc.splitTextToSize(
+      'Chiller TR column reads as "Actual / Nominal". Actual = our minimum required capacity at this project\'s site ' +
+      'conditions (entering CW/air temp, LCW temp, altitude, fouling) — OEM to confirm in technical proposal — and ' +
+      'governs plant sizing. Nominal = catalog rating at AHRI 550/590 standard conditions, shown for reference only.',
+      pageW - PAGE.left - PAGE.right
+    );
+    doc.text(noteLines, PAGE.left, y);
+    y += noteLines.length * 3.6 + 3;
+    doc.setFont('helvetica', 'normal');
+    doc.setTextColor(...C.ink);
+  }
 
   renderEquipmentScheduleBody(doc, effectiveEquipSystems, flatRooms, project, C, y);
 

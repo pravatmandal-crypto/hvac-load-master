@@ -61,7 +61,7 @@ export default function MaterialTakeoff() {
                     <TableCell className="font-medium">{item.name}</TableCell>
                     <TableCell>
                       <Input 
-                        type="number" 
+                        type="text" inputMode="decimal" 
                         value={item.qty} 
                         className="h-8 w-20"
                         onChange={(e) => {

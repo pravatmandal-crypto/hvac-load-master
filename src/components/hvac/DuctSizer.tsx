@@ -158,7 +158,7 @@ export default function DuctSizer() {
               <div className="space-y-1">
                 <Label className="text-xs font-medium text-gray-600 dark:text-slate-400">Airflow (CFM)</Label>
                 <Input
-                  type="number"
+                  type="text" inputMode="decimal"
                   value={cfm}
                   onChange={(e) => setCfm(Math.max(1, Number(e.target.value)))}
                   placeholder="e.g. 1000"
@@ -168,7 +168,7 @@ export default function DuctSizer() {
               <div className="space-y-1">
                 <Label className="text-xs font-medium text-gray-600 dark:text-slate-400">Friction Loss (in.wg/100ft)</Label>
                 <Input
-                  type="number"
+                  type="text" inputMode="decimal"
                   step="0.01"
                   value={friction}
                   onChange={(e) => setFriction(Math.max(0.01, Number(e.target.value)))}
@@ -180,7 +180,7 @@ export default function DuctSizer() {
               <div className="space-y-1">
                 <Label className="text-xs font-medium text-gray-600 dark:text-slate-400">Max Velocity (FPM)</Label>
                 <Input
-                  type="number"
+                  type="text" inputMode="decimal"
                   step="50"
                   value={maxVelocity}
                   onChange={(e) => setMaxVelocity(Math.max(100, Number(e.target.value)))}
@@ -192,7 +192,7 @@ export default function DuctSizer() {
               <div className="space-y-1">
                 <Label className="text-xs font-medium text-gray-600 dark:text-slate-400">Min Rect. Height (in)</Label>
                 <Input
-                  type="number"
+                  type="text" inputMode="decimal"
                   step="1"
                   min="0"
                   value={minHeight || ''}

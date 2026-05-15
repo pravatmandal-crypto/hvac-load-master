@@ -215,12 +215,26 @@ export async function calculateAndPersistRoom(
     heating,
     psychrometrics: { outdoor: outdoorPsych, indoor: indoorPsych },
     coil,
-    moisture: {
-      rate: Math.abs(coilLatent / 1050),
-      action: coilLatent > 0 ? 'Dehumidify' : coilLatent < 0 ? 'Humidify' : 'None',
-      unit: 'lbs/hr',
-      loadBTU: coilLatent,
-    },
+    // Moisture analysis at the cooling coil. For climates with a separate monsoon
+    // design condition, monsoon latent typically exceeds summer (high outdoor W) —
+    // we report the GOVERNING season for equipment / humidifier-dehumidifier sizing
+    // and keep summer/monsoon breakdown for the PDF and UI.
+    moisture: (() => {
+      const summerLbHr   = Math.abs(coilLatent) / 1050;
+      const monsoonLbHr  = hasMonsoon ? Math.abs(monsoonCoilLat) / 1050 : 0;
+      const monsoonGoverns = hasMonsoon && monsoonLbHr > summerLbHr;
+      const govLatent = monsoonGoverns ? monsoonCoilLat : coilLatent;
+      const govLbHr   = monsoonGoverns ? monsoonLbHr   : summerLbHr;
+      return {
+        rate: govLbHr,
+        action: govLatent > 0 ? 'Dehumidify' : govLatent < 0 ? 'Humidify' : 'None',
+        unit: 'lbs/hr',
+        loadBTU: govLatent,
+        summerRate: parseFloat(summerLbHr.toFixed(2)),
+        monsoonRate: parseFloat(monsoonLbHr.toFixed(2)),
+        governs: monsoonGoverns ? 'monsoon' : 'summer',
+      };
+    })(),
     reheat,
     totals: { ersh, erlh, erh, coilSensible, coilLatent, oaSensible, oaLatent, oaTotal, grandTotal, grandTotalTR, rshf },
   };

@@ -41,6 +41,7 @@ import {
   DialogFooter,
 } from '../ui/dialog';
 import { Input } from '../ui/input';
+import { NumericInput } from '../ui/numeric-input';
 import { Label } from '../ui/label';
 import {
   Select,
@@ -170,11 +171,9 @@ function NumField({
   return (
     <div className="flex flex-col gap-1">
       <Label className="text-xs text-gray-500">{label}</Label>
-      <Input
-        type="number"
-        step={step}
+      <NumericInput
         value={value}
-        onChange={(e) => onChange(parseFloat(e.target.value) || 0)}
+        onChange={(n) => onChange(n ?? 0)}
         className="h-8 text-sm"
       />
     </div>

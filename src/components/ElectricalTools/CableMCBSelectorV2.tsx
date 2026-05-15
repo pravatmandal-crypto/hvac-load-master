@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "../ui/card";
 import { Input } from "../ui/input";
+import { NumericInput } from "../ui/numeric-input";
 import { Label } from "../ui/label";
 import { Button } from "../ui/button";
 import {
@@ -642,24 +643,20 @@ export function CableMCBSelectorV2() {
                 <p className="text-xs font-semibold text-slate-600 dark:text-slate-400 uppercase tracking-wide">Load — enter either</p>
                 <div className="space-y-1">
                   <Label className="text-xs font-medium">Rated Current (A)</Label>
-                  <Input
-                    type="number"
-                    min="0.1"
-                    step="0.1"
+                  <NumericInput
+                    min={0}
                     value={loadCurrent}
-                    onChange={(e) => handleCurrentChange(parseFloat(e.target.value) || 0)}
+                    onChange={(n) => handleCurrentChange(n ?? 0)}
                     placeholder="e.g. 32 A"
                     className="text-sm font-mono"
                   />
                 </div>
                 <div className="space-y-1">
                   <Label className="text-xs font-medium">Rated Power (kW)</Label>
-                  <Input
-                    type="number"
-                    min="0.01"
-                    step="0.1"
+                  <NumericInput
+                    min={0}
                     value={powerKW}
-                    onChange={(e) => handleKWChange(parseFloat(e.target.value) || 0)}
+                    onChange={(n) => handleKWChange(n ?? 0)}
                     placeholder="e.g. 22 kW"
                     className="text-sm font-mono"
                   />
@@ -670,12 +667,10 @@ export function CableMCBSelectorV2() {
               {/* Cable Length */}
               <div className="space-y-1">
                 <Label className="text-xs font-medium">Cable Length (m)</Label>
-                <Input
-                  type="number"
-                  min="1"
-                  step="1"
+                <NumericInput
+                  min={1}
                   value={cableLength}
-                  onChange={(e) => setCableLength(parseFloat(e.target.value) || 1)}
+                  onChange={(n) => setCableLength(n ?? 1)}
                   placeholder="e.g. 50 m (motor to panel)"
                   className="text-sm font-mono"
                 />
@@ -684,13 +679,10 @@ export function CableMCBSelectorV2() {
               {/* Ambient Temperature */}
               <div className="space-y-1">
                 <Label className="text-xs font-medium">Ambient Temperature (°C)</Label>
-                <Input
-                  type="number"
-                  min="10"
-                  max="70"
-                  step="1"
+                <NumericInput
+                  integer min={10} max={70}
                   value={ambientTemp}
-                  onChange={(e) => setAmbientTemp(parseInt(e.target.value) || 40)}
+                  onChange={(n) => setAmbientTemp(n ?? 40)}
                   placeholder="e.g. 40°C (IS 3961 reference)"
                   className="text-sm font-mono"
                 />
@@ -736,12 +728,10 @@ export function CableMCBSelectorV2() {
               {/* Bundled Cables */}
               <div className="space-y-1">
                 <Label className="text-xs font-medium">Cables in Conduit / Tray</Label>
-                <Input
-                  type="number"
-                  min="1"
-                  max="10"
+                <NumericInput
+                  integer min={1} max={10}
                   value={bundledCables}
-                  onChange={(e) => setBundledCables(Math.max(1, parseInt(e.target.value) || 1))}
+                  onChange={(n) => setBundledCables(Math.max(1, n ?? 1))}
                   placeholder="1"
                   className="text-sm font-mono"
                 />
@@ -751,13 +741,10 @@ export function CableMCBSelectorV2() {
               {/* Voltage Drop Limit */}
               <div className="space-y-1">
                 <Label className="text-xs font-medium">Max Voltage Drop (%)</Label>
-                <Input
-                  type="number"
-                  min="1"
-                  max="10"
-                  step="0.5"
+                <NumericInput
+                  min={1} max={10}
                   value={voltageDropLimit}
-                  onChange={(e) => setVoltageDropLimit(parseFloat(e.target.value) || 3)}
+                  onChange={(n) => setVoltageDropLimit(n ?? 3)}
                   placeholder="3% (IS 732 limit)"
                   className="text-sm font-mono"
                 />

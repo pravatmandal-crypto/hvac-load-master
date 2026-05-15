@@ -643,6 +643,76 @@ Q_vl × BF          ─┘
             large. Never skip the cfmTR check — undersizing supply airflow degrades dehumidification and causes
             occupant discomfort even if the sensible cooling capacity appears adequate.
           </div>
+
+          <div className="p-3 bg-sky-50 border border-sky-200 rounded-lg text-[11px] text-sky-900 space-y-1.5">
+            <p><strong>Chiller AHU — Coil Duty vs Unit Size, and why 400 CFM/TR doesn't apply:</strong></p>
+            <p>
+              The <code>governingTR = max(loadTR, cfmTR)</code> rule (where <code>cfmTR = DSCFM / 400</code>) is correct for
+              <em> room-level equipment selection</em> — it ensures whichever unit you pick is big enough to push the dehumidified
+              airflow. It is a <em>Carrier rule of thumb</em> for packaged DX equipment at AHRI conditions (SHR ≈ 0.78).
+            </p>
+            <p>
+              For a <strong>chiller-fed custom AHU</strong>, the 400 CFM/TR rule does <strong>not</strong> apply. Two independent
+              numbers drive the design:
+            </p>
+            <ul className="list-disc list-inside pl-1 space-y-0.5">
+              <li>
+                <strong>Coil Duty (TR)</strong> = the project's <em>thermal load</em> (sensible + latent) the chilled-water
+                coil must remove. This drives coil rows / FPI, CHW flow rate, and the chiller plant's share.
+              </li>
+              <li>
+                <strong>Design CFM</strong> = the <em>dehumidified airflow</em> needed at the room ADP to hit space SHR.
+                This drives the AHU fan, motor, casing, and duct sizing.
+              </li>
+            </ul>
+            <p>
+              For chiller AHUs serving high-latent or high-OA rooms, <code>Design CFM / Coil Duty</code> is typically
+              <strong> 500 – 1000 CFM/TR</strong> — well above 400. That is engineering-correct, not a sizing error.
+              If you instead force the AHU coil to 400 CFM/TR, the OEM will quote an <em>oversized coil</em> — destroying
+              SHR control, causing hunting at part-load, and increasing freeze risk.
+            </p>
+            <p>
+              <strong>What the schedule shows:</strong> for Chiller AHU/FCU rows the Equipment Schedule prints Coil Duty
+              (from room thermal load) and Design CFM (from room dehumidified CFM) — not the catalog-rated TR/CFM of the
+              selected model. The chiller plant is sized from <code>Σ Coil Duty × Diversity</code>, which is why plant TR
+              sums smaller than the AHU CFM-TR sum when CFM governs.
+            </p>
+          </div>
+
+          <div className="p-3 bg-indigo-50 border border-indigo-200 rounded-lg text-[11px] text-indigo-900 space-y-1.5">
+            <p><strong>Chiller Capacity — Actual TR vs Nominal TR (AHRI):</strong></p>
+            <p>
+              A chiller has two capacity numbers for the same machine — one from the catalog, one for the project:
+            </p>
+            <ul className="list-disc list-inside pl-1 space-y-0.5">
+              <li>
+                <strong>Nominal TR</strong> — catalog rating at <em>AHRI Standard 550/590</em> reference conditions:
+                44 °F leaving chilled water, 54 °F entering chilled water; 85 °F EWT / 95 °F LWT condenser water
+                (water-cooled) or 95 °F ambient (air-cooled), 0.0001 hr·ft²·°F/Btu fouling. Used for catalog
+                comparison and IPLV / NPLV ratings — not for sizing.
+              </li>
+              <li>
+                <strong>Actual TR</strong> — <em>our</em> minimum required capacity at this project's site conditions:
+                actual entering CW or ambient temperature, design LCW temperature, altitude, glycol concentration,
+                fouling factor. We issue this as the duty point in the tender / technical specification;{' '}
+                <strong>the OEM must confirm in their technical proposal</strong> (running their selection software
+                against the site conditions) that the offered model can meet or exceed this requirement.
+              </li>
+            </ul>
+            <p>
+              <strong>Plant sizing must be done on Actual TR, not Nominal.</strong> In hot/humid climates Actual is
+              typically 5 – 15 % lower than Nominal (high condenser EWT or high ambient pulls the compressor envelope
+              down); in cooler climates it can be slightly higher. Sizing on Nominal in a 110 °F summer ambient is
+              a common cause of plants that cannot hold setpoint at design peak.
+            </p>
+            <p>
+              In this tool each chiller unit carries both numbers. <strong>Nom. TR</strong> is the catalog value
+              from the library; <strong>Act. TR</strong> is the minimum required Actual you enter for this project
+              (revise once the OEM proposal arrives if their confirmed number is higher). Working / Standby roll-ups
+              and the "Total Installed Plant" line in the PDF use Actual when entered, and silently fall back to
+              Nominal when blank.
+            </p>
+          </div>
         </CardContent>
       </Card>
 

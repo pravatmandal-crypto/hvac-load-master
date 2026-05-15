@@ -9,6 +9,7 @@ import {
 import { Card, CardContent } from '../ui/card';
 import { Button } from '../ui/button';
 import { Input } from '../ui/input';
+import { NumericInput } from '../ui/numeric-input';
 import { Label } from '../ui/label';
 import { Select, SelectContent, SelectGroup, SelectItem, SelectLabel, SelectSeparator, SelectTrigger, SelectValue } from '../ui/select';
 import { Select as SelectPrimitive } from '@base-ui/react/select';
@@ -143,16 +144,90 @@ function systemStatusInfo(sys: EquipmentSystem, rooms: any[]) {
   return { label: 'Complete', color: 'text-emerald-600' };
 }
 
+// ─── Humidifier sizing helper ─────────────────────────────────────────────────
+// Computes the suggested FAHU/AHU humidifier capacity (kg/hr) for a zone, based on
+// real psychrometrics: mass-flow of OUTDOOR AIR × humidity-ratio lift from winter
+// outdoor to inside winter design conditions.
+//
+//   ṁ_water (lb/hr) = ṁ_air (lb/hr) × ΔW (lb/lb)
+//                   = OA_CFM × 4.5 × (W_in - W_out)        (ASHRAE 4.5 = 60·0.075)
+//   ṁ_water (kg/hr) = lb/hr × 0.4536
+//   Final         = ṁ_water × (1 + safety/100)             (ASHRAE HVAC Sys & Eq Ch.22:
+//                                                            10–15 % for steam dispersion
+//                                                            losses, filter bypass, duct
+//                                                            absorption)
+//
+// OA_CFM (not full supply CFM) is the right denominator — the humidifier only sees
+// the outdoor-air fraction; room return air is already at indoor humidity. For a
+// 100%-OA FAHU these collapse to the same number. Returns 0 if winter design
+// conditions are missing or outdoor is already wetter than indoors (no humidification).
+const DEFAULT_HUMIDIFIER_SAFETY_PCT = 10; // ASHRAE HVAC S&E Ch.22 typical range 10–15 %
+type HumidifierSizingResult = {
+  kgHr: number;            // final suggestion incl. safety
+  baseKgHr: number;        // raw psychrometric kg/hr (no safety)
+  oaCFM: number;           // OA mass flow basis
+  deltaW_gPerKg: number;   // humidity-ratio lift (g water / kg dry air)
+  safetyPct: number;       // % safety applied
+};
+function calcSuggestedHumidifier(zoneRooms: any[], project: any): HumidifierSizingResult {
+  const empty: HumidifierSizingResult = { kgHr: 0, baseKgHr: 0, oaCFM: 0, deltaW_gPerKg: 0, safetyPct: 0 };
+  if (!zoneRooms || zoneRooms.length === 0) return empty;
+  const altitude = Number(project?.altitude ?? project?.data?.altitude) || 0;
+  const winterT   = Number(project?.winterDesignTemp     ?? project?.data?.winterDesignTemp);
+  const winterRH  = Number(project?.winterDesignHumidity ?? project?.data?.winterDesignHumidity);
+  const insideWT  = Number(project?.insideWinterTemp     ?? project?.data?.insideWinterTemp);
+  const insideWRH = Number(project?.insideWinterHumidity ?? project?.data?.insideWinterHumidity);
+  if (![winterT, winterRH, insideWT, insideWRH].every(Number.isFinite)) return empty;
+
+  const Wout = calculatePsychrometrics(winterT, winterRH, altitude).humidityRatio; // lb/lb
+  const Win  = calculatePsychrometrics(insideWT, insideWRH, altitude).humidityRatio; // lb/lb
+  const deltaW = Math.max(0, Win - Wout);
+  if (deltaW <= 0) return empty;
+
+  let oaCFM = 0;
+  for (const r of zoneRooms) {
+    const vol = calculateRoomVolume(r);
+    oaCFM += vol * (Number(r.facph) || 0) / 60;
+  }
+  if (oaCFM <= 0) return empty;
+
+  const lbHr = oaCFM * 4.5 * deltaW;
+  const baseKgHr = lbHr * 0.4536;
+  const rawSafety = Number(project?.humidifierSafetyPercent ?? project?.data?.humidifierSafetyPercent);
+  const safetyPct = Number.isFinite(rawSafety) && rawSafety >= 0 && rawSafety <= 50
+    ? rawSafety : DEFAULT_HUMIDIFIER_SAFETY_PCT;
+  const kgHr = baseKgHr * (1 + safetyPct / 100);
+
+  return {
+    kgHr: parseFloat(kgHr.toFixed(1)),
+    baseKgHr: parseFloat(baseKgHr.toFixed(1)),
+    oaCFM: parseFloat(oaCFM.toFixed(0)),
+    deltaW_gPerKg: parseFloat((deltaW * 1000).toFixed(2)),
+    safetyPct,
+  };
+}
+
+// Backwards-compatible wrapper returning just the kg/hr number
+function calcSuggestedHumidifierKgHr(zoneRooms: any[], project: any): number {
+  return calcSuggestedHumidifier(zoneRooms, project).kgHr;
+}
+
 // ─── IDU Picker Dialog ────────────────────────────────────────────────────────
 
 function IDUPickerDialog({
   open, onClose, roomName, requiredTR, designCFM, lockedBrand, onSelect,
+  systemType, coilDutyTR,
 }: {
   open: boolean; onClose: () => void;
   roomName: string; requiredTR: number; designCFM: number;
   lockedBrand: string | null;
   onSelect: (sel: IDUSelection) => void;
+  // Chiller AHU selection: drop the 400 CFM/TR-based "Required TR" framing and show
+  // Coil Duty (thermal load) + Design CFM as two independent sizing properties.
+  systemType?: string;
+  coilDutyTR?: number;
 }) {
+  const isChillerPicker = String(systemType ?? '').toLowerCase() === 'chiller';
   const [search, setSearch] = useState('');
   const [filterBrand, setFilterBrand] = useState(lockedBrand ?? 'all');
   const [filterType, setFilterType] = useState('VRF-IDU');
@@ -277,13 +352,35 @@ function IDUPickerDialog({
             Select IDU — <span className="text-blue-600 dark:text-blue-400">{roomName}</span>
             {lockedBrand && <Badge variant="outline" className="gap-1 text-sm text-amber-700 dark:text-amber-300 border-amber-300 dark:border-amber-700 bg-amber-50 dark:bg-amber-950/20"><Lock className="w-3 h-3" />{lockedBrand}</Badge>}
           </DialogTitle>
-          {requiredTR > 0 && (
-            <div className="mt-3 flex flex-wrap gap-4 p-3 rounded-lg bg-violet-50 dark:bg-violet-950/20 border border-violet-200 dark:border-violet-800 text-sm">
-              <Info className="w-4 h-4 text-violet-500 mt-0.5 shrink-0" />
-              <span className="text-violet-700 dark:text-violet-300">Required: <strong>{requiredTR.toFixed(2)} TR</strong></span>
-              {designCFM > 0 && <span className="text-violet-700 dark:text-violet-300">Design CFM: <strong>{Math.round(designCFM).toLocaleString()}</strong></span>}
-              <span className="text-slate-400 dark:text-slate-500 italic">Fits: {requiredTR.toFixed(2)}–{(requiredTR * 1.3).toFixed(2)} TR</span>
-            </div>
+          {isChillerPicker ? (
+            ((coilDutyTR ?? 0) > 0 || designCFM > 0) && (
+              <div className="mt-3 flex items-start gap-3 p-3 rounded-lg bg-indigo-50 dark:bg-indigo-950/20 border border-indigo-200 dark:border-indigo-800 text-sm">
+                <Info className="w-4 h-4 text-indigo-500 mt-0.5 shrink-0" />
+                <div className="flex flex-col gap-1">
+                  <div className="flex flex-wrap gap-4">
+                    {(coilDutyTR ?? 0) > 0 && (
+                      <span className="text-indigo-700 dark:text-indigo-300">Coil Duty: <strong>{(coilDutyTR ?? 0).toFixed(2)} TR</strong></span>
+                    )}
+                    {designCFM > 0 && (
+                      <span className="text-indigo-700 dark:text-indigo-300">Design CFM: <strong>{Math.round(designCFM).toLocaleString()}</strong></span>
+                    )}
+                  </div>
+                  <span className="text-[11.5px] text-slate-500 dark:text-slate-400 italic leading-snug">
+                    Chiller AHU — Coil Duty (thermal load) and Design CFM (dehumidified airflow) are independent;
+                    the 400 CFM/TR rule does not apply. OEM builds the coil to the duty you specify.
+                  </span>
+                </div>
+              </div>
+            )
+          ) : (
+            requiredTR > 0 && (
+              <div className="mt-3 flex flex-wrap gap-4 p-3 rounded-lg bg-violet-50 dark:bg-violet-950/20 border border-violet-200 dark:border-violet-800 text-sm">
+                <Info className="w-4 h-4 text-violet-500 mt-0.5 shrink-0" />
+                <span className="text-violet-700 dark:text-violet-300">Required: <strong>{requiredTR.toFixed(2)} TR</strong></span>
+                {designCFM > 0 && <span className="text-violet-700 dark:text-violet-300">Design CFM: <strong>{Math.round(designCFM).toLocaleString()}</strong></span>}
+                <span className="text-slate-400 dark:text-slate-500 italic">Fits: {requiredTR.toFixed(2)}–{(requiredTR * 1.3).toFixed(2)} TR</span>
+              </div>
+            )
           )}
           <div className="mt-3 flex flex-wrap gap-2">
             <div className="relative flex-1 min-w-[180px]">
@@ -413,15 +510,15 @@ function IDUPickerDialog({
                 </div>
                 <div className="space-y-1">
                   <label className="text-sm font-semibold text-slate-600 dark:text-slate-400">Capacity (TR) *</label>
-                  <Input type="number" min="0" step="0.5" className="h-8 text-xs" placeholder="e.g. 1.5" value={customTR} onChange={e => setCustomTR(e.target.value)} />
+                  <Input type="text" inputMode="decimal" min="0" step="0.5" className="h-8 text-xs" placeholder="e.g. 1.5" value={customTR} onChange={e => setCustomTR(e.target.value)} />
                 </div>
                 <div className="space-y-1">
                   <label className="text-sm font-semibold text-slate-600 dark:text-slate-400">Airflow (CFM)</label>
-                  <Input type="number" min="0" className="h-8 text-xs" placeholder="optional" value={customCFM} onChange={e => setCustomCFM(e.target.value)} />
+                  <Input type="text" inputMode="decimal" min="0" className="h-8 text-xs" placeholder="optional" value={customCFM} onChange={e => setCustomCFM(e.target.value)} />
                 </div>
                 <div className="space-y-1">
                   <label className="text-sm font-semibold text-slate-600 dark:text-slate-400">Static (Pa)</label>
-                  <Input type="number" min="0" className="h-8 text-xs" placeholder="AHU only" value={customStaticPa} onChange={e => setCustomStaticPa(e.target.value)} />
+                  <Input type="text" inputMode="decimal" min="0" className="h-8 text-xs" placeholder="AHU only" value={customStaticPa} onChange={e => setCustomStaticPa(e.target.value)} />
                 </div>
               </div>
               <div className="flex items-center gap-2 pt-1">
@@ -832,7 +929,7 @@ function ODUPickerDialog({
                 </div>
                 <div className="space-y-1">
                   <label className="text-sm font-semibold text-slate-600 dark:text-slate-400">Capacity (TR) *</label>
-                  <Input type="number" min="0" step="0.5" className="h-8 text-xs" placeholder="e.g. 20" value={customODUTR} onChange={e => setCustomODUTR(e.target.value)} />
+                  <Input type="text" inputMode="decimal" min="0" step="0.5" className="h-8 text-xs" placeholder="e.g. 20" value={customODUTR} onChange={e => setCustomODUTR(e.target.value)} />
                 </div>
                 <div className="space-y-1">
                   <label className="text-sm font-semibold text-slate-600 dark:text-slate-400">Discharge</label>
@@ -1066,23 +1163,23 @@ function UnitPickerDialog({
               </div>
               <div className="flex flex-col gap-0.5">
                 <label className="text-xs text-slate-500 dark:text-slate-400">Capacity (TR)</label>
-                <Input type="number" className="h-8 text-sm" value={genSpec.capacityTR ?? ''} onChange={e => setGenSpec(s => ({ ...s, capacityTR: parseFloat(e.target.value) || 0, capacityBTU: (parseFloat(e.target.value) || 0) * 12000 }))} />
+                <NumericInput className="h-8 text-sm" min={0} value={genSpec.capacityTR ?? undefined} onChange={(n) => setGenSpec(s => ({ ...s, capacityTR: n ?? 0, capacityBTU: (n ?? 0) * 12000 }))} />
               </div>
               {!isChiller && (
                 <div className="flex flex-col gap-0.5">
                   <label className="text-xs text-slate-500 dark:text-slate-400">Airflow (CFM)</label>
-                  <Input type="number" className="h-8 text-sm" value={genSpec.ratedAirflowCFM ?? ''} onChange={e => setGenSpec(s => ({ ...s, ratedAirflowCFM: parseFloat(e.target.value) || 0 }))} />
+                  <NumericInput className="h-8 text-sm" min={0} value={genSpec.ratedAirflowCFM ?? undefined} onChange={(n) => setGenSpec(s => ({ ...s, ratedAirflowCFM: n ?? 0 }))} />
                 </div>
               )}
               {(isAHU || systemType === 'Package' || systemType === 'DuctableSplit') && (
                 <div className="flex flex-col gap-0.5">
                   <label className="text-xs text-slate-500 dark:text-slate-400">ESP (Pa)</label>
-                  <Input type="number" className="h-8 text-sm" value={(genSpec as any).staticPressurePa ?? ''} onChange={e => setGenSpec(s => ({ ...s, staticPressurePa: parseFloat(e.target.value) || undefined } as any))} />
+                  <NumericInput className="h-8 text-sm" min={0} value={(genSpec as any).staticPressurePa ?? undefined} onChange={(n) => setGenSpec(s => ({ ...s, staticPressurePa: n } as any))} />
                 </div>
               )}
               <div className="flex flex-col gap-0.5">
                 <label className="text-xs text-slate-500 dark:text-slate-400">Power (kW)</label>
-                <Input type="number" className="h-8 text-sm" value={genSpec.powerInputKW ?? ''} onChange={e => setGenSpec(s => ({ ...s, powerInputKW: parseFloat(e.target.value) || undefined }))} />
+                <NumericInput className="h-8 text-sm" min={0} value={genSpec.powerInputKW ?? undefined} onChange={(n) => setGenSpec(s => ({ ...s, powerInputKW: n }))} />
               </div>
             </div>
 
@@ -1401,9 +1498,9 @@ export default function EquipmentSelection({
   // Zone state
   const [zoneMode, setZoneMode] = useState(false);
   const [zoneSelected, setZoneSelected] = useState<Set<string>>(new Set());
-  const [zonePicker, setZonePicker] = useState<{ zoneId: string; zoneName: string; totalTR: number; totalCFM: number } | null>(null);
+  const [zonePicker, setZonePicker] = useState<{ zoneId: string; zoneName: string; totalTR: number; totalCFM: number; coilTR?: number; systemType?: string } | null>(null);
   // Non-VRF zone terminal unit picker (Chiller terminal AHU/FCU per zone)
-  const [zoneTerminalPicker, setZoneTerminalPicker] = useState<{ zoneId: string; zoneName: string; totalTR: number; totalCFM: number } | null>(null);
+  const [zoneTerminalPicker, setZoneTerminalPicker] = useState<{ zoneId: string; zoneName: string; totalTR: number; totalCFM: number; coilTR?: number; systemType?: string } | null>(null);
   // Cooling Tower form
   const [ctFormOpen, setCtFormOpen] = useState(false);
   const [ctForm, setCtForm] = useState<{ brand: string; modelSeries: string; trCapacity: number; quantity: number }>({ brand: '', modelSeries: '', trCapacity: 0, quantity: 1 });
@@ -1413,8 +1510,8 @@ export default function EquipmentSelection({
   const [showLcZonePicker, setShowLcZonePicker] = useState(false);
   const [renamingZoneId, setRenamingZoneId] = useState<string | null>(null);
   const [renamingZoneName, setRenamingZoneName] = useState('');
-  const [zoneEquipPicker, setZoneEquipPicker] = useState<{ zoneId: string; zoneName: string; totalTR: number; totalCFM: number } | null>(null);
-  const [zoneMultiUnitPicker, setZoneMultiUnitPicker] = useState<{ zoneId: string; zoneName: string; totalTR: number; totalCFM: number } | null>(null);
+  const [zoneEquipPicker, setZoneEquipPicker] = useState<{ zoneId: string; zoneName: string; totalTR: number; totalCFM: number; coilTR?: number; systemType?: string } | null>(null);
+  const [zoneMultiUnitPicker, setZoneMultiUnitPicker] = useState<{ zoneId: string; zoneName: string; totalTR: number; totalCFM: number; coilTR?: number; systemType?: string } | null>(null);
   const [roomUnitPicker, setRoomUnitPicker] = useState<{ roomId: string; roomName: string; reqTR: number; reqCFM: number } | null>(null);
 
   // Zone AHU config collapse/expand — collapsed by default so rooms+zones are visible first
@@ -1917,6 +2014,164 @@ export default function EquipmentSelection({
     }
   };
 
+  // Cleanup: remove stale data across ES system docs AND LC zone collections.
+  // Five kinds of garbage we clean:
+  //   1. system.zones[].roomIds[] entries pointing to rooms that don't exist anymore
+  //   2. system.zones[].roomIds[] entries pointing to rooms whose systemId is a different system
+  //   3. system.zones[] entries with empty roomIds[] (zone with no rooms — orphan)
+  //   4. /projects/{id}/zones/{zoneId} docs with no rooms referencing them AND not used as an ES sub-zone
+  //   5. /projects/{id}/systems/{sysId}/zones/{zoneId} legacy nested zone docs with no rooms referencing them
+  // Read-only first to count, then write the cleaned arrays / delete the orphan docs. Idempotent.
+  const cleanOrphanZones = async () => {
+    if (!project?.id) return;
+    setSyncBusy(true);
+    try {
+      const roomIdsAlive = new Set(rooms.map((r: any) => r.id));
+      const roomSystemById: Record<string, string | undefined> = {};
+      const roomZoneIdById: Record<string, string | undefined> = {};
+      // Set of zoneIds that any room references — used to identify orphan zone docs
+      const referencedZoneIds = new Set<string>();
+      for (const r of rooms as any[]) {
+        roomSystemById[r.id] = r.systemId;
+        roomZoneIdById[r.id] = r.zoneId;
+        if (r.zoneId) referencedZoneIds.add(r.zoneId);
+      }
+      // Also collect every sub-zone id from ES system docs — those are legitimate even if empty
+      const esSubZoneIds = new Set<string>();
+      for (const sys of equipSystems as any[]) {
+        for (const z of (sys.zones ?? []) as any[]) {
+          if (z?.id) esSubZoneIds.add(z.id);
+        }
+      }
+
+      let staleRoomRefs = 0;
+      let emptyZones = 0;
+      let systemsTouched = 0;
+      let orphanZoneDocs = 0;
+      let orphanLegacyZoneDocs = 0;
+      let orphanLegacySystemDocs = 0;
+      let orphanEsSystemDocs = 0;
+
+      // Set of system ids that any live room references via room.systemId
+      const referencedSystemIds = new Set<string>();
+      for (const r of rooms as any[]) if (r.systemId) referencedSystemIds.add(r.systemId);
+
+      // CRITICAL: read ALL /equipmentSystems docs directly from Firestore, not from React state.
+      // EquipmentSelection's listener dedups by (type, name) so React state has fewer entries
+      // than Firestore actually contains. Duplicate ES system docs (created from earlier work,
+      // hidden from the user by dedup) leak through to LC and render as phantom rows.
+      const allEsDocsSnap = await getDocs(collection(db, 'projects', project.id, 'equipmentSystems'));
+      const allEsDocs = allEsDocsSnap.docs.map(d => ({ id: d.id, ref: d.ref, data: d.data() as any }));
+
+      // ── Part 1: clean each ES system.zones[] array (iterate ALL docs, not just state) ──
+      const batch = writeBatch(db);
+      for (const sysDoc of allEsDocs) {
+        const sys: any = { id: sysDoc.id, ...sysDoc.data };
+        const subZones = (sys.zones ?? []) as any[];
+        if (subZones.length === 0) continue;
+        const cleanedZones = subZones
+          .map((z: any) => {
+            const before = (z.roomIds ?? []) as string[];
+            const after = before.filter((rid: string) => {
+              if (!roomIdsAlive.has(rid)) { staleRoomRefs++; return false; }
+              const owner = roomSystemById[rid];
+              if (owner && owner !== sys.id) { staleRoomRefs++; return false; }
+              // LC matches rooms to zones via room.zoneId — if the room's zoneId is
+              // a DIFFERENT sub-zone, this entry is stale (an old reference left over
+              // from a move). Drop it so the zone may collapse to "empty" and be removed.
+              const rZoneId = roomZoneIdById[rid];
+              if (rZoneId && rZoneId !== z.id) { staleRoomRefs++; return false; }
+              return true;
+            });
+            return { ...z, roomIds: after };
+          })
+          .filter((z: any) => {
+            if ((z.roomIds ?? []).length === 0) { emptyZones++; return false; }
+            return true;
+          });
+        if (cleanedZones.length !== subZones.length || JSON.stringify(cleanedZones) !== JSON.stringify(subZones)) {
+          batch.update(doc(db, 'projects', project.id, 'equipmentSystems', sys.id), {
+            zones: cleanedZones,
+            updatedAt: serverTimestamp(),
+          });
+          systemsTouched++;
+        }
+      }
+
+      // ── Part 1b: delete ENTIRE /equipmentSystems docs that are orphan duplicates ──
+      // An ES system is orphan when NO live room has room.systemId pointing to it.
+      // (These typically result from name+type dedup in ES — the user sees one "Chiller Plant"
+      // but Firestore has 5 of them, 4 of which no rooms reference.)
+      for (const sysDoc of allEsDocs) {
+        if (referencedSystemIds.has(sysDoc.id)) continue;  // some room references it → keep
+        batch.delete(sysDoc.ref);
+        orphanEsSystemDocs++;
+      }
+
+      // ── Part 2: scan /projects/{id}/zones — delete docs no room or ES sub-zone references ──
+      const zonesSnap = await getDocs(collection(db, 'projects', project.id, 'zones'));
+      for (const zd of zonesSnap.docs) {
+        const zid = zd.id;
+        if (referencedZoneIds.has(zid)) continue;      // some room still points here
+        if (esSubZoneIds.has(zid)) continue;           // ES sub-zone with same id (paired)
+        batch.delete(zd.ref);
+        orphanZoneDocs++;
+      }
+
+      // ── Part 3: scan /projects/{id}/systems/{sysId}/zones (legacy nested) — same rule ──
+      // Plus: delete the parent /systems/{sysId} doc itself if it has no nested zones AND
+      // no rooms reference it AND it's not paired with any ES system or zone. These legacy
+      // docs render as empty zone-like rows in LC since they predate the ES architecture.
+      const roomSystemIds = new Set<string>();
+      for (const r of rooms as any[]) if (r.systemId) roomSystemIds.add(r.systemId);
+      const esSystemIds = new Set<string>(equipSystems.map((s: any) => s.id));
+      const systemsSnap = await getDocs(collection(db, 'projects', project.id, 'systems'));
+      for (const sd of systemsSnap.docs) {
+        const nestedSnap = await getDocs(collection(db, 'projects', project.id, 'systems', sd.id, 'zones'));
+        let remainingNested = 0;
+        for (const zd of nestedSnap.docs) {
+          const zid = zd.id;
+          if (referencedZoneIds.has(zid)) { remainingNested++; continue; }
+          if (esSubZoneIds.has(zid))     { remainingNested++; continue; }
+          batch.delete(zd.ref);
+          orphanLegacyZoneDocs++;
+        }
+        // Now decide on the system doc itself. Orphan only if it has no surviving nested
+        // zones AND no room or ES system shares its id.
+        const isOrphan =
+          remainingNested === 0 &&
+          !roomSystemIds.has(sd.id) &&
+          !esSystemIds.has(sd.id) &&
+          !referencedZoneIds.has(sd.id);
+        if (isOrphan) {
+          batch.delete(sd.ref);
+          orphanLegacySystemDocs++;
+        }
+      }
+
+      const totalWrites = systemsTouched + orphanZoneDocs + orphanLegacyZoneDocs + orphanLegacySystemDocs + orphanEsSystemDocs;
+      if (totalWrites > 0) await batch.commit();
+
+      const total = staleRoomRefs + emptyZones + orphanZoneDocs + orphanLegacyZoneDocs + orphanLegacySystemDocs + orphanEsSystemDocs;
+      if (total === 0) {
+        toast.success('No orphan data found — everything is clean.');
+      } else {
+        const parts: string[] = [];
+        if (staleRoomRefs > 0)           parts.push(`${staleRoomRefs} stale room ref${staleRoomRefs === 1 ? '' : 's'}`);
+        if (emptyZones > 0)              parts.push(`${emptyZones} empty ES sub-zone${emptyZones === 1 ? '' : 's'}`);
+        if (orphanEsSystemDocs > 0)      parts.push(`${orphanEsSystemDocs} duplicate /equipmentSystems doc${orphanEsSystemDocs === 1 ? '' : 's'}`);
+        if (orphanZoneDocs > 0)          parts.push(`${orphanZoneDocs} orphan /zones doc${orphanZoneDocs === 1 ? '' : 's'}`);
+        if (orphanLegacyZoneDocs > 0)    parts.push(`${orphanLegacyZoneDocs} orphan legacy nested zone${orphanLegacyZoneDocs === 1 ? '' : 's'}`);
+        if (orphanLegacySystemDocs > 0)  parts.push(`${orphanLegacySystemDocs} orphan legacy system doc${orphanLegacySystemDocs === 1 ? '' : 's'}`);
+        toast.success(`Cleaned ${total} orphan${total === 1 ? '' : 's'}: ${parts.join(', ')}.`);
+      }
+    } catch (err) {
+      handleFirestoreError(err, OperationType.WRITE, 'project (cleanup)');
+    } finally {
+      setSyncBusy(false);
+    }
+  };
+
   // ── Custom Equipment Library CRUD ─────────────────────────────────────────
 
   const saveCustomEquipment_item = async (item: Partial<EquipmentModel>) => {
@@ -2031,7 +2286,24 @@ export default function EquipmentSelection({
     }
   };
 
-  // Update AHU/FCU mounting or coil type on an already-selected zone unit
+  // Update quantity on the zone's primary AHU/FCU selection.
+  // Used for "same-spec multi-AHU" zones (e.g. Banquet hall split into 2 AHUs because of duct
+  // height constraint — same model, dedicated duct per AHU, total CFM divided across units).
+  const updateZoneSelectionQty = async (zoneId: string, qty: number) => {
+    if (!selectedSystem || !project) return;
+    const clamped = Math.max(1, Math.min(20, qty));
+    const zones = ((selectedSystem.zones ?? []) as EquipmentZone[]).map((z: EquipmentZone) =>
+      z.id === zoneId && z.selection
+        ? { ...z, selection: { ...z.selection, quantity: clamped } }
+        : z);
+    try {
+      await updateDoc(doc(db, 'projects', project.id, 'equipmentSystems', selectedSystem.id), {
+        zones, updatedAt: serverTimestamp(),
+      });
+    } catch (err) { handleFirestoreError(err, OperationType.WRITE, `equipmentSystems/${selectedSystem.id}`); }
+  };
+
+  // Update AHU/FCU mounting or coil type on the primary zone unit (zone.selection)
   const handleUpdateZoneEquipProps = async (zoneId: string, props: Partial<IDUSelection>) => {
     if (!selectedSystem || !project) return;
     const zones = ((selectedSystem.zones ?? []) as EquipmentZone[]).map((z: EquipmentZone) =>
@@ -2060,8 +2332,12 @@ export default function EquipmentSelection({
     const isAssigned = room && (room.zoneId === system.id || room.systemId === system.id);
     try {
       if (isAssigned) {
-        // Unassign: clear system fields; leave zoneId intact so LC zone grouping is preserved
-        await updateDoc(doc(db, 'projects', project.id, 'rooms', roomId), {
+        // Detect whether the room is in an ES zone of this system — if so, removing it
+        // also drops it out of that zone, so the canonical LC zoneId must reset.
+        const existingZones = (system.zones ?? (system as any).ahuGroups ?? []) as EquipmentZone[];
+        const zoneContaining = existingZones.find((z: EquipmentZone) => z.roomIds.includes(roomId));
+
+        const roomUpdate: Record<string, any> = {
           systemId: deleteField(),
           systemName: deleteField(),
           hvacSystemId: deleteField(),
@@ -2069,10 +2345,15 @@ export default function EquipmentSelection({
           hvacZoneId: deleteField(),
           hvacZoneName: deleteField(),
           updatedAt: serverTimestamp(),
-        });
-        // If room was in a sub-zone, remove it from the zone's roomIds
-        const existingZones = (system.zones ?? (system as any).ahuGroups ?? []) as EquipmentZone[];
-        const zoneContaining = existingZones.find((z: EquipmentZone) => z.roomIds.includes(roomId));
+        };
+        if (zoneContaining) {
+          roomUpdate.zoneId = 'unassigned';
+          roomUpdate.zoneName = 'Unassigned';
+          roomUpdate.ahuGroupId = deleteField();
+          roomUpdate.ahuGroupName = deleteField();
+        }
+        await updateDoc(doc(db, 'projects', project.id, 'rooms', roomId), roomUpdate);
+
         if (zoneContaining) {
           const updatedZones = existingZones.map((z: EquipmentZone) =>
             z.id === zoneContaining.id ? { ...z, roomIds: z.roomIds.filter(id => id !== roomId) } : z,
@@ -2196,12 +2477,15 @@ export default function EquipmentSelection({
         zones: [...existing, newZone],
         updatedAt: serverTimestamp(),
       });
-      // Stamp room documents with system + AHU group; leave zoneId so LC zone grouping is preserved
+      // Stamp room documents with system + zone. ES zone is the source of truth for LC zone grouping —
+      // write the canonical zoneId/zoneName so the Load Calculator picks up the new grouping.
       const batch = writeBatch(db);
       for (const roomId of roomIds) {
         batch.update(doc(db, 'projects', project.id, 'rooms', roomId), {
           systemId: selectedSystem.id,
           systemName: selectedSystem.name,
+          zoneId,
+          zoneName,
           ahuGroupId: zoneId,
           ahuGroupName: zoneName,
           hvacSystemId: selectedSystem.id,
@@ -2230,13 +2514,16 @@ export default function EquipmentSelection({
         zones: allZones.filter((g: EquipmentZone) => g.id !== zoneId),
         updatedAt: serverTimestamp(),
       });
-      // Reset rooms back to system-level assignment so LC reflects the change
+      // Reset rooms back to system-level assignment so LC reflects the change.
+      // ES zone is gone, so LC zone grouping falls back to 'unassigned' until reassigned.
       if (zone?.roomIds?.length) {
         const batch = writeBatch(db);
         for (const roomId of zone.roomIds) {
           batch.update(doc(db, 'projects', project.id, 'rooms', roomId), {
             systemId,
             systemName: sys.name,
+            zoneId: 'unassigned',
+            zoneName: 'Unassigned',
             ahuGroupId: deleteField(),
             ahuGroupName: deleteField(),
             hvacSystemId: systemId,
@@ -2315,45 +2602,50 @@ export default function EquipmentSelection({
     }
   };
 
-  const saveCTUnit = async (systemId: string) => {
+  const addCTUnit = async (systemId: string) => {
     if (!ctForm.brand || !ctForm.modelSeries || ctForm.trCapacity <= 0) return;
     const sys = equipSystems.find(s => s.id === systemId);
-    const ctSel: SingleUnitSelection = {
-      modelId: `ct-${systemId}`,
+    const current: ODUCombinationUnit[] = (sys as any)?.ctUnits ?? [];
+    const newUnit: ODUCombinationUnit = {
+      modelId: `ct-${systemId}-${current.length}`,
       brand: ctForm.brand,
       modelSeries: ctForm.modelSeries,
-      subType: 'cooling-tower',
       trCapacity: ctForm.trCapacity,
-      cfmRated: 0,
       quantity: ctForm.quantity,
-      isCustom: true,
     };
-    try {
-      await updateDoc(doc(db, 'projects', project.id, 'equipmentSystems', systemId), {
-        ctSelection: ctSel,
-        updatedAt: serverTimestamp(),
-      });
-      void saveEquipmentEntry(`${systemId}-ct`, {
-        systemId, systemName: sys?.name ?? '',
-        type: 'CT',
-        brand: ctSel.brand, modelSeries: ctSel.modelSeries, subType: 'cooling-tower',
-        trCapacity: ctSel.trCapacity, quantity: ctSel.quantity ?? 1,
-      });
-    } catch (err) {
-      handleFirestoreError(err, OperationType.WRITE, `equipmentSystems/${systemId}`);
-    }
+    await updateSystemField(systemId, { ctUnits: [...current, newUnit] });
+    void saveEquipmentEntry(`${systemId}-ct-${current.length}`, {
+      systemId, systemName: sys?.name ?? '',
+      type: 'CT',
+      brand: newUnit.brand, modelSeries: newUnit.modelSeries, subType: 'cooling-tower',
+      trCapacity: newUnit.trCapacity, quantity: newUnit.quantity,
+    });
     setCtFormOpen(false);
   };
 
-  const clearCTUnit = async (systemId: string) => {
-    try {
-      await updateDoc(doc(db, 'projects', project.id, 'equipmentSystems', systemId), {
-        ctSelection: deleteField(),
-        updatedAt: serverTimestamp(),
-      });
-    } catch (err) {
-      handleFirestoreError(err, OperationType.WRITE, `equipmentSystems/${systemId}`);
+  const removeCTUnit = async (systemId: string, idx: number) => {
+    const sys = equipSystems.find(s => s.id === systemId);
+    const hasNew = ((sys as any)?.ctUnits ?? []).length > 0;
+    if (!hasNew) {
+      await updateSystemField(systemId, { ctSelection: deleteField() });
+      return;
     }
+    const current = [...((sys as any).ctUnits as ODUCombinationUnit[])];
+    current.splice(idx, 1);
+    await updateSystemField(systemId, { ctUnits: current });
+  };
+
+  const updateCTUnitQty = async (systemId: string, idx: number, qty: number) => {
+    if (qty < 1 || qty > 20) return;
+    const sys = equipSystems.find(s => s.id === systemId);
+    const hasNew = ((sys as any)?.ctUnits ?? []).length > 0;
+    if (!hasNew) {
+      if (sys?.ctSelection) await updateSystemField(systemId, { ctSelection: { ...sys.ctSelection, quantity: qty } });
+      return;
+    }
+    const current = [...((sys as any).ctUnits as ODUCombinationUnit[])];
+    current[idx] = { ...current[idx], quantity: qty };
+    await updateSystemField(systemId, { ctUnits: current });
   };
 
   // ── Universal zone management (Project → System → Zone → Room) ────────────
@@ -2385,6 +2677,8 @@ export default function EquipmentSelection({
         batch.update(doc(db, 'projects', project.id, 'rooms', room.id), {
           systemId: selectedSystem.id,
           systemName: selectedSystem.name,
+          zoneId: newZoneId,
+          zoneName: lcZoneName,
           ahuGroupId: newZoneId,
           ahuGroupName: lcZoneName,
           hvacSystemId: selectedSystem.id,
@@ -2453,6 +2747,7 @@ export default function EquipmentSelection({
       for (const roomId of roomIds) {
         batch.update(doc(db, 'projects', project.id, 'rooms', roomId), {
           systemId: selectedSystem.id, systemName: selectedSystem.name,
+          zoneId, zoneName: zone.name,
           ahuGroupId: zoneId, ahuGroupName: zone.name,
           hvacSystemId: selectedSystem.id, hvacSystemName: selectedSystem.name,
           hvacZoneId: zoneId, hvacZoneName: zone.name,
@@ -2476,6 +2771,7 @@ export default function EquipmentSelection({
       const batch = writeBatch(db);
       batch.update(doc(db, 'projects', project.id, 'rooms', roomId), {
         systemId: deleteField(), systemName: deleteField(),
+        zoneId: 'unassigned', zoneName: 'Unassigned',
         ahuGroupId: deleteField(), ahuGroupName: deleteField(),
         hvacSystemId: deleteField(), hvacSystemName: deleteField(),
         hvacZoneId: deleteField(), hvacZoneName: deleteField(),
@@ -2518,15 +2814,24 @@ export default function EquipmentSelection({
     } catch (err) { handleFirestoreError(err, OperationType.WRITE, `equipmentSystems/${selectedSystem.id}`); }
   };
 
-  const handleSelectHumidifier = async (zoneId: string, item: EquipmentModel) => {
+  // Quantity-aware selection: a single unit (qty=1) or a combination of identical units
+  // when no single catalog model covers the demand (typical for large hospital / pharma
+  // loads in India where catalog max is ~30 kg/hr per unit and engineers pair multiples).
+  const handleSelectHumidifier = async (zoneId: string, item: EquipmentModel, quantity = 1) => {
     if (!selectedSystem || !project) return;
     const zone = ((selectedSystem.zones ?? []) as EquipmentZone[]).find((z: EquipmentZone) => z.id === zoneId);
     const fahu = zone?.fahu ?? { hasElectricHeater: false, electricHeaterKW: 0, hasHumidifier: false, humidifierKgHr: 0 };
+    const perUnit = item.capacityLPH ?? 0;
+    const qty = Math.max(1, Math.floor(quantity));
+    const totalKgHr = perUnit * qty;
+    const modelLabel = qty > 1
+      ? `${qty} × ${item.brand} ${item.modelSeries} (${perUnit} kg/hr each)`
+      : `${item.brand} ${item.modelSeries}`;
     await handleUpdateZoneFahu(zoneId, {
       ...fahu,
       hasHumidifier: true,
-      humidifierKgHr: item.capacityLPH ?? 0,
-      humidifierModel: `${item.brand} ${item.modelSeries}`,
+      humidifierKgHr: totalKgHr,
+      humidifierModel: modelLabel,
       humidifierSubType: item.subType ?? '',
     });
     setHumidPicker(null);
@@ -2561,7 +2866,7 @@ export default function EquipmentSelection({
     const zones = (selectedSystem.zones ?? [] as EquipmentZone[]).map((z: EquipmentZone) => {
       if (z.id !== zoneId) return z;
       // eslint-disable-next-line @typescript-eslint/no-unused-vars
-      const { selection, ...rest } = z;
+      const { selection, unitSelections, ...rest } = z;
       return rest as EquipmentZone;
     });
     try {
@@ -2740,6 +3045,33 @@ export default function EquipmentSelection({
     }
     const current = [...((sys as any).chillerUnits as ODUCombinationUnit[])];
     current[idx] = { ...current[idx], quantity: qty };
+    await updateSystemField(systemId, { chillerUnits: current });
+  };
+
+  const updateChillerUnitRole = async (systemId: string, idx: number, role: 'working' | 'standby') => {
+    const sys = equipSystems.find(s => s.id === systemId);
+    const current = [...((sys as any)?.chillerUnits as ODUCombinationUnit[] ?? [])];
+    if (current.length === 0) return;
+    current[idx] = { ...current[idx], role };
+    await updateSystemField(systemId, { chillerUnits: current });
+  };
+
+  // Actual TR = designer's minimum required capacity at site conditions; OEM must
+  // confirm in their technical proposal. Used for plant sizing. Empty string clears
+  // the override and falls back to Nominal (trCapacity).
+  const updateChillerUnitActualTR = async (systemId: string, idx: number, raw: string) => {
+    const sys = equipSystems.find(s => s.id === systemId);
+    const current = [...((sys as any)?.chillerUnits as ODUCombinationUnit[] ?? [])];
+    if (current.length === 0) return;
+    const trimmed = raw.trim();
+    if (trimmed === '') {
+      const { actualTR: _drop, ...rest } = current[idx];
+      current[idx] = rest as ODUCombinationUnit;
+    } else {
+      const n = Number(trimmed);
+      if (!Number.isFinite(n) || n < 0) return;
+      current[idx] = { ...current[idx], actualTR: n };
+    }
     await updateSystemField(systemId, { chillerUnits: current });
   };
 
@@ -3180,7 +3512,27 @@ export default function EquipmentSelection({
     return [];
   }, [selectedSystem]);
 
-  const chillerTotalInstalledTR = effectiveChillerUnits.reduce((s, u) => s + u.trCapacity * u.quantity, 0);
+  // Plant sizing uses Actual TR (OEM-confirmed at site conditions) when provided, else
+  // falls back to Nominal TR. Catalog/AHRI ratings overstate real capacity in hot/humid
+  // sites — see methodology note in Step 7.
+  const effTR = (u: ODUCombinationUnit) => (u.actualTR != null && u.actualTR > 0 ? u.actualTR : u.trCapacity);
+  const chillerTotalInstalledTR = effectiveChillerUnits.reduce((s, u) => s + effTR(u) * u.quantity, 0);
+  const chillerWorkingTR = effectiveChillerUnits.filter(u => (u.role ?? 'working') === 'working').reduce((s, u) => s + effTR(u) * u.quantity, 0);
+  const chillerStandbyTR = effectiveChillerUnits.filter(u => u.role === 'standby').reduce((s, u) => s + effTR(u) * u.quantity, 0);
+
+  // Effective cooling tower units — merges new ctUnits[] with legacy ctSelection
+  const effectiveCTUnits = useMemo((): ODUCombinationUnit[] => {
+    if (!selectedSystem || selectedSystem.type !== 'Chiller') return [];
+    const units: ODUCombinationUnit[] = (selectedSystem as any).ctUnits ?? [];
+    if (units.length > 0) return units;
+    const leg = selectedSystem.ctSelection;
+    if (leg) return [{ modelId: leg.modelId, brand: leg.brand, modelSeries: leg.modelSeries, trCapacity: leg.trCapacity, quantity: leg.quantity ?? 1 }];
+    return [];
+  }, [selectedSystem]);
+
+  const ctTotalInstalledTR = effectiveCTUnits.reduce((s, u) => s + u.trCapacity * u.quantity, 0);
+  // Heat rejection duty ≈ chiller plant × 1.25 (accounts for compressor heat at COP ≈ 5)
+  const ctRequiredTR = chillerDiverseTR * 1.25;
 
   // All equipment selected across systems — drives the Library tab schedule
   const projectEquipmentSchedule = useMemo(() => {
@@ -3417,11 +3769,11 @@ export default function EquipmentSelection({
               <div className="bg-white dark:bg-slate-900 rounded-xl shadow-2xl w-full max-w-md p-6 space-y-4">
                 <div className="flex items-center gap-2">
                   <ArrowLeftRight className="w-5 h-5 text-blue-600" />
-                  <h3 className="text-base font-bold text-slate-800 dark:text-slate-100">Sync: Zones ↔ Systems</h3>
+                  <h3 className="text-base font-bold text-slate-800 dark:text-slate-100">Bulk Re-map / Recovery</h3>
                 </div>
-                <p className="text-xs text-slate-500 dark:text-slate-400">
-                  Equipment systems and Load Calculator zones are separate. Use these actions to keep them in sync for <strong>{project?.name}</strong>.
-                </p>
+                <div className="rounded-md border border-amber-200 dark:border-amber-800 bg-amber-50/60 dark:bg-amber-950/20 px-3 py-2 text-xs text-amber-800 dark:text-amber-300 leading-relaxed">
+                  <strong>Day-to-day sync is automatic now</strong> — adding/moving rooms or zones in LC writes back to ES live, and vice-versa. Use this dialog only to bulk-remap a legacy project (by zone-name pattern) or to repair a desync.
+                </div>
 
                 {/* Pull direction */}
                 <div className="rounded-lg border border-emerald-200 dark:border-emerald-800 bg-emerald-50 dark:bg-emerald-950/20 p-4 space-y-2">
@@ -3507,6 +3859,33 @@ export default function EquipmentSelection({
                     </div>
                   );
                 })()}
+
+                {/* Cleanup orphan data */}
+                <div className="rounded-lg border border-rose-200 dark:border-rose-800 bg-rose-50 dark:bg-rose-950/20 p-4 space-y-2">
+                  <div className="flex items-center gap-2">
+                    <Trash2 className="w-4 h-4 text-rose-700 dark:text-rose-400" />
+                    <span className="text-sm font-bold text-rose-800 dark:text-rose-300">Clean Up Orphan Data</span>
+                  </div>
+                  <p className="text-sm text-rose-700 dark:text-rose-300 leading-relaxed">
+                    Removes stale data that causes phantom zones / duplicate rows in LC:
+                  </p>
+                  <ul className="text-xs text-rose-700 dark:text-rose-300 list-disc pl-5 space-y-0.5">
+                    <li><strong>Duplicate <code className="text-xs">/equipmentSystems</code> docs</strong> that no room references (hidden by name-dedup but still present)</li>
+                    <li><code className="text-xs">system.zones[].roomIds[]</code> entries pointing to deleted rooms</li>
+                    <li><code className="text-xs">system.zones[].roomIds[]</code> entries claimed by other systems</li>
+                    <li>ES sub-zones whose <code className="text-xs">roomIds</code> is empty after cleanup</li>
+                    <li><code className="text-xs">/zones/{`{id}`}</code> docs with no rooms or ES sub-zone using them</li>
+                    <li>Legacy <code className="text-xs">/systems/.../zones</code> docs with no rooms</li>
+                  </ul>
+                  <p className="text-xs text-rose-600 dark:text-rose-400 italic">
+                    Idempotent. Safe to run repeatedly. <strong>Never deletes rooms, room geometry, envelope elements, or load calc results.</strong>
+                  </p>
+                  <Button size="sm" className="bg-rose-700 hover:bg-rose-800 gap-1 text-xs w-full mt-1"
+                    disabled={syncBusy}
+                    onClick={() => void cleanOrphanZones()}>
+                    <Trash2 className="w-3 h-3" /> {syncBusy ? 'Cleaning…' : 'Clean Orphan Data'}
+                  </Button>
+                </div>
 
                 <Button variant="ghost" size="sm" className="w-full text-xs" onClick={() => setSyncDialog(false)}>Cancel</Button>
               </div>
@@ -3604,6 +3983,30 @@ export default function EquipmentSelection({
             </div>
           )}
 
+          {/* Recovery toolbar — visible for single-system project types (Chiller, Package, AHU, etc.)
+              where the sidebar that hosts the same button is hidden. */}
+          {!showSidebar && equipSystems.length > 0 && (
+            <div className="mb-2 flex justify-end">
+              <Button size="sm" variant="outline" className="h-8 text-xs gap-1.5"
+                onClick={() => {
+                  const initMap: Record<string, string> = {};
+                  const zNames = [...new Set(rooms.map((r: any) => (r.zoneName || 'Zone').trim()))];
+                  for (const z of zNames) {
+                    const match = equipSystems.find(s =>
+                      s.name.toLowerCase() === z.toLowerCase() ||
+                      s.name.toLowerCase().includes(z.toLowerCase()) ||
+                      z.toLowerCase().includes(s.name.toLowerCase()),
+                    );
+                    if (match) initMap[z] = match.id;
+                  }
+                  setZoneMapping(initMap);
+                  setSyncDialog(true);
+                }}>
+                <ArrowLeftRight className="w-3.5 h-3.5" /> Bulk Re-map / Recovery
+              </Button>
+            </div>
+          )}
+
           <div className={cn('border dark:border-slate-700 rounded-xl overflow-hidden min-h-[700px] bg-white dark:bg-slate-900 shadow-sm', showSidebar && 'flex')}>
 
             {/* Left sidebar — shown only for VRF and Hybrid */}
@@ -3642,7 +4045,7 @@ export default function EquipmentSelection({
                       setZoneMapping(initMap);
                       setSyncDialog(true);
                     }}>
-                    <ArrowLeftRight className="w-3.5 h-3.5" /> Sync with Load Calculator
+                    <ArrowLeftRight className="w-3.5 h-3.5" /> Bulk Re-map / Recovery
                   </Button>
                 )}
               </div>
@@ -3765,11 +4168,20 @@ export default function EquipmentSelection({
                         <div className="flex items-center gap-3 mt-1.5">
                           <div className="flex items-center gap-1.5">
                             <span className="text-xs text-slate-500 dark:text-slate-400">Diversity factor:</span>
-                            <Input
-                              type="number" min="0.5" max="1.0" step="0.05"
-                              className="h-7 w-16 text-xs text-center p-1"
-                              value={selectedSystem.diversityFactor ?? 0.75}
-                              onChange={e => updateSystemField(selectedSystem.id, { diversityFactor: parseFloat(e.target.value) || 0.75 })}
+                            <input
+                              key={`div-${selectedSystem.id}-${selectedSystem.diversityFactor ?? 0.75}`}
+                              type="text" inputMode="decimal"
+                              className="h-7 w-16 text-xs text-center p-1 rounded-md border border-input bg-transparent outline-none focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/40 dark:bg-input/30"
+                              defaultValue={String(selectedSystem.diversityFactor ?? 0.75)}
+                              onBlur={e => {
+                                const n = parseFloat(e.target.value);
+                                if (!Number.isFinite(n) || n <= 0 || n > 1) {
+                                  e.target.value = String(selectedSystem.diversityFactor ?? 0.75);
+                                  return;
+                                }
+                                void updateSystemField(selectedSystem.id, { diversityFactor: n });
+                              }}
+                              onKeyDown={e => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur(); }}
                             />
                           </div>
                           {selectedSystem.brandLocked && (
@@ -4004,8 +4416,42 @@ export default function EquipmentSelection({
                           const zoneRooms = zone.roomIds.map(id => rooms.find((r: any) => r.id === id)).filter(Boolean) as any[];
                           const zoneTR  = zoneRooms.reduce((s: number, r: any) => s + (Number(r._calcOverallRequiredTR) || Number(r._calcRequiredTR) || 0), 0);
                           const zoneCFM = zoneRooms.reduce((s: number, r: any) => s + (Number(r._calcOverallDesignCFM) || Number(r._calcDesignCFM) || 0), 0);
+                          // Coil Duty (thermal load only, no cfmTR floor) — used as the sizing
+                          // requirement for chiller AHU pickers since AHU coils are custom-built
+                          // to project duty, not catalog-rated TR.
+                          const zoneCoilTR = zoneRooms.reduce((s: number, r: any) => {
+                            const sum = Number(r._calcLoadTR) || 0;
+                            const mon = Number(r._calcMonsoonLoadTR) || 0;
+                            return s + Math.max(sum, mon);
+                          }, 0);
+                          const zoneHeatingBTUH = zoneRooms.reduce((s: number, r: any) => s + (Number(r._calcWinterHeatingBTUH) || 0), 0);
                           const zoneNeedsHumidifier = zoneRooms.some((r: any) => r.includeHumidifier);
                           const isRenaming = renamingZoneId === zone.id;
+
+                          // Sizing check: compare installed IDU/AHU TR against required zone TR.
+                          // Includes primary zone.selection AND any additional units in zone.unitSelections[]
+                          // so multi-AHU zones (e.g. Banquet Hall + Exercise Room split across 2 AHUs)
+                          // are scored correctly. Per-Room mode sums each room's IDU stack instead.
+                          let zoneInstalledTR = 0;
+                          if (zone.roomMode === 'per-room') {
+                            for (const room of zoneRooms) {
+                              const iduList = (selectedSystem as any).iduSelections?.[room.id];
+                              const list = Array.isArray(iduList) ? iduList : iduList ? [iduList] : [];
+                              zoneInstalledTR += list.reduce((s: number, i: any) => s + (Number(i.trCapacity) || 0) * (Number(i.quantity) || 1), 0);
+                            }
+                          } else {
+                            if (zone.selection) {
+                              zoneInstalledTR += (Number(zone.selection.trCapacity) || 0) * (Number(zone.selection.quantity) || 1);
+                            }
+                            zoneInstalledTR += (zone.unitSelections ?? []).reduce(
+                              (s: number, u: any) => s + (Number(u.trCapacity) || 0) * (Number(u.quantity) || 1),
+                              0,
+                            );
+                          }
+                          const zoneSizing: 'ok' | 'undersized' | 'no-equipment' =
+                            zoneInstalledTR === 0 ? 'no-equipment'
+                            : zoneInstalledTR < zoneTR * 0.98 ? 'undersized'
+                            : 'ok';
 
                           return (
                             <div key={zone.id} className="p-5 space-y-4">
@@ -4037,9 +4483,31 @@ export default function EquipmentSelection({
                                       💧 Humidifier Required
                                     </span>
                                   )}
+                                  {zoneSizing === 'undersized' && (
+                                    <span
+                                      className="text-xs px-2.5 py-1 rounded-full bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-300 border border-amber-300 dark:border-amber-700 font-semibold"
+                                      title={`Required ${zoneTR.toFixed(2)} TR · Installed ${zoneInstalledTR.toFixed(2)} TR — review IDU sizing after recent load changes`}>
+                                      ⚠ Undersized · {zoneInstalledTR.toFixed(1)} / {zoneTR.toFixed(1)} TR
+                                    </span>
+                                  )}
                                   {zoneTR > 0 && (
-                                    <span className="text-sm px-3 py-1.5 rounded-full bg-slate-100 dark:bg-slate-700 text-slate-700 dark:text-slate-300 border border-slate-200 dark:border-slate-600 font-mono font-semibold">
-                                      {zoneTR.toFixed(2)} TR · {Math.round(zoneCFM).toLocaleString()} CFM
+                                    selectedSystem.type === 'Chiller' ? (
+                                      <span
+                                        className="text-sm px-3 py-1.5 rounded-full bg-indigo-50 dark:bg-indigo-950/30 text-indigo-700 dark:text-indigo-300 border border-indigo-200 dark:border-indigo-800 font-mono font-semibold"
+                                        title="Chiller AHU sizing — Coil Duty (thermal load) and Design CFM (dehumidified airflow) are independent. The 400 CFM/TR rule does not apply.">
+                                        Coil {zoneCoilTR.toFixed(2)} TR · {Math.round(zoneCFM).toLocaleString()} CFM
+                                      </span>
+                                    ) : (
+                                      <span className="text-sm px-3 py-1.5 rounded-full bg-slate-100 dark:bg-slate-700 text-slate-700 dark:text-slate-300 border border-slate-200 dark:border-slate-600 font-mono font-semibold">
+                                        {zoneTR.toFixed(2)} TR · {Math.round(zoneCFM).toLocaleString()} CFM
+                                      </span>
+                                    )
+                                  )}
+                                  {zoneHeatingBTUH > 0 && (
+                                    <span
+                                      className="text-sm px-3 py-1.5 rounded-full bg-sky-50 dark:bg-sky-950/30 text-sky-700 dark:text-sky-300 border border-sky-200 dark:border-sky-800 font-mono font-semibold"
+                                      title="Winter heating load (sum of room totalHeatingLoad)">
+                                      {Math.round(zoneHeatingBTUH).toLocaleString()} BTU/h heat
                                     </span>
                                   )}
                                   <button title="Delete zone" onClick={() => void handleDeleteZoneNew(zone.id)}
@@ -4051,14 +4519,31 @@ export default function EquipmentSelection({
 
                               {/* Rooms in zone */}
                               <div className="flex flex-wrap gap-2">
-                                {zoneRooms.map((r: any) => (
-                                  <span key={r.id} className="inline-flex items-center gap-2 text-sm px-3 py-1.5 rounded-full bg-blue-50 dark:bg-blue-950/20 border border-blue-200 dark:border-blue-800 text-blue-800 dark:text-blue-300 font-medium">
-                                    {r.name}
-                                    {r.floor && <span className="text-sm text-blue-400 dark:text-blue-500">{r.floor}</span>}
-                                    <button onClick={() => void handleRemoveRoomFromZone(zone.id, r.id)}
-                                      className="text-blue-400 hover:text-red-500 leading-none ml-0.5 text-base font-bold">×</button>
-                                  </span>
-                                ))}
+                                {zoneRooms.map((r: any) => {
+                                  // Per-room undersized check (only meaningful in per-room IDU mode)
+                                  let roomUndersized = false;
+                                  if (zone.roomMode === 'per-room') {
+                                    const required = Number(r._calcOverallRequiredTR) || Number(r._calcRequiredTR) || 0;
+                                    const iduList = (selectedSystem as any).iduSelections?.[r.id];
+                                    const list = Array.isArray(iduList) ? iduList : iduList ? [iduList] : [];
+                                    const installed = list.reduce((s: number, i: any) => s + (Number(i.trCapacity) || 0) * (Number(i.quantity) || 1), 0);
+                                    roomUndersized = installed > 0 && installed < required * 0.98;
+                                  }
+                                  return (
+                                    <span key={r.id} className={cn(
+                                      'inline-flex items-center gap-2 text-sm px-3 py-1.5 rounded-full font-medium border',
+                                      roomUndersized
+                                        ? 'bg-amber-50 dark:bg-amber-950/20 border-amber-300 dark:border-amber-700 text-amber-800 dark:text-amber-300'
+                                        : 'bg-blue-50 dark:bg-blue-950/20 border-blue-200 dark:border-blue-800 text-blue-800 dark:text-blue-300',
+                                    )}>
+                                      {roomUndersized && <span title="Room IDU under-rated for current load — review">⚠</span>}
+                                      {r.name}
+                                      {r.floor && <span className={cn('text-sm', roomUndersized ? 'text-amber-500' : 'text-blue-400 dark:text-blue-500')}>{r.floor}</span>}
+                                      <button onClick={() => void handleRemoveRoomFromZone(zone.id, r.id)}
+                                        className={cn('leading-none ml-0.5 text-base font-bold hover:text-red-500', roomUndersized ? 'text-amber-400' : 'text-blue-400')}>×</button>
+                                    </span>
+                                  );
+                                })}
                                 <button
                                   className="inline-flex items-center gap-1.5 text-sm px-3 py-1.5 rounded-full border border-dashed border-slate-300 dark:border-slate-600 text-slate-500 dark:text-slate-400 hover:border-blue-400 hover:text-blue-600 transition-colors font-medium"
                                   onClick={() => { setAddRoomsZoneId(zone.id); setAddRoomsSelected(new Set()); }}>
@@ -4093,15 +4578,35 @@ export default function EquipmentSelection({
 
                                   {zone.roomMode !== 'per-room' ? (
                                   <div className="px-4 py-4 space-y-3">
-                                  <div className="flex items-center gap-3">
+                                  <div className="flex items-center gap-3 flex-wrap">
                                     {zone.selection ? (
                                       <>
-                                        <span className="text-base font-semibold text-emerald-700 dark:text-emerald-400 flex-1 flex items-center gap-2 flex-wrap">
-                                          {zone.selection.brand} {zone.selection.modelSeries} · {zone.selection.trCapacity} TR
+                                        <span className="text-base font-semibold text-emerald-700 dark:text-emerald-400 flex items-center gap-2 flex-wrap">
+                                          {zone.selection.brand} {zone.selection.modelSeries} · {zone.selection.trCapacity} TR each
                                           {zone.selection.isCustom && <span className="text-sm font-bold px-2 py-0.5 rounded bg-violet-100 dark:bg-violet-900/30 text-violet-700 dark:text-violet-300 border border-violet-200 dark:border-violet-700">Custom</span>}
                                         </span>
+                                        {/* Quantity stepper — for same-spec multi-AHU zones (duct height / space constraint).
+                                            Each AHU has its OWN dedicated duct; total CFM is split across N units. */}
+                                        <div className="inline-flex items-center gap-1 shrink-0 rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-800 px-1">
+                                          <button type="button"
+                                            onClick={() => void updateZoneSelectionQty(zone.id, (zone.selection?.quantity ?? 1) - 1)}
+                                            disabled={(zone.selection.quantity ?? 1) <= 1}
+                                            className="w-7 h-7 text-slate-600 dark:text-slate-300 flex items-center justify-center text-sm font-bold hover:bg-slate-100 dark:hover:bg-slate-700 rounded disabled:opacity-40"
+                                            title="Reduce AHU quantity">−</button>
+                                          <span className="w-7 text-center text-sm font-bold font-mono text-indigo-700 dark:text-indigo-400">{zone.selection.quantity ?? 1}</span>
+                                          <button type="button"
+                                            onClick={() => void updateZoneSelectionQty(zone.id, (zone.selection?.quantity ?? 1) + 1)}
+                                            className="w-7 h-7 text-slate-600 dark:text-slate-300 flex items-center justify-center text-sm font-bold hover:bg-slate-100 dark:hover:bg-slate-700 rounded"
+                                            title="Add another AHU (same spec, dedicated duct each)">+</button>
+                                        </div>
+                                        {(zone.selection.quantity ?? 1) > 1 && (
+                                          <span className="text-sm font-bold text-indigo-700 dark:text-indigo-400">
+                                            = {((zone.selection.trCapacity ?? 0) * (zone.selection.quantity ?? 1)).toFixed(1)} TR total
+                                          </span>
+                                        )}
+                                        <span className="flex-1" />
                                         <Button size="sm" variant="outline" className="h-9 text-sm px-3"
-                                          onClick={() => setZoneEquipPicker({ zoneId: zone.id, zoneName: zone.name, totalTR: zoneTR, totalCFM: zoneCFM })}>
+                                          onClick={() => setZoneEquipPicker({ zoneId: zone.id, zoneName: zone.name, totalTR: zoneTR, totalCFM: zoneCFM, coilTR: zoneCoilTR, systemType: selectedSystem.type })}>
                                           Change
                                         </Button>
                                         <button className="text-slate-400 hover:text-red-500 p-1.5"
@@ -4111,16 +4616,28 @@ export default function EquipmentSelection({
                                       </>
                                     ) : (
                                       <Button size="sm" variant="default" className="h-9 text-sm px-4"
-                                        onClick={() => setZoneEquipPicker({ zoneId: zone.id, zoneName: zone.name, totalTR: zoneTR, totalCFM: zoneCFM })}>
+                                        onClick={() => setZoneEquipPicker({ zoneId: zone.id, zoneName: zone.name, totalTR: zoneTR, totalCFM: zoneCFM, coilTR: zoneCoilTR, systemType: selectedSystem.type })}>
                                         Select {selectedSystem.type === 'VRF' ? 'IDU' : selectedSystem.type === 'AHU' ? 'AHU (DX)' : 'AHU / FCU'}
                                       </Button>
                                     )}
                                   </div>
+                                  {/* Hint for multi-AHU zones */}
+                                  {zone.selection && (zone.selection.quantity ?? 1) > 1 && (
+                                    <p className="text-xs text-slate-500 dark:text-slate-400 italic leading-relaxed">
+                                      ⓘ {zone.selection.quantity} × same-spec AHUs, <strong>each with its own dedicated duct</strong>. Used when duct height or space constraint prevents a single large AHU. AHU Configuration below (filters, ESP, mounting, coil) applies to every unit; the BOM lists {zone.selection.quantity} of each accessory.
+                                    </p>
+                                  )}
 
                                   {/* FAHU Accessories — VRF ductable/AHU zones only */}
                                   {selectedSystem.type === 'VRF' && zone.selection && FAHU_CAPABLE_SUBTYPES.has(zone.selection.subType ?? '') && (() => {
                                     const fahu = zone.fahu ?? { hasElectricHeater: false, electricHeaterKW: 0, hasHumidifier: false, humidifierKgHr: 0 };
-                                    const suggestedHumidKgHr = zoneCFM > 0 ? parseFloat((zoneCFM * 0.000091).toFixed(1)) : 0;
+                                    const humidSizing = calcSuggestedHumidifier(zoneRooms, project);
+                                    const suggestedHumidKgHr = humidSizing.kgHr;
+                                    const humidSizingTitle = humidSizing.kgHr > 0
+                                      ? `ASHRAE Fundamentals Ch.6 + HVAC S&E Ch.22\n` +
+                                        `Base: ${humidSizing.oaCFM} CFM OA × ΔW ${humidSizing.deltaW_gPerKg} g/kg → ${humidSizing.baseKgHr} kg/hr\n` +
+                                        `+${humidSizing.safetyPct}% safety (steam dispersion / duct losses) → ${humidSizing.kgHr} kg/hr`
+                                      : 'Winter design conditions or OA flow not set — cannot suggest';
                                     return (
                                       <div className="border-t border-orange-100 dark:border-orange-900/40 pt-3 space-y-2.5">
                                         <span className="text-sm font-bold uppercase tracking-wider text-orange-700 dark:text-orange-400 flex items-center gap-1.5">
@@ -4137,9 +4654,9 @@ export default function EquipmentSelection({
                                           </label>
                                           {fahu.hasElectricHeater && (
                                             <div className="flex items-center gap-1.5">
-                                              <input type="number" min={0} step={0.5}
-                                                value={fahu.electricHeaterKW || ''}
-                                                onChange={e => void handleUpdateZoneFahu(zone.id, { ...fahu, electricHeaterKW: parseFloat(e.target.value) || 0 })}
+                                              <NumericInput min={0}
+                                                value={fahu.electricHeaterKW || undefined}
+                                                onChange={(n) => void handleUpdateZoneFahu(zone.id, { ...fahu, electricHeaterKW: n ?? 0 })}
                                                 className="w-16 h-8 text-sm font-mono border border-slate-300 dark:border-slate-600 rounded px-1.5 bg-white dark:bg-slate-800 dark:text-slate-300 focus:outline-none focus:ring-1 focus:ring-orange-400"
                                                 placeholder="kW" />
                                               <span className="text-xs text-slate-500 dark:text-slate-400">kW</span>
@@ -4160,17 +4677,18 @@ export default function EquipmentSelection({
                                             </label>
                                             {fahu.hasHumidifier && (
                                               <div className="flex items-center gap-1.5 flex-wrap">
-                                                <input type="number" min={0} step={0.1}
-                                                  value={fahu.humidifierKgHr || ''}
-                                                  onChange={e => void handleUpdateZoneFahu(zone.id, { ...fahu, humidifierKgHr: parseFloat(e.target.value) || 0 })}
+                                                <NumericInput min={0}
+                                                  value={fahu.humidifierKgHr || undefined}
+                                                  onChange={(n) => void handleUpdateZoneFahu(zone.id, { ...fahu, humidifierKgHr: n ?? 0 })}
                                                   className="w-16 h-8 text-sm font-mono border border-slate-300 dark:border-slate-600 rounded px-1.5 bg-white dark:bg-slate-800 dark:text-slate-300 focus:outline-none focus:ring-1 focus:ring-blue-400"
                                                   placeholder="kg/hr" />
                                                 <span className="text-xs text-slate-500 dark:text-slate-400">kg/hr</span>
                                                 {suggestedHumidKgHr > 0 && !fahu.humidifierKgHr && (
                                                   <button type="button"
                                                     className="text-xs text-blue-600 hover:underline"
+                                                    title={humidSizingTitle}
                                                     onClick={() => void handleUpdateZoneFahu(zone.id, { ...fahu, humidifierKgHr: suggestedHumidKgHr })}>
-                                                    Use est. {suggestedHumidKgHr} kg/hr
+                                                    Use est. {suggestedHumidKgHr} kg/hr (incl. {humidSizing.safetyPct}% safety)
                                                   </button>
                                                 )}
                                                 <button type="button"
@@ -4328,11 +4846,10 @@ export default function EquipmentSelection({
                                             {/* Row 3: ESP input */}
                                             <div className="flex flex-wrap items-center gap-2.5">
                                               <span className="text-sm font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400 w-10 shrink-0">ESP</span>
-                                              <input
-                                                type="number"
-                                                min={0} step={25}
+                                              <NumericInput
+                                                integer min={0}
                                                 value={ahuCfg.extStaticPa ?? 150}
-                                                onChange={e => void updateAHUCfg({ extStaticPa: Math.max(0, parseInt(e.target.value) || 0) })}
+                                                onChange={(n) => void updateAHUCfg({ extStaticPa: Math.max(0, n ?? 0) })}
                                                 className="w-24 h-8 text-sm font-mono border border-slate-300 dark:border-slate-600 rounded-md px-2.5 bg-white dark:bg-slate-800 dark:text-slate-300 focus:outline-none focus:ring-2 focus:ring-sky-400"
                                               />
                                               <span className="text-xs text-slate-600 dark:text-slate-400 font-medium">Pa</span>
@@ -4421,7 +4938,13 @@ export default function EquipmentSelection({
 
                                         {zoneNeedsHumidifier && (() => {
                                           const ahuFahu = zone.fahu ?? { hasElectricHeater: false, electricHeaterKW: 0, hasHumidifier: false, humidifierKgHr: 0 };
-                                          const suggestedKgHr = zoneCFM > 0 ? parseFloat((zoneCFM * 0.000091).toFixed(1)) : 0;
+                                          const humidSizingAhu = calcSuggestedHumidifier(zoneRooms, project);
+                                          const suggestedKgHr = humidSizingAhu.kgHr;
+                                          const humidSizingAhuTitle = humidSizingAhu.kgHr > 0
+                                            ? `ASHRAE Fundamentals Ch.6 + HVAC S&E Ch.22\n` +
+                                              `Base: ${humidSizingAhu.oaCFM} CFM OA × ΔW ${humidSizingAhu.deltaW_gPerKg} g/kg → ${humidSizingAhu.baseKgHr} kg/hr\n` +
+                                              `+${humidSizingAhu.safetyPct}% safety (steam dispersion / duct losses) → ${humidSizingAhu.kgHr} kg/hr`
+                                            : 'Winter design conditions or OA flow not set — cannot suggest';
                                           return (
                                             <div className="border border-sky-200 dark:border-sky-700 rounded-md bg-sky-50 dark:bg-sky-900/30 px-3 py-2.5 space-y-2">
                                               <div className="flex items-center gap-2">
@@ -4438,17 +4961,18 @@ export default function EquipmentSelection({
                                                 </label>
                                                 {ahuFahu.hasHumidifier && (
                                                   <div className="flex items-center gap-1.5 flex-wrap">
-                                                    <input type="number" min={0} step={0.1}
-                                                      value={ahuFahu.humidifierKgHr || ''}
-                                                      onChange={e => void handleUpdateZoneFahu(zone.id, { ...ahuFahu, humidifierKgHr: parseFloat(e.target.value) || 0 })}
+                                                    <NumericInput min={0}
+                                                      value={ahuFahu.humidifierKgHr || undefined}
+                                                      onChange={(n) => void handleUpdateZoneFahu(zone.id, { ...ahuFahu, humidifierKgHr: n ?? 0 })}
                                                       className="w-16 h-8 text-sm font-mono border border-sky-300 dark:border-sky-700 rounded px-1.5 bg-white dark:bg-slate-800 dark:text-slate-300 focus:outline-none focus:ring-1 focus:ring-sky-400"
                                                       placeholder="kg/hr" />
                                                     <span className="text-xs text-slate-500 dark:text-slate-400">kg/hr</span>
                                                     {suggestedKgHr > 0 && !ahuFahu.humidifierKgHr && (
                                                       <button type="button"
                                                         className="text-xs text-sky-600 dark:text-sky-400 hover:underline"
+                                                        title={humidSizingAhuTitle}
                                                         onClick={() => void handleUpdateZoneFahu(zone.id, { ...ahuFahu, humidifierKgHr: suggestedKgHr })}>
-                                                        Use est. {suggestedKgHr} kg/hr
+                                                        Use est. {suggestedKgHr} kg/hr (incl. {humidSizingAhu.safetyPct}% safety)
                                                       </button>
                                                     )}
                                                     <button type="button"
@@ -4519,7 +5043,7 @@ export default function EquipmentSelection({
                                       {selectedSystem.type === 'Package' ? 'Package Units' : 'Indoor Units'}
                                     </span>
                                     <Button size="sm" variant="outline" className="h-5 text-xs px-1.5 gap-0.5 border-teal-300 text-teal-700 hover:bg-teal-50"
-                                      onClick={() => setZoneMultiUnitPicker({ zoneId: zone.id, zoneName: zone.name, totalTR: zoneTR, totalCFM: zoneCFM })}>
+                                      onClick={() => setZoneMultiUnitPicker({ zoneId: zone.id, zoneName: zone.name, totalTR: zoneTR, totalCFM: zoneCFM, coilTR: zoneCoilTR, systemType: selectedSystem.type })}>
                                       + Add Unit
                                     </Button>
                                   </div>
@@ -4596,10 +5120,18 @@ export default function EquipmentSelection({
                       </div>
                     )}
 
-                    {/* Unassigned rooms pool */}
+                    {/* Unassigned rooms pool — only rooms that are (a) globally unassigned,
+                        or (b) assigned to THIS system but not yet placed in any sub-zone.
+                        Rooms belonging to OTHER systems are deliberately hidden. */}
                     {(() => {
                       const zoneRoomSet = new Set(((selectedSystem.zones ?? []) as EquipmentZone[]).flatMap((z: EquipmentZone) => z.roomIds));
-                      const unassigned = rooms.filter((r: any) => !zoneRoomSet.has(r.id));
+                      const isInOtherSystem = (r: any) => {
+                        const sysId = r.systemId ?? r.zoneId;
+                        if (!sysId) return false;
+                        if (sysId === selectedSystem.id) return false;
+                        return equipSystems.some((s: any) => s.id === sysId);
+                      };
+                      const unassigned = rooms.filter((r: any) => !zoneRoomSet.has(r.id) && !isInOtherSystem(r));
                       if (unassigned.length === 0) return null;
                       return (
                         <div className="border-t border-dashed border-amber-200 dark:border-amber-800 p-3 bg-amber-50/40 dark:bg-amber-950/20">
@@ -4639,11 +5171,20 @@ export default function EquipmentSelection({
                           <span className="text-slate-300 dark:text-slate-600">×</span>
                           <div className="flex items-center gap-1.5">
                             <span className="text-slate-500 dark:text-slate-400">Diversity:</span>
-                            <Input
-                              type="number" min="0.5" max="1.0" step="0.05"
-                              className="h-7 w-14 text-xs text-center p-1"
-                              value={selectedSystem.diversityFactor ?? 0.75}
-                              onChange={e => void updateSystemField(selectedSystem.id, { diversityFactor: parseFloat(e.target.value) || 0.75 })}
+                            <input
+                              key={`div-${selectedSystem.id}-${selectedSystem.diversityFactor ?? 0.75}`}
+                              type="text" inputMode="decimal"
+                              className="h-7 w-14 text-xs text-center p-1 rounded-md border border-input bg-transparent outline-none focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/40 dark:bg-input/30"
+                              defaultValue={String(selectedSystem.diversityFactor ?? 0.75)}
+                              onBlur={e => {
+                                const n = parseFloat(e.target.value);
+                                if (!Number.isFinite(n) || n <= 0 || n > 1) {
+                                  e.target.value = String(selectedSystem.diversityFactor ?? 0.75);
+                                  return;
+                                }
+                                void updateSystemField(selectedSystem.id, { diversityFactor: n });
+                              }}
+                              onKeyDown={e => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur(); }}
                             />
                             <span className="font-bold text-indigo-700 dark:text-indigo-400">{chillerDiverseTR.toFixed(2)} TR</span>
                             <span className="text-slate-400 dark:text-slate-500 italic">plant capacity required</span>
@@ -4651,10 +5192,15 @@ export default function EquipmentSelection({
                           {chillerTotalInstalledTR > 0 && (
                             <>
                               <span className="text-slate-300 dark:text-slate-600">→</span>
-                              <span className={cn('font-semibold text-xs', chillerTotalInstalledTR >= chillerDiverseTR * 0.98 ? 'text-emerald-700 dark:text-emerald-400' : 'text-amber-600 dark:text-amber-400')}>
-                                Installed: {chillerTotalInstalledTR.toFixed(1)} TR
-                                {chillerTotalInstalledTR >= chillerDiverseTR * 0.98 ? ' ✓' : ` (need ${(chillerDiverseTR - chillerTotalInstalledTR).toFixed(1)} TR more)`}
+                              <span className={cn('font-semibold text-xs', chillerWorkingTR >= chillerDiverseTR * 0.98 ? 'text-emerald-700 dark:text-emerald-400' : 'text-amber-600 dark:text-amber-400')}>
+                                Working: {chillerWorkingTR.toFixed(1)} TR
+                                {chillerWorkingTR >= chillerDiverseTR * 0.98 ? ' ✓' : ` (need ${(chillerDiverseTR - chillerWorkingTR).toFixed(1)} TR more)`}
                               </span>
+                              {chillerStandbyTR > 0 && (
+                                <span className="font-semibold text-xs text-amber-600 dark:text-amber-400">
+                                  + {chillerStandbyTR.toFixed(1)} TR Standby
+                                </span>
+                              )}
                             </>
                           )}
                         </div>
@@ -4668,6 +5214,12 @@ export default function EquipmentSelection({
                               <Plus className="w-3.5 h-3.5" /> Add Chiller
                             </Button>
                           </div>
+                          <p className="text-[11px] text-slate-500 dark:text-slate-400 leading-snug">
+                            <span className="font-semibold">Nom. TR</span> = catalog rating at AHRI 550/590 conditions.{' '}
+                            <span className="font-semibold">Act. TR</span> = our minimum required capacity at this project's site conditions
+                            (entering CW/air temp, LCW temp, altitude, fouling) — <span className="italic">OEM to confirm in technical proposal</span>.{' '}
+                            Plant sizing uses <span className="font-semibold">Actual TR</span> when entered; leave blank to fall back to Nominal.
+                          </p>
                           {effectiveChillerUnits.length === 0 ? (
                             <p className="text-sm text-slate-400 dark:text-slate-500 italic py-1">No chillers selected — click Add Chiller above.</p>
                           ) : (
@@ -4686,10 +5238,47 @@ export default function EquipmentSelection({
                                         className="w-6 h-7 rounded border border-slate-300 dark:border-slate-600 text-slate-600 dark:text-slate-300 flex items-center justify-center text-sm font-bold hover:bg-slate-100 dark:hover:bg-slate-700">+</button>
                                     </div>
                                     <span className="text-sm font-semibold text-emerald-700 dark:text-emerald-400 flex-1 flex flex-wrap items-center gap-1.5">
-                                      <span>{u.brand} {u.modelSeries} · {u.trCapacity} TR each</span>
-                                      {u.quantity > 1 && <span className="text-indigo-700 dark:text-indigo-400 font-bold">= {(u.trCapacity * u.quantity).toFixed(0)} TR total</span>}
+                                      <span>{u.brand} {u.modelSeries}</span>
+                                      <span className="text-slate-500 dark:text-slate-400">·</span>
+                                      <span title="Nominal TR — OEM catalog rating at AHRI 550/590 standard conditions">
+                                        Nom. <span className="font-mono">{u.trCapacity}</span> TR
+                                      </span>
+                                      <span className="text-slate-500 dark:text-slate-400">·</span>
+                                      <span className="inline-flex items-center gap-1" title="Actual TR — minimum required capacity at this project's site conditions. OEM must confirm in technical proposal. Plant sizing uses this when entered.">
+                                        Act.
+                                        <input
+                                          type="text" inputMode="decimal"
+                                          className="w-14 h-6 rounded border border-indigo-200 dark:border-indigo-700 bg-white dark:bg-slate-900 px-1.5 text-xs font-mono text-indigo-700 dark:text-indigo-400 text-right focus:outline-none focus:ring-1 focus:ring-indigo-400"
+                                          defaultValue={u.actualTR != null ? String(u.actualTR) : ''}
+                                          placeholder={String(u.trCapacity)}
+                                          onBlur={(e) => void updateChillerUnitActualTR(selectedSystem.id, idx, e.target.value)}
+                                          onKeyDown={(e) => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur(); }}
+                                          disabled={isLegacy}
+                                        />
+                                        TR
+                                      </span>
+                                      {u.quantity > 1 && <span className="text-indigo-700 dark:text-indigo-400 font-bold">= {(effTR(u) * u.quantity).toFixed(1)} TR total</span>}
                                       {isLegacy && <span className="text-xs px-1.5 py-0.5 rounded bg-amber-50 dark:bg-amber-950/20 text-amber-600 dark:text-amber-400 border border-amber-200 dark:border-amber-800">legacy</span>}
                                     </span>
+                                    {/* Working / Standby role toggle — only for new (non-legacy) units */}
+                                    {!isLegacy && (
+                                      <div className="inline-flex rounded-md border border-slate-200 dark:border-slate-700 overflow-hidden shrink-0 text-xs font-semibold">
+                                        <button
+                                          onClick={() => void updateChillerUnitRole(selectedSystem.id, idx, 'working')}
+                                          className={cn('px-2 py-1 transition-colors', (u.role ?? 'working') === 'working'
+                                            ? 'bg-emerald-500 text-white'
+                                            : 'bg-white dark:bg-slate-800 text-slate-500 dark:text-slate-400 hover:bg-emerald-50 dark:hover:bg-emerald-950/20')}>
+                                          Working
+                                        </button>
+                                        <button
+                                          onClick={() => void updateChillerUnitRole(selectedSystem.id, idx, 'standby')}
+                                          className={cn('px-2 py-1 transition-colors border-l border-slate-200 dark:border-slate-700', u.role === 'standby'
+                                            ? 'bg-amber-500 text-white'
+                                            : 'bg-white dark:bg-slate-800 text-slate-500 dark:text-slate-400 hover:bg-amber-50 dark:hover:bg-amber-950/20')}>
+                                          Standby
+                                        </button>
+                                      </div>
+                                    )}
                                     <button className="text-slate-400 hover:text-red-500 shrink-0 p-1"
                                       onClick={() => void removeChillerUnit(selectedSystem.id, idx)}>
                                       <Trash2 className="w-4 h-4" />
@@ -4703,21 +5292,53 @@ export default function EquipmentSelection({
 
                         {/* CT section (WC only) */}
                         {(selectedSystem.condenserType === 'water-cooled' || selectedSystem.packageSubType === 'water-cooled' || ['Chiller WC', 'Chiller+AHU', 'Chiller+FCU'].includes(hvacSystemCategory)) && (
-                          <div className="flex items-center gap-3 flex-wrap border-t border-blue-100 dark:border-blue-900/40 pt-3">
-                            <span className="text-sm font-semibold text-slate-600 dark:text-slate-400 w-10 shrink-0">CT:</span>
-                            {selectedSystem.ctSelection ? (
-                              <div className="flex items-center gap-2 flex-1">
-                                <span className="text-sm font-semibold text-cyan-700 dark:text-cyan-400">
-                                  {selectedSystem.ctSelection.quantity && selectedSystem.ctSelection.quantity > 1 && <span className="text-blue-600 mr-1">{selectedSystem.ctSelection.quantity}×</span>}
-                                  {selectedSystem.ctSelection.brand} {selectedSystem.ctSelection.modelSeries} · {selectedSystem.ctSelection.trCapacity} TR
-                                </span>
-                                <Button size="sm" variant="outline" className="h-8 text-sm px-2" onClick={() => setCtFormOpen(true)}>Change</Button>
-                                <button className="text-slate-400 hover:text-red-500 p-1" onClick={() => clearCTUnit(selectedSystem.id)}><Trash2 className="w-3.5 h-3.5" /></button>
+                          <div className="space-y-2 border-t border-blue-100 dark:border-blue-900/40 pt-3">
+                            <div className="flex items-center justify-between gap-2">
+                              <div className="flex items-center gap-2 flex-wrap">
+                                <span className="text-sm font-semibold text-slate-700 dark:text-slate-300">Cooling Towers:</span>
+                                {ctTotalInstalledTR > 0 && (
+                                  <span className={cn('text-xs font-semibold', ctTotalInstalledTR >= ctRequiredTR * 0.98 ? 'text-emerald-600 dark:text-emerald-400' : 'text-amber-600 dark:text-amber-400')}>
+                                    {ctTotalInstalledTR.toFixed(1)} TR installed
+                                    {ctTotalInstalledTR >= ctRequiredTR * 0.98 ? ' ✓' : ` · need ${(ctRequiredTR - ctTotalInstalledTR).toFixed(1)} TR more`}
+                                  </span>
+                                )}
+                                <span className="text-xs text-slate-400 dark:text-slate-500 italic">duty ≈ {ctRequiredTR.toFixed(1)} TR</span>
                               </div>
-                            ) : (
-                              <Button size="sm" variant="outline" className="h-8 text-sm px-3 border-cyan-300 text-cyan-700 hover:bg-cyan-50" onClick={() => setCtFormOpen(true)}>
-                                + Add Cooling Tower
+                              <Button size="sm" variant="outline"
+                                className="h-8 text-xs px-3 gap-1.5 border-cyan-300 dark:border-cyan-700 text-cyan-700 dark:text-cyan-400 hover:bg-cyan-50 dark:hover:bg-cyan-950/20 shrink-0"
+                                onClick={() => { setCtForm({ brand: '', modelSeries: '', trCapacity: 0, quantity: 1 }); setCtFormOpen(true); }}>
+                                <Plus className="w-3.5 h-3.5" /> Add CT
                               </Button>
+                            </div>
+                            {effectiveCTUnits.length === 0 ? (
+                              <p className="text-sm text-slate-400 dark:text-slate-500 italic py-1">No cooling towers selected — click Add CT above.</p>
+                            ) : (
+                              <div className="space-y-2">
+                                {effectiveCTUnits.map((u, idx) => {
+                                  const isLegacyCT = ((selectedSystem as any).ctUnits ?? []).length === 0;
+                                  return (
+                                    <div key={idx} className="flex items-center gap-3 bg-white dark:bg-slate-800 border border-cyan-200 dark:border-cyan-800 rounded-md px-3 py-2">
+                                      <div className="inline-flex items-center gap-1 shrink-0">
+                                        <button onClick={() => void updateCTUnitQty(selectedSystem.id, idx, u.quantity - 1)}
+                                          className="w-6 h-7 rounded border border-slate-300 dark:border-slate-600 text-slate-600 dark:text-slate-300 flex items-center justify-center text-sm font-bold hover:bg-slate-100 dark:hover:bg-slate-700 disabled:opacity-40"
+                                          disabled={u.quantity <= 1}>−</button>
+                                        <span className="w-6 text-center text-sm font-bold font-mono text-cyan-700 dark:text-cyan-400">{u.quantity}</span>
+                                        <button onClick={() => void updateCTUnitQty(selectedSystem.id, idx, u.quantity + 1)}
+                                          className="w-6 h-7 rounded border border-slate-300 dark:border-slate-600 text-slate-600 dark:text-slate-300 flex items-center justify-center text-sm font-bold hover:bg-slate-100 dark:hover:bg-slate-700">+</button>
+                                      </div>
+                                      <span className="text-sm font-semibold text-cyan-700 dark:text-cyan-400 flex-1 flex flex-wrap items-center gap-1.5">
+                                        <span>{u.brand} {u.modelSeries} · {u.trCapacity} TR each</span>
+                                        {u.quantity > 1 && <span className="text-blue-600 dark:text-blue-400 font-bold">= {(u.trCapacity * u.quantity).toFixed(0)} TR total</span>}
+                                        {isLegacyCT && <span className="text-xs px-1.5 py-0.5 rounded bg-amber-50 dark:bg-amber-950/20 text-amber-600 dark:text-amber-400 border border-amber-200 dark:border-amber-800">legacy</span>}
+                                      </span>
+                                      <button className="text-slate-400 hover:text-red-500 shrink-0 p-1"
+                                        onClick={() => void removeCTUnit(selectedSystem.id, idx)}>
+                                        <Trash2 className="w-4 h-4" />
+                                      </button>
+                                    </div>
+                                  );
+                                })}
+                              </div>
                             )}
                           </div>
                         )}
@@ -5123,7 +5744,7 @@ export default function EquipmentSelection({
                                           </span>
                                         ) : null}
                                         <Button size="sm" variant={zone.selection ? 'outline' : 'default'} className="h-8 text-sm px-2"
-                                          onClick={() => setZonePicker({ zoneId: zone.id, zoneName: zone.name, totalTR, totalCFM })}>
+                                          onClick={() => setZonePicker({ zoneId: zone.id, zoneName: zone.name, totalTR, totalCFM, systemType: selectedSystem.type })}>
                                           {zone.selection ? 'Change IDU/AHU' : 'Select IDU/AHU'}
                                         </Button>
                                         <Button size="sm" variant="ghost" className="h-7 w-6 p-0 text-slate-400 hover:text-red-500"
@@ -5766,11 +6387,15 @@ export default function EquipmentSelection({
         <IDUPickerDialog
           open={!!zoneEquipPicker}
           onClose={() => setZoneEquipPicker(null)}
-          roomName={`${zoneEquipPicker.zoneName} (${zoneEquipPicker.totalTR.toFixed(2)} TR)`}
+          roomName={zoneEquipPicker.systemType === 'Chiller' && (zoneEquipPicker.coilTR ?? 0) > 0
+            ? `${zoneEquipPicker.zoneName} (Coil ${(zoneEquipPicker.coilTR ?? 0).toFixed(2)} TR · ${Math.round(zoneEquipPicker.totalCFM).toLocaleString()} CFM)`
+            : `${zoneEquipPicker.zoneName} (${zoneEquipPicker.totalTR.toFixed(2)} TR)`}
           requiredTR={zoneEquipPicker.totalTR}
           designCFM={zoneEquipPicker.totalCFM}
           lockedBrand={null}
           onSelect={sel => handleSelectZoneEquip(zoneEquipPicker.zoneId, sel)}
+          systemType={zoneEquipPicker.systemType}
+          coilDutyTR={zoneEquipPicker.coilTR}
         />
       )}
 
@@ -5876,6 +6501,8 @@ export default function EquipmentSelection({
           designCFM={zoneMultiUnitPicker.totalCFM}
           lockedBrand={null}
           onSelect={sel => void handleAddZoneUnit(zoneMultiUnitPicker.zoneId, sel)}
+          systemType={zoneMultiUnitPicker.systemType}
+          coilDutyTR={zoneMultiUnitPicker.coilTR}
         />
       )}
 
@@ -5913,7 +6540,7 @@ export default function EquipmentSelection({
             <DialogHeader>
               <DialogTitle className="text-sm font-bold flex items-center gap-2 dark:text-slate-100">
                 <Droplets className="w-4 h-4 text-cyan-600 dark:text-cyan-400" />
-                Cooling Tower Specification
+                Add Cooling Tower
               </DialogTitle>
             </DialogHeader>
             <div className="space-y-3 pt-1">
@@ -5934,15 +6561,15 @@ export default function EquipmentSelection({
               <div className="grid grid-cols-2 gap-3">
                 <div>
                   <Label className="text-sm font-semibold uppercase text-slate-600 dark:text-slate-400">Duty TR *</Label>
-                  <Input className="mt-1 h-9 text-sm" type="number" min="0" step="0.5"
+                  <NumericInput className="mt-1 h-9 text-sm" min={0}
                     value={ctForm.trCapacity}
-                    onChange={e => setCtForm(f => ({ ...f, trCapacity: parseFloat(e.target.value) || 0 }))} />
+                    onChange={(n) => setCtForm(f => ({ ...f, trCapacity: n ?? 0 }))} />
                 </div>
                 <div>
                   <Label className="text-sm font-semibold uppercase text-slate-600 dark:text-slate-400">Quantity</Label>
-                  <Input className="mt-1 h-9 text-sm" type="number" min="1" max="10"
+                  <NumericInput className="mt-1 h-9 text-sm" integer min={1} max={10}
                     value={ctForm.quantity}
-                    onChange={e => setCtForm(f => ({ ...f, quantity: parseInt(e.target.value) || 1 }))} />
+                    onChange={(n) => setCtForm(f => ({ ...f, quantity: n ?? 1 }))} />
                 </div>
               </div>
             </div>
@@ -5950,8 +6577,8 @@ export default function EquipmentSelection({
               <Button variant="outline" className="text-xs" onClick={() => setCtFormOpen(false)}>Cancel</Button>
               <Button className="text-xs gap-1.5 bg-cyan-600 hover:bg-cyan-700"
                 disabled={!ctForm.brand || !ctForm.modelSeries || ctForm.trCapacity <= 0}
-                onClick={() => saveCTUnit(selectedSystem.id)}>
-                <Plus className="w-3.5 h-3.5" />Save CT
+                onClick={() => void addCTUnit(selectedSystem.id)}>
+                <Plus className="w-3.5 h-3.5" />Add CT
               </Button>
             </DialogFooter>
           </DialogContent>
@@ -6090,13 +6717,52 @@ export default function EquipmentSelection({
             </DialogHeader>
             <div className="overflow-y-auto flex-1 px-4 py-3 space-y-3">
               {(['Ultrasonic', 'Heater-Based'] as const).map(subType => {
-                const items = EQUIPMENT_CATALOG.filter(m => m.type === 'Humidifier' && m.subType === subType);
-                if (!items.length) return null;
+                const rawItems = EQUIPMENT_CATALOG.filter(m => m.type === 'Humidifier' && m.subType === subType);
+                if (!rawItems.length) return null;
+                // Sort: adequate models first by ascending capacity (smallest fit at top),
+                // then inadequate models by descending capacity (largest under-spec next).
+                const sorted = [...rawItems].sort((a, b) => {
+                  const aCap = a.capacityLPH ?? 0;
+                  const bCap = b.capacityLPH ?? 0;
+                  const aAdeq = aCap >= humidPicker.suggestedKgHr;
+                  const bAdeq = bCap >= humidPicker.suggestedKgHr;
+                  if (aAdeq !== bAdeq) return aAdeq ? -1 : 1;
+                  return aAdeq ? aCap - bCap : bCap - aCap;
+                });
+                // Recommended = smallest adequate model (top-of-list after sort, if any).
+                const recommendedId = sorted.find(m => (m.capacityLPH ?? 0) >= humidPicker.suggestedKgHr)?.id;
+                // If no single model fits, suggest a multi-unit combination using the largest available.
+                const biggest = rawItems.reduce((b, m) => ((m.capacityLPH ?? 0) > (b?.capacityLPH ?? 0) ? m : b), rawItems[0]);
+                const noFit = !recommendedId && humidPicker.suggestedKgHr > 0;
+                const comboQty = noFit && biggest?.capacityLPH ? Math.ceil(humidPicker.suggestedKgHr / biggest.capacityLPH) : 0;
                 return (
                   <div key={subType}>
                     <div className="text-xs font-bold uppercase tracking-wide text-slate-500 dark:text-slate-400 mb-1.5">
                       {subType === 'Ultrasonic' ? 'Ultrasonic (Cool Mist — low power)' : 'Heater-Based (Steam — higher power)'}
                     </div>
+                    {noFit && comboQty > 1 && (
+                      <div className="mb-2 px-3 py-2 rounded-md bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800 text-[11px] text-amber-800 dark:text-amber-300 space-y-1.5">
+                        <p>
+                          <strong>No single model in this category covers {humidPicker.suggestedKgHr} kg/hr.</strong>{' '}
+                          Indian market catalog typically tops out near 30 kg/hr per unit — large loads use multiple units in parallel or direct plant-steam injection.
+                        </p>
+                        <div className="flex items-center justify-between gap-2 pt-1">
+                          <span className="font-mono text-amber-900 dark:text-amber-200">
+                            Suggested: <strong>{comboQty} × {biggest.brand} {biggest.modelSeries}</strong> ({biggest.capacityLPH} kg/hr each = {comboQty * (biggest.capacityLPH ?? 0)} kg/hr total)
+                          </span>
+                          <button
+                            className="px-2.5 py-1 text-[11px] rounded bg-amber-600 text-white hover:bg-amber-700 font-semibold whitespace-nowrap"
+                            onClick={() => void handleSelectHumidifier(humidPicker.zoneId, biggest, comboQty)}>
+                            Use {comboQty} × Combo
+                          </button>
+                        </div>
+                        {humidPicker.suggestedKgHr > 60 && (
+                          <p className="text-[10.5px] italic text-amber-700 dark:text-amber-400 leading-snug pt-0.5">
+                            ⓘ For loads above ~60 kg/hr, consider <strong>direct steam injection</strong> from a central boiler (lance-type dispersion tube in the AHU). More efficient than electric humidifiers at this scale and standard practice in Indian pharma / hospital projects.
+                          </p>
+                        )}
+                      </div>
+                    )}
                     <div className="rounded-lg border border-slate-200 dark:border-slate-700 overflow-hidden">
                       <table className="w-full text-xs">
                         <thead>
@@ -6108,19 +6774,31 @@ export default function EquipmentSelection({
                           </tr>
                         </thead>
                         <tbody className="divide-y divide-slate-100 dark:divide-slate-700">
-                          {items.map(item => {
+                          {sorted.map(item => {
                             const adequate = (item.capacityLPH ?? 0) >= humidPicker.suggestedKgHr;
+                            const isRecommended = item.id === recommendedId;
                             return (
-                              <tr key={item.id} className={cn('hover:bg-sky-50 dark:hover:bg-sky-900/20', adequate ? '' : 'opacity-60')}>
+                              <tr key={item.id} className={cn(
+                                'hover:bg-sky-50 dark:hover:bg-sky-900/20',
+                                isRecommended ? 'bg-emerald-50/60 dark:bg-emerald-950/20' : '',
+                                !adequate ? 'opacity-60' : '',
+                              )}>
                                 <td className="px-3 py-1.5 font-medium dark:text-slate-300">
                                   {item.brand} {item.modelSeries}
-                                  {adequate && <span className="ml-1.5 text-emerald-600 dark:text-emerald-400 text-[10px] font-bold">✓ Fits</span>}
+                                  {isRecommended && <span className="ml-1.5 px-1.5 py-0.5 rounded bg-emerald-600 text-white text-[9px] font-bold uppercase tracking-wide">★ Recommended</span>}
+                                  {adequate && !isRecommended && <span className="ml-1.5 text-emerald-600 dark:text-emerald-400 text-[10px] font-bold">✓ Fits</span>}
+                                  {!adequate && <span className="ml-1.5 text-red-600 dark:text-red-400 text-[10px] font-bold">✕ Under</span>}
                                 </td>
                                 <td className="px-3 py-1.5 text-right font-mono dark:text-slate-300">{item.capacityLPH} kg/hr</td>
                                 <td className="px-3 py-1.5 text-right font-mono text-slate-500 dark:text-slate-400">{item.powerInputKW} kW</td>
                                 <td className="px-2 py-1.5 text-right">
                                   <button
-                                    className="px-2.5 py-1 text-xs rounded bg-sky-600 text-white hover:bg-sky-700 font-medium"
+                                    className={cn(
+                                      'px-2.5 py-1 text-xs rounded font-medium',
+                                      isRecommended
+                                        ? 'bg-emerald-600 text-white hover:bg-emerald-700'
+                                        : 'bg-sky-600 text-white hover:bg-sky-700',
+                                    )}
                                     onClick={() => void handleSelectHumidifier(humidPicker.zoneId, item)}>
                                     Select
                                   </button>

@@ -12,6 +12,7 @@ import {
   ChevronDown, ChevronUp, X, Info, GripVertical,
 } from 'lucide-react';
 import { Button } from '../ui/button';
+import { NumericInput } from '../ui/numeric-input';
 import {
   MATERIALS, SOIL_TYPES, ASHRAE_ASSEMBLIES, MATERIAL_CATEGORIES,
   WALL_CATEGORY_LABELS,
@@ -363,22 +364,19 @@ function AssemblyBuilderDialog({
                       </select>
                     </div>
                     <div className="col-span-3 flex items-center gap-1">
-                      <input
-                        type="number"
-                        min={1}
+                      <NumericInput
+                        min={0}
                         value={layer.thickness}
-                        onChange={e => updateLayer(i, 'thickness', parseFloat(e.target.value) || 0)}
+                        onChange={(n) => updateLayer(i, 'thickness', n ?? 0)}
                         className="w-full rounded border border-gray-200 dark:border-slate-600 px-2 py-1.5 text-xs text-right focus:outline-none focus:ring-1 focus:ring-blue-400 bg-white dark:bg-slate-800 dark:text-slate-200"
                       />
                       <span className="text-xs text-gray-400 dark:text-slate-500 shrink-0">mm</span>
                     </div>
                     <div className="col-span-2 flex items-center gap-1">
-                      <input
-                        type="number"
-                        step="0.001"
-                        min={0.001}
-                        value={layer.lambda || ''}
-                        onChange={e => updateLayer(i, 'lambda', parseFloat(e.target.value) || 0)}
+                      <NumericInput
+                        min={0}
+                        value={layer.lambda || undefined}
+                        onChange={(n) => updateLayer(i, 'lambda', n ?? 0)}
                         placeholder="λ"
                         className="w-full rounded border border-gray-200 dark:border-slate-600 px-2 py-1.5 text-xs text-right focus:outline-none focus:ring-1 focus:ring-blue-400 bg-white dark:bg-slate-800 dark:text-slate-200"
                       />
@@ -427,28 +425,28 @@ function AssemblyBuilderDialog({
                 </div>
                 <div>
                   <label className="block text-xs font-medium text-amber-800 dark:text-amber-400 mb-1">Depth — Top (m)</label>
-                  <input
-                    type="number" step="0.1" min={0}
+                  <NumericInput
+                    min={0}
                     value={groundParams.depthTop}
-                    onChange={e => updateGround('depthTop', parseFloat(e.target.value) || 0)}
+                    onChange={(n) => updateGround('depthTop', n ?? 0)}
                     className="w-full rounded border border-amber-200 dark:border-amber-800 bg-white dark:bg-slate-800 dark:text-slate-200 px-2 py-1.5 text-sm focus:outline-none focus:ring-1 focus:ring-amber-400"
                   />
                 </div>
                 <div>
                   <label className="block text-xs font-medium text-amber-800 dark:text-amber-400 mb-1">Depth — Bottom (m)</label>
-                  <input
-                    type="number" step="0.1" min={0.1}
+                  <NumericInput
+                    min={0.1}
                     value={groundParams.depthBottom}
-                    onChange={e => updateGround('depthBottom', parseFloat(e.target.value) || 0.1)}
+                    onChange={(n) => updateGround('depthBottom', n ?? 0.1)}
                     className="w-full rounded border border-amber-200 dark:border-amber-800 bg-white dark:bg-slate-800 dark:text-slate-200 px-2 py-1.5 text-sm focus:outline-none focus:ring-1 focus:ring-amber-400"
                   />
                 </div>
                 <div>
                   <label className="block text-xs font-medium text-amber-800 dark:text-amber-400 mb-1">Slope Angle (°)</label>
-                  <input
-                    type="number" step="1" min={0} max={90}
+                  <NumericInput
+                    min={0} max={90}
                     value={groundParams.slopeAngle}
-                    onChange={e => updateGround('slopeAngle', parseFloat(e.target.value) || 0)}
+                    onChange={(n) => updateGround('slopeAngle', n ?? 0)}
                     className="w-full rounded border border-amber-200 dark:border-amber-800 bg-white dark:bg-slate-800 dark:text-slate-200 px-2 py-1.5 text-sm focus:outline-none focus:ring-1 focus:ring-amber-400"
                   />
                   <p className="text-[10px] text-amber-600 dark:text-amber-500 mt-0.5">0° = vertical backfill face</p>

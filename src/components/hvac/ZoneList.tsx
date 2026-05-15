@@ -414,6 +414,14 @@ function ZoneCollapsedBadge({
       <span>{t.totalTR.toFixed(2)} TR</span>
       <span className="h-3 w-px bg-orange-200" />
       <span>{Math.round(t.totalDesignCfm)} CFM</span>
+      {t.totalHeating > 0 && (
+        <>
+          <span className="h-3 w-px bg-orange-200" />
+          <span className="text-sky-700 dark:text-sky-400" title="Winter heating load">
+            {Math.round(t.totalHeating).toLocaleString()} BTU/h <span className="opacity-70">heat</span>
+          </span>
+        </>
+      )}
     </span>
   );
 }
@@ -685,11 +693,12 @@ const ZoneList = ({
     return true;
   };
 
-  const renderZone = (zone: any, systemId?: string) => {
+  const renderZone = (zone: any, systemId?: string, overrideRooms?: any[], forceRoomTable?: boolean) => {
     const isSystem = zone.description !== undefined;
     const zoneId = zone.id;
     const isOpen = expandedZone === zoneId;
-    const zoneRooms: any[] = rooms[zoneId] || [];
+    // For system rows, callers pass aggregated rooms from all sub-zones so the count reflects the total.
+    const zoneRooms: any[] = overrideRooms ?? (rooms[zoneId] || []);
     const liveZoneRooms: any[] = liveRooms?.[zoneId] || zoneRooms;
     const effectiveZone = {
       ...zone,
@@ -731,6 +740,24 @@ const ZoneList = ({
       });
     });
 
+    // For system rows: detect whether the plant/ODU has been selected at the system level.
+    // Uses type-specific data shape on the ES system doc.
+    const systemPlantInfo = isSystem ? (() => {
+      const sys = (equipSystems ?? []).find((s: any) => s.id === zoneId);
+      if (!sys) return { has: false, label: 'ODU/Plant' };
+      const t = String(sys.type ?? '');
+      if (t === 'VRF')     return { has: !!sys.oduSelection, label: 'ODU' };
+      if (t === 'Chiller') return { has: (sys.chillerUnits?.length ?? 0) > 0 || !!sys.unitSelection, label: 'Plant' };
+      if (t === 'AHU')     return { has: (sys.ahuUnits?.length ?? 0) > 0 || !!sys.unitSelection, label: 'Condensing Unit' };
+      if (t === 'Package' || t === 'DuctableSplit') return { has: !!sys.unitSelection, label: 'Unit' };
+      if (t === 'DOAS')    return { has: !!sys.unitSelection, label: 'DOAS Unit' };
+      if (t === 'Split') {
+        const sels = sys.roomSelections ?? {};
+        return { has: Object.values(sels).some((v: any) => (Array.isArray(v) ? v.length > 0 : !!v)), label: 'Per-Room ODU' };
+      }
+      return { has: false, label: 'ODU/Plant' };
+    })() : { has: false, label: 'ODU/Plant' };
+
     return (
       <ZoneDropContainer key={zoneId} zoneId={zoneId}>
         {/* Zone header row */}
@@ -763,11 +790,21 @@ const ZoneList = ({
           />
 
           {/* System type badge — legacy VRF system or SD equipment system */}
-          {isSystem && (
-            <span className="text-[10px] font-bold uppercase tracking-wider bg-blue-100 dark:bg-blue-900/30 text-blue-700 dark:text-blue-400 px-1.5 py-0.5 rounded flex-shrink-0">
-              VRF System
-            </span>
-          )}
+          {isSystem && (() => {
+            const sysType: string = String(zone.type ?? 'VRF');
+            const badgeCls =
+              sysType === 'Chiller'        ? 'bg-indigo-100 dark:bg-indigo-900/30 text-indigo-700 dark:text-indigo-400' :
+              sysType === 'AHU'            ? 'bg-sky-100 dark:bg-sky-900/30 text-sky-700 dark:text-sky-400' :
+              sysType === 'Package' || sysType === 'DuctableSplit' ? 'bg-teal-100 dark:bg-teal-900/30 text-teal-700 dark:text-teal-400' :
+              sysType === 'Split'          ? 'bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-400' :
+              sysType === 'DOAS'           ? 'bg-purple-100 dark:bg-purple-900/30 text-purple-700 dark:text-purple-400' :
+              'bg-blue-100 dark:bg-blue-900/30 text-blue-700 dark:text-blue-400';
+            return (
+              <span className={`text-[10px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded flex-shrink-0 ${badgeCls}`}>
+                {sysType} System
+              </span>
+            );
+          })()}
           {!isSystem && zone.type && (
             <span className={`text-[10px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded flex-shrink-0 ${
               zone.type === 'VRF'     ? 'bg-blue-100 dark:bg-blue-900/30 text-blue-700 dark:text-blue-400' :
@@ -781,8 +818,10 @@ const ZoneList = ({
             </span>
           )}
 
-          {/* Expanded: inline toggle buttons + equipment status */}
-          {isOpen && (
+          {/* Expanded: inline toggle buttons + equipment status.
+              Zone-only controls (overrides, summary, IDU status) are hidden on system rows.
+              System rows show ODU / Plant selection status instead. */}
+          {isOpen && !isSystem && (
             <>
               <button
                 type="button"
@@ -811,6 +850,17 @@ const ZoneList = ({
                 </span>
               )}
             </>
+          )}
+          {isOpen && isSystem && (
+            systemPlantInfo.has ? (
+              <span className="flex items-center gap-1 text-[11px] font-semibold text-green-600 dark:text-green-400 flex-shrink-0 border border-green-200 dark:border-green-800 rounded px-1.5 py-0.5 bg-green-50 dark:bg-green-900/20">
+                ✓ {systemPlantInfo.label} Selected
+              </span>
+            ) : (
+              <span className="text-[11px] text-slate-400 dark:text-slate-500 flex-shrink-0 border border-slate-200 dark:border-slate-600 rounded px-1.5 py-0.5">
+                No {systemPlantInfo.label}
+              </span>
+            )
           )}
 
           {/* Room count */}
@@ -969,29 +1019,34 @@ const ZoneList = ({
             </div>
             )}
 
-            <div className="border-t border-gray-100 dark:border-slate-700 bg-gray-50/50 dark:bg-slate-800/50">
-              <RoomTable
-                rooms={zoneRooms}
-                liveRooms={liveZoneRooms}
-                zoneId={zoneId}
-                systemId={systemId}
-                expandedRoom={expandedRoom}
-                setExpandedRoom={setExpandedRoom}
-                updateRoom={updateRoom}
-                deleteRoom={deleteRoom}
-                addEnvelopeElement={addEnvelopeElement}
-                updateEnvelopeElement={updateEnvelopeElement}
-                deleteEnvelopeElement={deleteEnvelopeElement}
-                saveEnvelopeChanges={saveEnvelopeChanges}
-                envelopeElements={envelopeElements}
-                project={project}
-                designConditions={zoneDc}
-                roomSaveStates={roomSaveStates}
-                onRoomDraftChange={onRoomDraftChange}
-                onEnvelopeDraftChange={onEnvelopeDraftChange}
-                userId={userProfile?.uid}
-              />
-            </div>
+            {/* For VRF/Chiller/etc system rows, child zones are rendered below the card —
+                don't repeat the room table here. For Split/DOAS systems, the caller passes
+                forceRoomTable=true since those systems list rooms directly (no zone layer). */}
+            {(forceRoomTable || !isSystem) && (
+              <div className="border-t border-gray-100 dark:border-slate-700 bg-gray-50/50 dark:bg-slate-800/50">
+                <RoomTable
+                  rooms={zoneRooms}
+                  liveRooms={liveZoneRooms}
+                  zoneId={zoneId}
+                  systemId={systemId}
+                  expandedRoom={expandedRoom}
+                  setExpandedRoom={setExpandedRoom}
+                  updateRoom={updateRoom}
+                  deleteRoom={deleteRoom}
+                  addEnvelopeElement={addEnvelopeElement}
+                  updateEnvelopeElement={updateEnvelopeElement}
+                  deleteEnvelopeElement={deleteEnvelopeElement}
+                  saveEnvelopeChanges={saveEnvelopeChanges}
+                  envelopeElements={envelopeElements}
+                  project={project}
+                  designConditions={zoneDc}
+                  roomSaveStates={roomSaveStates}
+                  onRoomDraftChange={onRoomDraftChange}
+                  onEnvelopeDraftChange={onEnvelopeDraftChange}
+                  userId={userProfile?.uid}
+                />
+              </div>
+            )}
             {showSummary && (
               <ZoneSummaryBar
                 zoneRooms={liveZoneRooms}
@@ -1010,10 +1065,93 @@ const ZoneList = ({
     );
   };
 
+  // Group zones into a System > Zone > Room tree:
+  //  • System rows (description present) render at the top level
+  //  • Sub-zones (zone.systemId set) render indented under their parent system
+  //  • Orphan zones (no description, no systemId) render at the top level
+  const isSystemRow = (z: any) => z.description !== undefined;
+  const systemRows = zones.filter(isSystemRow);
+  const childZonesBySystem: Record<string, any[]> = {};
+  const orphanZones: any[] = [];
+  for (const z of zones) {
+    if (isSystemRow(z)) continue;
+    if (z.systemId) {
+      (childZonesBySystem[z.systemId] ||= []).push(z);
+    } else {
+      orphanZones.push(z);
+    }
+  }
+  // Sub-zones whose parent system isn't in `zones` get rendered flat too (defensive)
+  const knownSystemIds = new Set(systemRows.map((s: any) => s.id));
+  for (const sysId of Object.keys(childZonesBySystem)) {
+    if (!knownSystemIds.has(sysId)) {
+      orphanZones.push(...childZonesBySystem[sysId]);
+      delete childZonesBySystem[sysId];
+    }
+  }
+
   return (
-    <div className="divide-y divide-gray-100 dark:divide-slate-700">
-      {/* All zones rendered flat — system type is assigned in System Design, not Load Calculator */}
-      {zones.map((zone: any) => renderZone(zone, undefined))}
+    <div className="space-y-3">
+      {systemRows.map((sys: any) => {
+        // Split & DOAS: rooms live directly under the system (no zone layer). Render
+        // the system card with a flat room table inline; skip the child-zone wrapper.
+        const isFlatSystem = sys.type === 'Split' || sys.type === 'DOAS';
+        if (isFlatSystem) {
+          const flatRooms = rooms[sys.id] ?? [];
+          return (
+            <div
+              key={sys.id}
+              className="rounded-lg border border-blue-200 dark:border-blue-800 bg-blue-50/40 dark:bg-blue-950/15 overflow-hidden shadow-sm"
+            >
+              {renderZone(sys, undefined, flatRooms, true /* forceRoomTable */)}
+              {flatRooms.length === 0 && (
+                <div className="bg-white dark:bg-slate-800 border-t border-blue-200 dark:border-blue-800 px-4 py-3 text-xs italic text-slate-400 dark:text-slate-500">
+                  No rooms yet — assign rooms to this system from the Equipment Selection page.
+                </div>
+              )}
+            </div>
+          );
+        }
+
+        const childZones = childZonesBySystem[sys.id] ?? [];
+        // Aggregate rooms across all sub-zones so the system header room count reflects the total
+        const aggregatedRooms = childZones.flatMap((z: any) => rooms[z.id] ?? []);
+        return (
+          <div
+            key={sys.id}
+            className="rounded-lg border border-blue-200 dark:border-blue-800 bg-blue-50/40 dark:bg-blue-950/15 overflow-hidden shadow-sm"
+          >
+            {renderZone(sys, undefined, aggregatedRooms)}
+            {childZones.length > 0 && (
+              <div className="bg-white dark:bg-slate-800 border-t border-blue-200 dark:border-blue-800 pl-6 ml-3 my-1 border-l-2 border-blue-300 dark:border-blue-700 divide-y divide-gray-100 dark:divide-slate-700">
+                {childZones.map((z: any) => renderZone(z, sys.id))}
+              </div>
+            )}
+            {childZones.length === 0 && (
+              <div className="bg-white dark:bg-slate-800 border-t border-blue-200 dark:border-blue-800 pl-6 ml-3 my-1 border-l-2 border-blue-300 dark:border-blue-700 px-4 py-3 text-xs italic text-slate-400 dark:text-slate-500">
+                No zones yet — click &ldquo;+ Add Zone&rdquo; below to create the first one.
+              </div>
+            )}
+            {canEdit && addZone && (
+              <div className="bg-white dark:bg-slate-800 border-t border-blue-200 dark:border-blue-800 px-4 py-2 flex justify-end">
+                <button
+                  type="button"
+                  onClick={() => void addZone(sys.id)}
+                  className="text-xs font-semibold text-blue-700 dark:text-blue-400 hover:text-blue-800 dark:hover:text-blue-300 px-2.5 py-1 rounded border border-blue-200 dark:border-blue-700 bg-blue-50 dark:bg-blue-900/20 hover:bg-blue-100 dark:hover:bg-blue-900/40 transition-colors flex items-center gap-1"
+                  title={`Add a new zone to ${sys.name}`}
+                >
+                  <Plus className="w-3 h-3" /> Add Zone to {sys.name}
+                </button>
+              </div>
+            )}
+          </div>
+        );
+      })}
+      {orphanZones.length > 0 && (
+        <div className="rounded-lg border border-gray-100 dark:border-slate-700 divide-y divide-gray-100 dark:divide-slate-700 overflow-hidden">
+          {orphanZones.map((zone: any) => renderZone(zone, undefined))}
+        </div>
+      )}
 
       {/* ── Bulk Move Dialog ─────────────────────────────────────────────────── */}
       {bulkMoveOpen && bulkSourceZoneId && (() => {

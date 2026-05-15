@@ -1,6 +1,7 @@
 import React, { useState, useMemo } from "react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
+import { NumericInput } from "@/components/ui/numeric-input";
 import { Label } from "@/components/ui/label";
 import { Button } from "@/components/ui/button";
 import {
@@ -152,12 +153,10 @@ export function CableMCBSelector() {
                     onValueChange={(val) => setLoadCurrent(val[0])}
                     className="w-full"
                   />
-                  <Input
-                    type="number"
-                    min="1"
-                    max="1000"
+                  <NumericInput
+                    min={0} max={1000}
                     value={loadCurrent}
-                    onChange={(e) => setLoadCurrent(parseFloat(e.target.value) || 0)}
+                    onChange={(n) => setLoadCurrent(n ?? 0)}
                     placeholder="Amps"
                     className="text-sm"
                   />

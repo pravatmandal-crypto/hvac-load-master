@@ -5,6 +5,7 @@ import { cn } from '../../lib/utils';
 import { FileText, ChevronDown, ChevronRight, Wand2, Save, Printer, CheckCircle2, Download } from 'lucide-react';
 import { Button } from '../ui/button';
 import { Input } from '../ui/input';
+import { NumericInput } from '../ui/numeric-input';
 import { toast } from 'sonner';
 import type { EquipmentSystem, AHUConfig } from '../../types/equipment-systems';
 import type { AHUData, AHUZoneData, ChillerData, CTData, PackageData, HumidifierData, FullSpec } from '../../types/equipment-specs';
@@ -611,12 +612,20 @@ function SF({
     <div className={cn('flex items-center gap-2 min-w-0', className)}>
       <span className="text-[11px] text-slate-500 dark:text-slate-400 w-48 shrink-0">{label}</span>
       <div className="flex items-center gap-1">
-        <Input
-          type={type}
-          value={value}
-          onChange={e => onChange(type === 'number' ? (parseFloat(e.target.value) || 0) : e.target.value)}
-          className={cn('h-7 text-xs font-mono dark:bg-slate-900 dark:border-slate-600 dark:text-slate-200', wide ? 'w-52' : 'w-24')}
-        />
+        {type === 'number' ? (
+          <NumericInput
+            value={typeof value === 'number' ? value : (value === '' ? undefined : parseFloat(String(value)))}
+            onChange={(n) => onChange(n ?? 0)}
+            className={cn('h-7 text-xs font-mono dark:bg-slate-900 dark:border-slate-600 dark:text-slate-200', wide ? 'w-52' : 'w-24')}
+          />
+        ) : (
+          <Input
+            type="text"
+            value={value}
+            onChange={e => onChange(e.target.value)}
+            className={cn('h-7 text-xs font-mono dark:bg-slate-900 dark:border-slate-600 dark:text-slate-200', wide ? 'w-52' : 'w-24')}
+          />
+        )}
         {unit && <span className="text-[11px] text-slate-400 dark:text-slate-500 shrink-0">{unit}</span>}
       </div>
     </div>

@@ -1,3 +1,4 @@
+
 ---
 name: create-skill
 description: 'Create and refine Copilot SKILL.md files. Use when authoring reusable workflows, converting ad-hoc chat methods into repeatable skills, choosing scope (workspace vs personal), and validating invocation/discovery quality.'

@@ -4,6 +4,7 @@ import { Plus, FolderOpen, Building2, MapPin, User as UserIcon, Calendar, Trash2
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../ui/card';
 import { Button } from '../ui/button';
 import { Input } from '../ui/input';
+import { NumericInput } from '../ui/numeric-input';
 import { Label } from '../ui/label';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../ui/select';
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogFooter } from '../ui/dialog';
@@ -408,24 +409,20 @@ export default function ProjectManager({ onSelectProject, userProfile }: { onSel
               <div className="grid grid-cols-2 gap-4">
                 <div className="grid gap-2">
                   <Label htmlFor="latitude">Latitude</Label>
-                  <Input 
-                    id="latitude" 
-                    type="number"
-                    step="any"
+                  <NumericInput 
+                    id="latitude"
                     placeholder="0.0000" 
                     value={newProject.latitude}
-                    onChange={(e) => setNewProject({ ...newProject, latitude: parseFloat(e.target.value) || 0 })}
+                    onChange={(n) => setNewProject({ ...newProject, latitude: n ?? 0 })}
                   />
                 </div>
                 <div className="grid gap-2">
                   <Label htmlFor="longitude">Longitude</Label>
-                  <Input 
-                    id="longitude" 
-                    type="number"
-                    step="any"
+                  <NumericInput 
+                    id="longitude"
                     placeholder="0.0000" 
                     value={newProject.longitude}
-                    onChange={(e) => setNewProject({ ...newProject, longitude: parseFloat(e.target.value) || 0 })}
+                    onChange={(n) => setNewProject({ ...newProject, longitude: n ?? 0 })}
                   />
                 </div>
               </div>
@@ -466,29 +463,26 @@ export default function ProjectManager({ onSelectProject, userProfile }: { onSel
               <div className="grid grid-cols-3 gap-4">
                 <div className="grid gap-2">
                   <Label htmlFor="altitude">Altitude (ft)</Label>
-                  <Input 
-                    id="altitude" 
-                    type="number"
+                  <NumericInput 
+                    id="altitude"
                     value={newProject.altitude}
-                    onChange={(e) => setNewProject({ ...newProject, altitude: parseFloat(e.target.value) || 0 })}
+                    onChange={(n) => setNewProject({ ...newProject, altitude: n ?? 0 })}
                   />
                 </div>
                 <div className="grid gap-2">
                   <Label htmlFor="designTemp">Summer Temp (°F)</Label>
-                  <Input 
-                    id="designTemp" 
-                    type="number"
+                  <NumericInput 
+                    id="designTemp"
                     value={newProject.summerDesignTemp}
-                    onChange={(e) => setNewProject({ ...newProject, summerDesignTemp: parseFloat(e.target.value) || 0 })}
+                    onChange={(n) => setNewProject({ ...newProject, summerDesignTemp: n ?? 0 })}
                   />
                 </div>
                 <div className="grid gap-2">
                   <Label htmlFor="designHum">Summer RH (%)</Label>
-                  <Input 
-                    id="designHum" 
-                    type="number"
+                  <NumericInput 
+                    id="designHum"
                     value={newProject.summerDesignHumidity}
-                    onChange={(e) => setNewProject({ ...newProject, summerDesignHumidity: parseFloat(e.target.value) || 0 })}
+                    onChange={(n) => setNewProject({ ...newProject, summerDesignHumidity: n ?? 0 })}
                   />
                 </div>
               </div>
@@ -508,20 +502,18 @@ export default function ProjectManager({ onSelectProject, userProfile }: { onSel
                 <div className="grid grid-cols-2 gap-4">
                   <div className="grid gap-2">
                     <Label htmlFor="winterTemp">Winter Temp (°F)</Label>
-                    <Input
+                    <NumericInput
                       id="winterTemp"
-                      type="number"
                       value={newProject.winterDesignTemp}
-                      onChange={(e) => setNewProject({ ...newProject, winterDesignTemp: parseFloat(e.target.value) || 0 })}
+                      onChange={(n) => setNewProject({ ...newProject, winterDesignTemp: n ?? 0 })}
                     />
                   </div>
                   <div className="grid gap-2">
                     <Label htmlFor="winterHum">Winter RH (%)</Label>
-                    <Input
+                    <NumericInput
                       id="winterHum"
-                      type="number"
                       value={newProject.winterDesignHumidity}
-                      onChange={(e) => setNewProject({ ...newProject, winterDesignHumidity: parseFloat(e.target.value) || 0 })}
+                      onChange={(n) => setNewProject({ ...newProject, winterDesignHumidity: n ?? 0 })}
                     />
                   </div>
                 </div>
@@ -542,20 +534,18 @@ export default function ProjectManager({ onSelectProject, userProfile }: { onSel
                 <div className="grid grid-cols-2 gap-4">
                   <div className="grid gap-2">
                     <Label htmlFor="monsoonTemp">Monsoon Temp (°F)</Label>
-                    <Input
+                    <NumericInput
                       id="monsoonTemp"
-                      type="number"
                       value={newProject.monsoonDesignTemp}
-                      onChange={(e) => setNewProject({ ...newProject, monsoonDesignTemp: parseFloat(e.target.value) || 0 })}
+                      onChange={(n) => setNewProject({ ...newProject, monsoonDesignTemp: n ?? 0 })}
                     />
                   </div>
                   <div className="grid gap-2">
                     <Label htmlFor="monsoonHum">Monsoon RH (%)</Label>
-                    <Input
+                    <NumericInput
                       id="monsoonHum"
-                      type="number"
                       value={newProject.monsoonDesignHumidity}
-                      onChange={(e) => setNewProject({ ...newProject, monsoonDesignHumidity: parseFloat(e.target.value) || 0 })}
+                      onChange={(n) => setNewProject({ ...newProject, monsoonDesignHumidity: n ?? 0 })}
                     />
                   </div>
                 </div>
@@ -564,20 +554,18 @@ export default function ProjectManager({ onSelectProject, userProfile }: { onSel
               <div className="grid grid-cols-2 gap-4">
                 <div className="grid gap-2">
                   <Label htmlFor="indoorTemp">Inside Summer Temp (°F)</Label>
-                  <Input 
-                    id="indoorTemp" 
-                    type="number"
+                  <NumericInput 
+                    id="indoorTemp"
                     value={newProject.insideSummerTemp}
-                    onChange={(e) => setNewProject({ ...newProject, insideSummerTemp: parseFloat(e.target.value) || 0 })}
+                    onChange={(n) => setNewProject({ ...newProject, insideSummerTemp: n ?? 0 })}
                   />
                 </div>
                 <div className="grid gap-2">
                   <Label htmlFor="indoorHum">Inside Summer RH (%)</Label>
-                  <Input 
-                    id="indoorHum" 
-                    type="number"
+                  <NumericInput 
+                    id="indoorHum"
                     value={newProject.insideSummerHumidity}
-                    onChange={(e) => setNewProject({ ...newProject, insideSummerHumidity: parseFloat(e.target.value) || 0 })}
+                    onChange={(n) => setNewProject({ ...newProject, insideSummerHumidity: n ?? 0 })}
                   />
                 </div>
               </div>
@@ -586,20 +574,18 @@ export default function ProjectManager({ onSelectProject, userProfile }: { onSel
                 <div className="grid grid-cols-2 gap-4">
                   <div className="grid gap-2">
                     <Label htmlFor="insideMonsoonTemp">Inside Monsoon Temp (°F)</Label>
-                    <Input
+                    <NumericInput
                       id="insideMonsoonTemp"
-                      type="number"
                       value={newProject.insideMonsoonTemp}
-                      onChange={(e) => setNewProject({ ...newProject, insideMonsoonTemp: parseFloat(e.target.value) || 0 })}
+                      onChange={(n) => setNewProject({ ...newProject, insideMonsoonTemp: n ?? 0 })}
                     />
                   </div>
                   <div className="grid gap-2">
                     <Label htmlFor="insideMonsoonHum">Inside Monsoon RH (%)</Label>
-                    <Input
+                    <NumericInput
                       id="insideMonsoonHum"
-                      type="number"
                       value={newProject.insideMonsoonHumidity}
-                      onChange={(e) => setNewProject({ ...newProject, insideMonsoonHumidity: parseFloat(e.target.value) || 0 })}
+                      onChange={(n) => setNewProject({ ...newProject, insideMonsoonHumidity: n ?? 0 })}
                     />
                   </div>
                 </div>
@@ -609,20 +595,18 @@ export default function ProjectManager({ onSelectProject, userProfile }: { onSel
                 <div className="grid grid-cols-2 gap-4">
                   <div className="grid gap-2">
                     <Label htmlFor="winterIndoorTemp">Inside Winter Temp (°F)</Label>
-                    <Input
+                    <NumericInput
                       id="winterIndoorTemp"
-                      type="number"
                       value={newProject.insideWinterTemp}
-                      onChange={(e) => setNewProject({ ...newProject, insideWinterTemp: parseFloat(e.target.value) || 0 })}
+                      onChange={(n) => setNewProject({ ...newProject, insideWinterTemp: n ?? 0 })}
                     />
                   </div>
                   <div className="grid gap-2">
                     <Label htmlFor="winterIndoorHum">Inside Winter RH (%)</Label>
-                    <Input
+                    <NumericInput
                       id="winterIndoorHum"
-                      type="number"
                       value={newProject.insideWinterHumidity}
-                      onChange={(e) => setNewProject({ ...newProject, insideWinterHumidity: parseFloat(e.target.value) || 0 })}
+                      onChange={(n) => setNewProject({ ...newProject, insideWinterHumidity: n ?? 0 })}
                     />
                   </div>
                 </div>

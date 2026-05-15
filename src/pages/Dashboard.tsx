@@ -2,10 +2,11 @@ import { useState, useEffect } from 'react';
 import { User } from 'firebase/auth';
 import { Button } from '../components/ui/button';
 import { Card, CardContent } from '../components/ui/card';
-import { MapPin, Play, Calculator, Zap, Wind, Droplets, Wrench, FileText, BookOpen, ArrowRight, FolderOpen, Clock, Thermometer } from 'lucide-react';
+import { MapPin, Play, Calculator, Zap, Wind, Droplets, Wrench, FileText, BookOpen, ArrowRight, FolderOpen, Clock, Thermometer, Copy, Loader2 } from 'lucide-react';
 import { db } from '../lib/firebase';
-import { collection, onSnapshot, orderBy, query, where } from 'firebase/firestore';
+import { collection, doc, getDoc, onSnapshot, orderBy, query, where } from 'firebase/firestore';
 import { toast } from 'sonner';
+import { cloneProject } from '../services/cloneProjectService';
 
 interface Project {
   id: string;
@@ -41,6 +42,53 @@ const TOOLS = [
 export default function Dashboard({ currentUser, onProjectOpen, onPageChange, userRole }: DashboardProps) {
   const [projects, setProjects] = useState<Project[]>([]);
   const [ownerEmails, setOwnerEmails] = useState<Record<string, string>>({});
+  const [duplicatingId, setDuplicatingId] = useState<string | null>(null);
+
+  const handleDuplicate = async (project: Project) => {
+    if (duplicatingId) return;
+    setDuplicatingId(project.id);
+    const newName = `Copy of ${project.name}`;
+    const toastId = toast.loading(`Duplicating "${project.name}"…`);
+    try {
+      const result = await cloneProject(project.id, newName, currentUser.uid, (msg) => {
+        toast.loading(msg, { id: toastId });
+      });
+      toast.success(
+        `Duplicated — ${result.roomsCopied} room${result.roomsCopied === 1 ? '' : 's'}, ${result.systemsCopied} system${result.systemsCopied === 1 ? '' : 's'}, ${result.envelopeElementsCopied} envelope element${result.envelopeElementsCopied === 1 ? '' : 's'} copied.`,
+        { id: toastId, duration: 6000 },
+      );
+      // Auto-open the new project. Fetch the freshly-written doc directly so the
+      // LoadCalculator receives the clone's own data — not the source project's data
+      // shallow-spread with a swapped id (which made Edit-dialog values appear stale
+      // until the parent's onSnapshot listener caught up).
+      let newProject: Project;
+      try {
+        const newSnap = await getDoc(doc(db, 'projects', result.newProjectId));
+        const np: any = newSnap.exists() ? newSnap.data() : {};
+        const npData = np.data || {};
+        newProject = {
+          id: result.newProjectId,
+          name: np.name ?? newName,
+          location: np.location ?? '',
+          userId: np.userId,
+          systemType: np.systemType || 'CAC',
+          summerDesignTemp: npData.summerDesignTemp ?? 95,
+          summerDesignHumidity: npData.summerDesignHumidity ?? 50,
+          winterDesignTemp: npData.winterDesignTemp,
+          winterDesignHumidity: npData.winterDesignHumidity,
+          updatedAt: np.updatedAt?.toDate ? np.updatedAt.toDate() : new Date(),
+        };
+      } catch {
+        // Fallback: pass through with new id and let the parent's onSnapshot reconcile.
+        newProject = { ...project, id: result.newProjectId, name: newName, updatedAt: new Date() };
+      }
+      onProjectOpen(newProject);
+    } catch (err: any) {
+      toast.error(`Duplicate failed: ${err?.message ?? 'unknown error'}`, { id: toastId });
+    } finally {
+      setDuplicatingId(null);
+    }
+  };
 
   useEffect(() => {
     const q = userRole === 'Super'
@@ -233,13 +281,25 @@ export default function Dashboard({ currentUser, onProjectOpen, onPageChange, us
                     </span>
                   </div>
                 )}
-                <div className="mt-3">
+                <div className="mt-3 flex items-stretch gap-1.5">
                   <Button
                     size="sm"
-                    className="w-full text-xs h-7 bg-teal-600 hover:bg-teal-500 text-white"
+                    className="flex-1 text-xs h-7 bg-teal-600 hover:bg-teal-500 text-white"
                     onClick={(e) => { e.stopPropagation(); onProjectOpen(project); }}
                   >
                     <Play className="mr-1.5 h-3 w-3" /> Open
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="text-xs h-7 px-2"
+                    disabled={duplicatingId !== null}
+                    title={`Duplicate "${project.name}"`}
+                    onClick={(e) => { e.stopPropagation(); void handleDuplicate(project); }}
+                  >
+                    {duplicatingId === project.id
+                      ? <Loader2 className="h-3 w-3 animate-spin" />
+                      : <Copy className="h-3 w-3" />}
                   </Button>
                 </div>
               </div>

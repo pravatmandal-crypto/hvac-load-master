@@ -138,7 +138,7 @@ export default function PipeSizer() {
               <div className="space-y-1">
                 <Label className="text-xs font-medium text-gray-600 dark:text-slate-400">Flow Rate (GPM)</Label>
                 <Input
-                  type="number"
+                  type="text" inputMode="decimal"
                   value={gpm}
                   onChange={(e) => setGpm(Math.max(0.1, Number(e.target.value)))}
                   placeholder="e.g. 20"
@@ -148,7 +148,7 @@ export default function PipeSizer() {
               <div className="space-y-1">
                 <Label className="text-xs font-medium text-gray-600 dark:text-slate-400">Max Velocity (FPS)</Label>
                 <Input
-                  type="number"
+                  type="text" inputMode="decimal"
                   step="0.5"
                   value={maxVelocity}
                   onChange={(e) => setMaxVelocity(Math.max(0.5, Number(e.target.value)))}
@@ -159,7 +159,7 @@ export default function PipeSizer() {
               <div className="space-y-1">
                 <Label className="text-xs font-medium text-gray-600 dark:text-slate-400">Pipe Length (ft)</Label>
                 <Input
-                  type="number"
+                  type="text" inputMode="decimal"
                   step="10"
                   value={pipeLength}
                   onChange={(e) => setPipeLength(Math.max(1, Number(e.target.value)))}

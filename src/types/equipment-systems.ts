@@ -22,19 +22,31 @@ export interface IDUSelection {
   subType: string;
   trCapacity: number;
   cfmRated: number;
+  staticPressurePa?: number;
   quantity?: number;
   isCustom?: boolean;
   // AHU / FCU (Chiller terminal) — mounting and coil options
   mountingType?: 'floor-standing' | 'ceiling-hung';
   coilType?: 'cooling-only' | 'cooling-heating';
+  // AHU-DX type only: indoor AHU paired to a specific condensing unit on system.ahuUnits[].
+  // Identifies the CDU by its modelId; engineering schedules / PDFs use this to print pairings.
+  pairedCDUId?: string;
 }
 
 export interface ODUCombinationUnit {
   modelId: string;
   brand: string;
   modelSeries: string;
+  // trCapacity = Nominal TR — OEM catalog rating at AHRI 550/590 standard conditions
+  // (44 °F LWT chilled water, 85 °F EWT condenser water for WC, 95 °F ambient for AC).
   trCapacity: number;
+  // actualTR = the designer's MINIMUM REQUIRED capacity at this project's site conditions
+  // (entering CW/air temp, LCW temp, altitude, fouling). Issued to the OEM as the duty
+  // point — OEM must confirm in their technical proposal that the model can meet it.
+  // Plant sizing uses this when entered; leave blank to fall back to trCapacity.
+  actualTR?: number;
   quantity: number;
+  role?: 'working' | 'standby';
   dischargeType?: 'top' | 'side';
   compressorType?: 'heat-pump' | 'cooling-only';
 }
@@ -104,6 +116,8 @@ export interface EquipmentSystem {
   oduSelection: ODUSelection | null;
   unitSelection: SingleUnitSelection | null;
   ctSelection?: SingleUnitSelection | null;
+  // Multiple cooling tower units (any model mix) — supersedes ctSelection for new data
+  ctUnits?: ODUCombinationUnit[];
   // For Chiller — multiple different-model chiller units in the plant
   chillerUnits?: ODUCombinationUnit[];
   // For Split — array of units per room (flat: no zone level)
@@ -156,4 +170,22 @@ export interface HvacRoomFields {
   hvacZoneId?: string;     // points to /hvacSystems/{sysId}/zones/{id}
   hvacSystemName?: string; // denormalised for display
   hvacZoneName?: string;   // denormalised for display
+}
+
+/**
+ * Returns the IDU / AHU units configured for a zone, unifying the legacy single-unit
+ * field (`zone.selection`) with the newer multi-unit list (`zone.unitSelections[]`).
+ *
+ * Priority:
+ *  1. If `unitSelections[]` has any entries, return it (primary multi-unit shape)
+ *  2. Else if `selection` is present, return `[selection]` (legacy single-unit fallback)
+ *  3. Else return `[]` (no equipment selected)
+ *
+ * Use this everywhere on the read path so multi-AHU zones and legacy single-AHU zones
+ * are rendered, costed, and reported through one code path.
+ */
+export function getZoneUnits(zone: EquipmentZone | undefined | null): IDUSelection[] {
+  if (!zone) return [];
+  if (zone.unitSelections && zone.unitSelections.length > 0) return zone.unitSelections;
+  return zone.selection ? [zone.selection] : [];
 }
