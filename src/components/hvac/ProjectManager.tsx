@@ -415,10 +415,10 @@ export default function ProjectManager({ onSelectProject, userProfile }: { onSel
                 </div>
               </div>
               
-              {/* IS Code Region Selector - for India projects */}
-              <div className="border-t pt-4 bg-yellow-100 p-4 border-2 border-yellow-500">
-                <p className="text-sm font-bold text-yellow-900 mb-2">DEBUG: RegionSelector component test</p>
-                <RegionSelector 
+              {/* IS Code Region Selector — for India projects, auto-fills design
+                  conditions from IS 12273 and locks the project to IS Code standards. */}
+              <div className="border-t pt-4">
+                <RegionSelector
                   onRegionSelect={handleISCodeRegionSelect}
                   defaultRegion="delhi"
                 />
