@@ -1169,7 +1169,11 @@ export const generatePDFReport = (
     startY: y,
     body: [
       ['Total Systems',                    n0(Math.max(effectiveSystems.length, activeEquipSystems.length))],
-      ['Total Zones',                      n0(effectiveZones.length)],
+      // Use entities.length (already filtered by buildEntityRecords) instead of
+      // effectiveZones.length — the raw zones array contains equipment-system
+      // docs that LC mirrors into /zones/ for the tree view, which would
+      // double-count here.
+      ['Total Zones',                      n0(entities.length)],
       ['Total Rooms',                      n0(allRooms.length)],
       ['Peak Governing Season',            `${peakSeason.season}  (${n2(peakSeason.governingTr)} TR  ·  ${n0(peakSeason.cfm)} CFM)`],
       ['Recommended Submission Basis',     `${n2(recTR)} TR  and  ${n0(recCFM)} CFM`],
