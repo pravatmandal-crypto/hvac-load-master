@@ -772,7 +772,7 @@ const buildEngineeringReview = (
       scope: 'Project',
       title: `Indoor humidity ratio ${wInGr.toFixed(0)} gr/lb exceeds ASHRAE 62.1-2022 §5.9 cap (87 gr/lb)`,
       description: `Continuously maintaining indoor air at this humidity creates condensation and mould risk and is non-compliant with current IAQ standards.`,
-      recommendation: `Lower indoor RH target. At 75°F max RH ≈ 55%; at 78°F max RH ≈ 49%; at 70°F max RH ≈ 70%.`,
+      recommendation: `Lower indoor RH target. At 75°F max RH ~ 55%; at 78°F max RH ~ 49%; at 70°F max RH ~ 70%.`,
     });
   }
 
@@ -839,8 +839,8 @@ const buildEngineeringReview = (
               severity: 'info',
               scope: roomLabel,
               title: `Mixed wall U-values (${minU.toFixed(3)} to ${maxU.toFixed(3)}) — verify partition modeling`,
-              description: `Some walls are heavily insulated (U≈0.03 typical of cold-storage panels) while others are exterior-grade (U≈0.35 typical of brick/uninsulated).`,
-              recommendation: `Walls bordering other conditioned rooms should be modeled as Partition elements with the actual ΔT to the neighbour (often 0-5°F), not as exterior walls receiving full outdoor ΔT and solar.`,
+              description: `Some walls are heavily insulated (U ~ 0.03 typical of cold-storage panels) while others are exterior-grade (U ~ 0.35 typical of brick/uninsulated).`,
+              recommendation: `Walls bordering other conditioned rooms should be modeled as Partition elements with the actual dT to the neighbour (often 0-5°F), not as exterior walls receiving full outdoor dT and solar.`,
             });
           }
         }
@@ -898,6 +898,23 @@ const buildEngineeringReview = (
   return findings;
 };
 
+// Replace common HVAC/math glyphs that aren't in jsPDF's default WinAnsi
+// helvetica encoding. These render as garbage bytes (e.g. "H for ≈) AND
+// throw off splitTextToSize width calc, causing text to overflow the colored
+// findings card. Keep this list in sync with any new symbols introduced in
+// finding text.
+const sanitizeForPDF = (s: string): string =>
+  s
+    .replace(/≈/g, '~')
+    .replace(/Δ/g, 'd')
+    .replace(/Σ/g, 'Sum')
+    .replace(/→/g, '->')
+    .replace(/←/g, '<-')
+    .replace(/≥/g, '>=')
+    .replace(/≤/g, '<=')
+    .replace(/±/g, '+/-')
+    .replace(/µ/g, 'u');
+
 const renderEngineeringReview = (
   doc: jsPDF,
   findings: Finding[],
@@ -907,7 +924,17 @@ const renderEngineeringReview = (
 ): void => {
   if (findings.length === 0) return;
 
-  // Sort: critical → warning → info
+  // Defensive sanitize so any future finding text can't sneak in glyphs
+  // unsupported by jsPDF's default font (would corrupt rendering).
+  findings = findings.map((f) => ({
+    ...f,
+    title: sanitizeForPDF(f.title),
+    description: sanitizeForPDF(f.description),
+    recommendation: sanitizeForPDF(f.recommendation),
+    scope: sanitizeForPDF(f.scope),
+  }));
+
+  // Sort: critical -> warning -> info
   const order: Record<FindingSeverity, number> = { critical: 0, warning: 1, info: 2 };
   findings.sort((a, b) => order[a.severity] - order[b.severity]);
 
@@ -1790,7 +1817,7 @@ export const generatePDFReport = (
             ['Enthalpy h (BTU/lb)',      n2(outdoorPsycho.enthalpy),             n2(indoorPsycho.enthalpy),              '—', '—'],
           ] : [
             ['Dry Bulb Temp (°F)',       n1(dc.outdoorTemp),                      n1(dc.indoorTemp),                      n1(tSup),           `ADP ${n0(m.selectedAdp)} °F  (Ind. ${n1(m.indicatedAdp)} °F)`],
-            ['Humidity Ratio (gr/lb)',   n1(outdoorPsycho.humidityRatio * 7000), n1(indoorPsycho.humidityRatio * 7000), n1(wSup * 7000),    `ΔW coil = ${n1(dwCoil)} gr/lb`],
+            ['Humidity Ratio (gr/lb)',   n1(outdoorPsycho.humidityRatio * 7000), n1(indoorPsycho.humidityRatio * 7000), n1(wSup * 7000),    `dW coil = ${n1(dwCoil)} gr/lb`],
             // RSHF (room) drives reheat sizing; GSHF (coil incl. OA + parasitic)
             // drives ADP. Show both since they answer different questions.
             ['Enthalpy h (BTU/lb)',      n2(outdoorPsycho.enthalpy),             n2(indoorPsycho.enthalpy),              n2(hSup),           `RSHF = ${n2(cSHR)}  ·  GSHF = ${n2(m.rshf)}`],
@@ -2115,15 +2142,15 @@ export const generatePDFReport = (
         ? [['Humidifier Energy  (ṁ × h_fg)', `—`, `${n0(wm.hHumLoad)} BTU/h`]]
         : [];
       const slabRow: string[][] = wm.hSlabRaw > 0
-        ? [['Slab-Edge Loss  (F × Perimeter × ΔT)',   `${n0(wm.hSlabRaw)}`,     `${n0(wm.hSlabSafe)}`]]
+        ? [['Slab-Edge Loss  (F × Perimeter × dT)',   `${n0(wm.hSlabRaw)}`,     `${n0(wm.hSlabSafe)}`]]
         : [];
 
       autoTable(doc, {
         startY: y,
         head: [['Component', 'Raw (BTU/h)', 'With Safety (BTU/h)']],
         body: [
-          ['Transmission Loss  (U × A × ΔT)',         `${n0(wm.hTransRaw)}`,    `${n0(wm.hTransSafe)}`],
-          ['Ventilation Heating  (1.08 × CFM × ΔT)',  `${n0(wm.hVentRaw)}`,     `${n0(wm.hVentSafe)}`],
+          ['Transmission Loss  (U × A × dT)',         `${n0(wm.hTransRaw)}`,    `${n0(wm.hTransSafe)}`],
+          ['Ventilation Heating  (1.08 × CFM × dT)',  `${n0(wm.hVentRaw)}`,     `${n0(wm.hVentSafe)}`],
           ...slabRow,
           ...humRow,
           [`Subtotal  (safety ${wm.heatingSafetyPct.toFixed(0)}% applied)`,   '—', `${n0(wm.heatingSubtotal)}`],
@@ -2175,7 +2202,7 @@ export const generatePDFReport = (
       const humBody: string[][] = [
         ['Outdoor Air',  `${winDcRoom.outdoorTemp}°F / ${winDcRoom.outdoorHumidity}% RH`, `W = ${wm.humWOutGr.toFixed(1)} gr/lb`],
         ['Indoor Target', `${winDcRoom.indoorTemp}°F / ${winDcRoom.indoorHumidity}% RH`, `W = ${wm.humWInGr.toFixed(1)} gr/lb`],
-        ['Moisture Deficit ΔW', `${wm.humDeltaWGr.toFixed(1)} gr/lb`, wm.humNeeded ? 'Humidification needed' : 'Sufficient — no humidifier'],
+        ['Moisture Deficit dW', `${wm.humDeltaWGr.toFixed(1)} gr/lb`, wm.humNeeded ? 'Humidification needed' : 'Sufficient — no humidifier'],
         ['RH after heating (no humidifier)', `${wm.humRhAfterHeating}%`, wm.humRhAfterHeating < 30 ? '⚠ Below ASHRAE 55 min (30%)' : '✓ Within comfort range'],
       ];
       if (wm.humNeeded) {
@@ -2384,7 +2411,7 @@ const renderEquipmentScheduleBody = (
         });
         if (sys.iduSelections) Object.values(sys.iduSelections as Record<string, any>).forEach((val: any) => { (Array.isArray(val) ? val : val ? [val] : []).forEach((u: any) => { connTR += (u.trCapacity ?? 0) * (u.quantity ?? 1); }); });
         const note = connTR > 0
-          ? `  Diversity Factor: ${(df * 100).toFixed(0)}%  ·  Total Connected IDU: ${n2(connTR)} TR  →  Effective Required: ${n2(connTR * df)} TR`
+          ? `  Diversity Factor: ${(df * 100).toFixed(0)}%  ·  Total Connected IDU: ${n2(connTR)} TR  ->  Effective Required: ${n2(connTR * df)} TR`
           : `  Diversity Factor: ${(df * 100).toFixed(0)}%`;
         eqBody.push([{ content: note, colSpan: 8, styles: { fontStyle: 'italic' as const, fontSize: 7, textColor: C.subInk } }]);
       }
@@ -2419,8 +2446,8 @@ const renderEquipmentScheduleBody = (
           else if (z.selection) connTR += (z.selection.trCapacity ?? 0) * (z.selection.quantity ?? 1);
         });
         const note = connTR > 0
-          ? `  Diversity Factor: ${(cdf * 100).toFixed(0)}%  ·  Σ Connected AHU / FCU: ${n2(connTR)} TR  →  Effective Plant Required: ${n2(connTR * cdf)} TR`
-          : `  Diversity Factor: ${(cdf * 100).toFixed(0)}%  (applied to Σ zone peak loads for plant sizing)`;
+          ? `  Diversity Factor: ${(cdf * 100).toFixed(0)}%  ·  Sum Connected AHU / FCU: ${n2(connTR)} TR  ->  Effective Plant Required: ${n2(connTR * cdf)} TR`
+          : `  Diversity Factor: ${(cdf * 100).toFixed(0)}%  (applied to sum of zone peak loads for plant sizing)`;
         eqBody.push([{ content: note, colSpan: 8, styles: { fontStyle: 'italic' as const, fontSize: 7, textColor: C.subInk } }]);
       }
       const ctUnits: any[] = sys.ctUnits?.length ? sys.ctUnits : (sys.ctSelection ? [{ ...sys.ctSelection, quantity: sys.ctSelection.quantity ?? 1 }] : []);
