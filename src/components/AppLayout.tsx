@@ -110,7 +110,7 @@ export default function AppLayout({
         {/* Active project banner */}
         {activeProject && sidebarOpen && (
           <div className="mx-3 mt-3 rounded-lg border border-teal-500/30 bg-teal-500/10 px-3 py-2">
-            <p className="text-[9px] font-semibold uppercase tracking-widest text-teal-400">
+            <p className="text-[10px] font-semibold uppercase tracking-widest text-teal-400">
               Active Project
             </p>
             <p className="truncate text-xs font-semibold text-white mt-0.5">{activeProject.name}</p>
@@ -129,10 +129,10 @@ export default function AppLayout({
                 key={i}
                 onClick={() => onPageChange?.(item.page)}
                 title={!sidebarOpen ? item.label : undefined}
-                className={`w-full flex items-center gap-3 rounded-lg px-3 py-2 transition-all text-left text-sm ${
+                className={`w-full flex items-center gap-3 rounded-lg px-3 py-2 transition-all text-left text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal-400 ${
                   isActive
                     ? 'bg-teal-500/20 text-teal-300 font-semibold border border-teal-500/30'
-                    : 'text-slate-300 hover:bg-white/8 hover:text-white border border-transparent'
+                    : 'text-slate-300 hover:bg-white/10 hover:text-white border border-transparent'
                 }`}
               >
                 <item.icon

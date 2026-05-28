@@ -123,8 +123,8 @@ export default function UserManagement({ currentUser }: { currentUser: User }) {
     <div className="space-y-6">
       <div className="flex items-center justify-between">
         <div>
-          <h2 className="text-2xl font-bold text-gray-900">User Management</h2>
-          <p className="text-gray-500">Whitelist employees and manage access permissions.</p>
+          <h2 className="text-2xl font-bold text-foreground">User Management</h2>
+          <p className="text-muted-foreground">Whitelist employees and manage access permissions.</p>
         </div>
         
         <Button onClick={() => setIsAddOpen(true)} className="gap-2 bg-blue-600 hover:bg-blue-700" style={{ display: isSuper ? undefined : 'none' }}>
@@ -190,27 +190,27 @@ export default function UserManagement({ currentUser }: { currentUser: User }) {
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
-        <Card className="bg-blue-50/50 border-blue-100">
+        <Card className="bg-blue-50/50 border-blue-100 dark:bg-blue-950/25 dark:border-blue-900/50">
           <CardHeader className="py-3">
-            <CardTitle className="text-xs font-bold text-blue-700 uppercase">Admin A</CardTitle>
+            <CardTitle className="text-xs font-bold text-blue-700 uppercase dark:text-blue-300">Admin A</CardTitle>
           </CardHeader>
-          <CardContent className="text-xs text-blue-600">
+          <CardContent className="text-xs text-blue-600 dark:text-blue-200">
             Procurement & Equipment Management. Can manage orders and material takeoffs.
           </CardContent>
         </Card>
-        <Card className="bg-indigo-50/50 border-indigo-100">
+        <Card className="bg-indigo-50/50 border-indigo-100 dark:bg-indigo-950/25 dark:border-indigo-900/50">
           <CardHeader className="py-3">
-            <CardTitle className="text-xs font-bold text-indigo-700 uppercase">Admin B</CardTitle>
+            <CardTitle className="text-xs font-bold text-indigo-700 uppercase dark:text-indigo-300">Admin B</CardTitle>
           </CardHeader>
-          <CardContent className="text-xs text-indigo-600">
+          <CardContent className="text-xs text-indigo-600 dark:text-indigo-200">
             HR & Team Management. Can whitelist users and manage technician assignments.
           </CardContent>
         </Card>
-        <Card className="bg-orange-50/50 border-orange-100">
+        <Card className="bg-orange-50/50 border-orange-100 dark:bg-orange-950/20 dark:border-orange-900/50">
           <CardHeader className="py-3">
-            <CardTitle className="text-xs font-bold text-orange-700 uppercase">Design Team</CardTitle>
+            <CardTitle className="text-xs font-bold text-orange-700 uppercase dark:text-orange-300">Design Team</CardTitle>
           </CardHeader>
-          <CardContent className="text-xs text-orange-600">
+          <CardContent className="text-xs text-orange-600 dark:text-orange-200">
             Heat Load Calculations. Full access to design projects and systems.
           </CardContent>
         </Card>
@@ -220,7 +220,7 @@ export default function UserManagement({ currentUser }: { currentUser: User }) {
         <CardContent className="p-0">
           <Table>
             <TableHeader>
-              <TableRow className="bg-slate-50/50">
+              <TableRow className="bg-slate-50/50 dark:bg-slate-900/60">
                 <TableHead>User</TableHead>
                 <TableHead>Role</TableHead>
                 <TableHead>Last Login</TableHead>
@@ -235,13 +235,13 @@ export default function UserManagement({ currentUser }: { currentUser: User }) {
                       {user.photoURL ? (
                         <img src={user.photoURL} alt={`${user.displayName || "User"} avatar`} className="w-8 h-8 rounded-full border" referrerPolicy="no-referrer" />
                       ) : (
-                        <div className="w-8 h-8 rounded-full border bg-slate-100 flex items-center justify-center">
-                          <UserIcon className="w-4 h-4 text-slate-400" />
+                        <div className="w-8 h-8 rounded-full border bg-slate-100 dark:bg-slate-800 flex items-center justify-center">
+                          <UserIcon className="w-4 h-4 text-slate-400 dark:text-slate-300" />
                         </div>
                       )}
                       <div className="flex flex-col">
                         <span className="font-medium text-sm">{user.displayName}</span>
-                        <span className="text-xs text-gray-500 flex items-center gap-1">
+                        <span className="text-xs text-muted-foreground flex items-center gap-1">
                           <Mail className="w-3 h-3" /> {user.email}
                         </span>
                       </div>
@@ -269,7 +269,7 @@ export default function UserManagement({ currentUser }: { currentUser: User }) {
                     </div>
                   </TableCell>
                   <TableCell>
-                    <span className="text-xs text-gray-500 flex items-center gap-1">
+                    <span className="text-xs text-muted-foreground flex items-center gap-1">
                       <Calendar className="w-3 h-3" />
                       {user.lastLogin?.toDate ? user.lastLogin.toDate().toLocaleString() : 'Never'}
                     </span>

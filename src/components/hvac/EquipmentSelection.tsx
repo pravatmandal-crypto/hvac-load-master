@@ -24,12 +24,13 @@ import type { EquipmentModel } from '../../constants/equipment-catalog';
 import GlobalEquipmentLibrary from './GlobalEquipmentLibrary';
 import { getLibraryItemsByType, GLOBAL_LIB_COLLECTION } from '../../services/equipmentLibraryService';
 import { ComboboxInput } from '../ui/combobox-input';
-import { calculateCoilParameters, calculatePsychrometrics, EZ_OPTIONS, calcZoneVentilation, calcSystemVentilation62, calculateEnvelopeGain, calculateInternalGains, calculateVentilationLoad, calculateParasiticGains, getRecommendedAch, getMinAdp } from '../../lib/hvac';
+import { calculateCoilParameters, calculatePsychrometrics, EZ_OPTIONS, calcZoneVentilation, calcSystemVentilation62, calculateEnvelopeGain, calculateInternalGains, calculateVentilationLoad, calculateTFALoad, calculateParasiticGains, getRecommendedAch, getMinAdp } from '../../lib/hvac';
 import { calculateRoomVolume } from '../../lib/hvac/geometry';
 import SpecSheet from './SpecSheet';
 import type {
   EquipmentSystem, IDUSelection, ODUSelection, ODUCombinationUnit, SingleUnitSelection, SystemType, EquipmentZone, AHUConfig,
 } from '../../types/equipment-systems';
+import { getZoneUnits } from '../../types/equipment-systems';
 import {
   Plus, Trash2, Package, FileText, Search, Lock, Unlock, Box, Check, LayoutGrid,
   AlertTriangle, CheckCircle2, Wind, Zap, Droplets, ExternalLink, Upload,
@@ -43,6 +44,43 @@ import { envelopeCache } from '../../lib/envelopeCache';
 // ─── Constants ───────────────────────────────────────────────────────────────
 
 const VRF_DEFAULT_BRANDS = ['Blue Star', 'Samsung', 'Voltas', 'Trane'];
+
+// Dehumidifier sizing & selection. AHU systems pick per-zone; other systems pick at the
+// system level. Stored as Firestore field `dehumidifierUnits` on the system doc (system-level)
+// or inside each zone in `system.zones[].dehumidifierUnits` (AHU per-zone).
+interface DehumidifierUnit {
+  modelId: string;
+  brand: string;
+  modelSeries: string;
+  subType?: string;          // 'Desiccant' | 'DX-Refrigerant' (also allows custom)
+  capacityLPH: number;       // litres per hour moisture removal
+  powerInputKW?: number;
+  quantity: number;
+}
+
+// 1 lb water ≈ 0.4536 L (water density). Used to convert calculated lbs/hr → LPH for sizing.
+const LBS_PER_HR_TO_LPH = 0.4536;
+// 3412 BTU/h ≈ 1 kW (electric / thermal output conversion for reheat sizing).
+const BTUH_PER_KW = 3412;
+const PA_PER_MMWG = 9.80665;
+
+const paToMmWg = (pa?: number | null): number | undefined =>
+  pa == null ? undefined : Number((pa / PA_PER_MMWG).toFixed(1));
+
+const mmWgToPa = (mmWg?: number | null): number | undefined =>
+  mmWg == null ? undefined : Number((mmWg * PA_PER_MMWG).toFixed(1));
+
+// Dehumidification strategy. Engineer picks one of four methods per zone (or per zoneless system).
+// All four achieve the same end (lower room RH) but via different equipment, with different
+// equipment-schedule implications.
+type DehumidMethod = 'reheat-hwc' | 'reheat-electric-ahu' | 'reheat-duct' | 'standalone';
+
+const DEHUMID_METHOD_LABELS: Record<DehumidMethod, string> = {
+  'reheat-hwc':           'Reheat — AHU Heating Coil (HW)',
+  'reheat-electric-ahu':  'Reheat — AHU Electric Heater',
+  'reheat-duct':          'Reheat — Duct Heater',
+  'standalone':           'Standalone Desiccant / DX',
+};
 
 const FAHU_CAPABLE_SUBTYPES = new Set(['ductable-low', 'ductable-mid', 'ductable-hi', 'AHU-DX', 'AHU', 'TFA']);
 
@@ -292,14 +330,22 @@ function IDUPickerDialog({
   const allSubTypes = [...new Set(afterTypeItems.map(m => m.subType).filter(Boolean))].sort((a, b) =>
     (IDU_SUBTYPE_LABELS[a!] ?? a!).localeCompare(IDU_SUBTYPE_LABELS[b!] ?? b!));
 
+  // Chiller AHU/FCU sizing is by coil duty, not by 400-CFM/TR-derived requiredTR.
+  // Use coilDutyTR as the fit reference so the sorter ranks correctly-sized AHUs first.
+  const effectiveReqTR = isChillerPicker ? (coilDutyTR ?? 0) : requiredTR;
+
   // Final visible items
   const items = afterTypeItems
     .filter(m => filterSubType === 'all' || m.subType === filterSubType)
     .filter(m => !search || m.modelSeries.toLowerCase().includes(search.toLowerCase()) || m.brand.toLowerCase().includes(search.toLowerCase()))
     .sort((a, b) => {
+      const aFit = getFitStatus(a.capacityTR, a.ratedAirflowCFM, effectiveReqTR, designCFM);
+      const bFit = getFitStatus(b.capacityTR, b.ratedAirflowCFM, effectiveReqTR, designCFM);
       const order = { ok: 0, oversized: 1, undersized: 2, unknown: 3 };
-      return order[getFitStatus(a.capacityTR, a.ratedAirflowCFM, requiredTR, designCFM)]
-           - order[getFitStatus(b.capacityTR, b.ratedAirflowCFM, requiredTR, designCFM)];
+      if (order[aFit] !== order[bFit]) return order[aFit] - order[bFit];
+      // Within the same fit bucket, prefer smallest capacity that still fits
+      // (tightest match → less oversizing on the AHU and less plant inflation).
+      return (a.capacityTR ?? 0) - (b.capacityTR ?? 0);
     });
 
   const submitCustom = async () => {
@@ -319,8 +365,8 @@ function IDUPickerDialog({
       };
       const cfm = parseFloat(customCFM);
       if (!isNaN(cfm) && cfm > 0) payload.ratedAirflowCFM = cfm;
-      const esp = parseFloat(customStaticPa);
-      if (!isNaN(esp) && esp > 0) payload.staticPressurePa = esp;
+      const espMmWg = parseFloat(customStaticPa);
+      if (!isNaN(espMmWg) && espMmWg > 0) payload.staticPressurePa = mmWgToPa(espMmWg);
 
       const docRef = await addDoc(collection(db, GLOBAL_LIB_COLLECTION), {
         ...payload,
@@ -361,13 +407,16 @@ function IDUPickerDialog({
                     {(coilDutyTR ?? 0) > 0 && (
                       <span className="text-indigo-700 dark:text-indigo-300">Coil Duty: <strong>{(coilDutyTR ?? 0).toFixed(2)} TR</strong></span>
                     )}
+                    {(coilDutyTR ?? 0) > 0 && (
+                      <span className="text-indigo-700 dark:text-indigo-300">Required (×1.10): <strong className="text-orange-700 dark:text-orange-400">{((coilDutyTR ?? 0) * 1.10).toFixed(2)} TR</strong></span>
+                    )}
                     {designCFM > 0 && (
                       <span className="text-indigo-700 dark:text-indigo-300">Design CFM: <strong>{Math.round(designCFM).toLocaleString()}</strong></span>
                     )}
                   </div>
                   <span className="text-[11.5px] text-slate-500 dark:text-slate-400 italic leading-snug">
-                    Chiller AHU — Coil Duty (thermal load) and Design CFM (dehumidified airflow) are independent;
-                    the 400 CFM/TR rule does not apply. OEM builds the coil to the duty you specify.
+                    Chiller AHU — Coil Duty (thermal load) and Design CFM (dehumidified airflow) are independent.
+                    OEM builds the coil to the Coil Duty; the selected catalog model should meet the Required value (10% selection margin).
                   </span>
                 </div>
               </div>
@@ -431,7 +480,7 @@ function IDUPickerDialog({
                 <TableRow><TableCell colSpan={7} className="text-center py-10 text-sm text-slate-400">No catalog models match — use "Create Custom" below.</TableCell></TableRow>
               )}
               {items.map(item => {
-                const fit = getFitStatus(item.capacityTR, item.ratedAirflowCFM, requiredTR, designCFM);
+                const fit = getFitStatus(item.capacityTR, item.ratedAirflowCFM, effectiveReqTR, designCFM);
                 return (
                   <TableRow key={item.id} className={cn('hover:bg-blue-50/40 dark:hover:bg-blue-950/20', fit === 'ok' && 'bg-emerald-50/30 dark:bg-emerald-950/20', fit === 'undersized' && 'opacity-60')}>
                     <TableCell className="font-bold text-sm py-3">{item.brand}</TableCell>
@@ -517,7 +566,7 @@ function IDUPickerDialog({
                   <Input type="text" inputMode="decimal" min="0" className="h-8 text-xs" placeholder="optional" value={customCFM} onChange={e => setCustomCFM(e.target.value)} />
                 </div>
                 <div className="space-y-1">
-                  <label className="text-sm font-semibold text-slate-600 dark:text-slate-400">Static (Pa)</label>
+                  <label className="text-sm font-semibold text-slate-600 dark:text-slate-400">Static (mm WG)</label>
                   <Input type="text" inputMode="decimal" min="0" className="h-8 text-xs" placeholder="AHU only" value={customStaticPa} onChange={e => setCustomStaticPa(e.target.value)} />
                 </div>
               </div>
@@ -983,10 +1032,13 @@ function generateEquipmentSpecs(
   const rawTR = requiredTR * safetyFactor;
   const tr = roundUpToStdTR(rawTR);
 
-  const cfmPerTR: Record<string, number> = {
-    AHU: 400, Package: 380, DuctableSplit: 350, Split: 450, FCU: 450, Chiller: 0,
-  };
-  const cfm = systemType === 'Chiller' ? 0 : Math.max(designCFM, tr * (cfmPerTR[systemType] ?? 400));
+  // Rated airflow = designCFM directly. The OLD `max(designCFM, tr × 400)` rule
+  // was dropped 2026-05-20: it incorrectly couples plant TR to airflow.
+  //   - DOAS:  CFM is OA-driven (5,245 CFM from FACPH × volume), independent of coil TR
+  //   - AHU:   CFM is dehumidified-airflow-driven, set by room ADP psychrometrics
+  //   - DX:    OEM ratings already couple TR↔CFM; catalog selection enforces fit
+  // Chiller has no air handling, so cfm = 0.
+  const cfm = systemType === 'Chiller' ? 0 : Math.round(designCFM);
 
   const espMap: Record<string, number> = {
     AHU: 150, Package: 100, DuctableSplit: 120, Split: 0, Chiller: 0,
@@ -1088,7 +1140,7 @@ function UnitPickerDialog({
   const dialogTitle =
     isAHU     ? 'Select DX Condensing Unit' :
     isChiller ? 'Select Chiller' :
-    isDOAS    ? 'Select DOAS Unit (ERV / HRV / FAHU)' :
+    isDOAS    ? 'Select TFA/DOAS Unit (ERV / HRV / FAHU)' :
     systemType === 'Package' ? 'Select Package Unit' : 'Select Ductable Split Unit';
 
   return (
@@ -1126,7 +1178,7 @@ function UnitPickerDialog({
           <div className="mx-5 mt-3 mb-0 rounded-lg border border-amber-200 dark:border-amber-800 bg-amber-50 dark:bg-amber-950/20 px-4 py-2.5 flex items-center justify-between gap-3">
             <div className="flex items-center gap-2">
               <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0" />
-              <p className="text-xs text-amber-800 dark:text-amber-300">No {isDOAS ? 'DOAS' : systemType} unit in catalog meets <strong>{requiredTR.toFixed(1)} TR</strong> requirement.</p>
+              <p className="text-xs text-amber-800 dark:text-amber-300">No {isDOAS ? 'TFA/DOAS' : systemType} unit in catalog meets <strong>{requiredTR.toFixed(1)} TR</strong> requirement.</p>
             </div>
             <Button size="sm" className="h-8 text-sm shrink-0 bg-amber-600 hover:bg-amber-700 gap-1"
               onClick={() => { setGenSpec(generateEquipmentSpecs(systemType, requiredTR, designCFM, systemName)); setShowGenerate(true); }}>
@@ -1147,8 +1199,13 @@ function UnitPickerDialog({
             {/* Engineering logic explanation */}
             <div className="text-xs text-violet-700 dark:text-violet-300 bg-violet-100 dark:bg-violet-900/30 rounded px-2.5 py-1.5 space-y-0.5">
               <div>Load: <strong>{requiredTR.toFixed(2)} TR</strong> → +10% safety → {(requiredTR * 1.1).toFixed(1)} TR → rounded to next std size: <strong>{genSpec.capacityTR} TR</strong></div>
-              {!isChiller && <div>Airflow: max(Design CFM {Math.round(designCFM).toLocaleString()}, {genSpec.capacityTR} TR × {systemType === 'AHU' ? 400 : 380} CFM/TR) = <strong>{Math.round(genSpec.ratedAirflowCFM ?? 0).toLocaleString()} CFM</strong></div>}
-              {(genSpec as any).staticPressurePa > 0 && <div>ESP: standard {systemType} value = <strong>{(genSpec as any).staticPressurePa} Pa</strong></div>}
+              {!isChiller && (
+                <div>
+                  Airflow = <strong>Design CFM {Math.round(designCFM).toLocaleString()}</strong>
+                  <span className="opacity-70">{isDOAS ? ' (OA-driven; independent of coil TR)' : ' (psychrometric DSCFM; independent of plant TR)'}</span>
+                </div>
+              )}
+              {(genSpec as any).staticPressurePa > 0 && <div>ESP: standard {systemType} value = <strong>{paToMmWg((genSpec as any).staticPressurePa)} mm WG</strong></div>}
             </div>
 
             {/* Editable fields */}
@@ -1173,8 +1230,8 @@ function UnitPickerDialog({
               )}
               {(isAHU || systemType === 'Package' || systemType === 'DuctableSplit') && (
                 <div className="flex flex-col gap-0.5">
-                  <label className="text-xs text-slate-500 dark:text-slate-400">ESP (Pa)</label>
-                  <NumericInput className="h-8 text-sm" min={0} value={(genSpec as any).staticPressurePa ?? undefined} onChange={(n) => setGenSpec(s => ({ ...s, staticPressurePa: n } as any))} />
+                  <label className="text-xs text-slate-500 dark:text-slate-400">ESP (mm WG)</label>
+                  <NumericInput className="h-8 text-sm" min={0} value={paToMmWg((genSpec as any).staticPressurePa)} onChange={(n) => setGenSpec(s => ({ ...s, staticPressurePa: mmWgToPa(n) } as any))} />
                 </div>
               )}
               <div className="flex flex-col gap-0.5">
@@ -1227,7 +1284,7 @@ function UnitPickerDialog({
                 <TableHead className="hidden sm:table-cell">Sub-Type</TableHead>
                 <TableHead className="text-right">TR</TableHead>
                 {!isChiller && <TableHead className="text-right">CFM</TableHead>}
-                {isAHU && <TableHead className="text-right hidden sm:table-cell">ESP Pa</TableHead>}
+                {isAHU && <TableHead className="text-right hidden sm:table-cell">ESP mm WG</TableHead>}
                 {!isChiller && <TableHead className="text-center">Fit</TableHead>}
                 <TableHead className="w-16"></TableHead>
               </TableRow>
@@ -1256,7 +1313,7 @@ function UnitPickerDialog({
                     <TableCell className="text-xs text-slate-500 dark:text-slate-400 capitalize hidden sm:table-cell">{item.subType ?? '—'}</TableCell>
                     <TableCell className="text-right font-mono text-sm font-semibold">{item.capacityTR}</TableCell>
                     {!isChiller && <TableCell className="text-right font-mono text-sm">{item.ratedAirflowCFM ? Math.round(item.ratedAirflowCFM).toLocaleString() : '—'}</TableCell>}
-                    {isAHU && <TableCell className="text-right font-mono text-sm text-orange-700 font-semibold hidden sm:table-cell">{(item as any).staticPressurePa ?? '—'}</TableCell>}
+                    {isAHU && <TableCell className="text-right font-mono text-sm text-orange-700 font-semibold hidden sm:table-cell">{(item as any).staticPressurePa ? `${paToMmWg((item as any).staticPressurePa)}` : '—'}</TableCell>}
                     {!isChiller && <TableCell className="text-center"><FitBadge status={fit} /></TableCell>}
                     <TableCell>
                       <Button size="sm" variant={sufficient ? 'default' : 'outline'} className="h-8 text-sm px-2"
@@ -1301,7 +1358,7 @@ function UnitPickerDialog({
                     <TableCell className="text-xs text-slate-500 dark:text-slate-400 capitalize hidden sm:table-cell">{item.subType ?? '—'}</TableCell>
                     <TableCell className="text-right font-mono text-sm font-semibold">{item.capacityTR}</TableCell>
                     {!isChiller && <TableCell className="text-right font-mono text-sm">{item.ratedAirflowCFM ? Math.round(item.ratedAirflowCFM).toLocaleString() : '—'}</TableCell>}
-                    {isAHU && <TableCell className="text-right font-mono text-sm text-orange-700 font-semibold hidden sm:table-cell">{(item as any).staticPressurePa ?? '—'}</TableCell>}
+                    {isAHU && <TableCell className="text-right font-mono text-sm text-orange-700 font-semibold hidden sm:table-cell">{(item as any).staticPressurePa ? `${paToMmWg((item as any).staticPressurePa)}` : '—'}</TableCell>}
                     {!isChiller && <TableCell className="text-center"><FitBadge status={fit} /></TableCell>}
                     <TableCell>
                       <Button size="sm" variant={sufficient ? 'default' : 'outline'} className="h-8 text-sm px-2"
@@ -1435,6 +1492,332 @@ const CATEGORY_CONFIG: Record<string, {
 
 
 // Derive hvacSystemCategory from legacy project.systemType when no explicit category is set
+// Dehumidification strategy block — one per zone (or per zoneless system). Engineer picks
+// one of four strategies; we show the right sizing for each and (for method 2) sync the
+// AHU electric-heater config so AHU Configuration reflects it as a single source of truth.
+function DehumidificationStrategySection({
+  scopeLabel,
+  latentLbsHr,
+  reheatBTU,
+  method,
+  reheatKWOverride,
+  units,
+  isVRF,
+  hasHeatingCoilInAHU,
+  isSystemLevel,
+  models,
+  onChangeMethod,
+  onChangeReheatKWOverride,
+  onAddDehumidifier,
+  onRemoveDehumidifier,
+  onUpdateDehumidifierQty,
+}: {
+  scopeLabel: string;
+  latentLbsHr: number;
+  reheatBTU: number;
+  method: DehumidMethod | null;
+  reheatKWOverride?: number;
+  units: DehumidifierUnit[];
+  isVRF: boolean;
+  hasHeatingCoilInAHU: boolean;
+  isSystemLevel: boolean;
+  models: EquipmentModel[];
+  onChangeMethod: (m: DehumidMethod | null) => void | Promise<void>;
+  onChangeReheatKWOverride: (kw: number | null) => void | Promise<void>;
+  onAddDehumidifier: (model: EquipmentModel) => void | Promise<void>;
+  onRemoveDehumidifier: (idx: number) => void | Promise<void>;
+  onUpdateDehumidifierQty: (idx: number, qty: number) => void | Promise<void>;
+}) {
+  const latentKgH = latentLbsHr * LBS_PER_HR_TO_LPH;
+  const computedReheatKW = reheatBTU / BTUH_PER_KW;
+  const effectiveReheatKW = Number.isFinite(reheatKWOverride as number) && (reheatKWOverride as number) > 0
+    ? (reheatKWOverride as number)
+    : computedReheatKW;
+
+  // Method 1 (HW coil) is only valid when there's an AHU with a heating coil, and never on VRF.
+  // System-level (zoneless) systems don't have a zone AHU so the HW coil method is also hidden.
+  const methodAvailability: Record<DehumidMethod, { available: boolean; reason?: string }> = {
+    'reheat-hwc':          isVRF
+      ? { available: false, reason: 'Not applicable to VRF (no AHU heating coil)' }
+      : isSystemLevel
+        ? { available: false, reason: 'No zone-AHU heating coil for system-level scope' }
+        : hasHeatingCoilInAHU
+          ? { available: true }
+          : { available: false, reason: 'Enable AHU heating coil in AHU Configuration first' },
+    'reheat-electric-ahu': isSystemLevel
+      ? { available: false, reason: 'No zone-AHU for system-level scope' }
+      : { available: true },
+    'reheat-duct':         { available: true },
+    'standalone':          { available: true },
+  };
+
+  const isReheatMethod = method === 'reheat-hwc' || method === 'reheat-electric-ahu' || method === 'reheat-duct';
+
+  return (
+    <div className="rounded-lg border border-cyan-200 dark:border-cyan-800 bg-cyan-50/40 dark:bg-cyan-950/10 px-3 py-3 space-y-2">
+      <div className="flex items-center justify-between gap-3 flex-wrap">
+        <div className="text-xs font-bold uppercase text-cyan-700 dark:text-cyan-300">
+          Dehumidification — {scopeLabel}
+        </div>
+        <div className="text-xs flex items-center gap-4 flex-wrap">
+          <span>
+            <span className="text-slate-500 dark:text-slate-400">Latent: </span>
+            <span className="font-semibold text-cyan-900 dark:text-cyan-200">
+              {latentKgH.toFixed(1)} kg/h <span className="text-slate-400">({latentLbsHr.toFixed(1)} lb/h)</span>
+            </span>
+          </span>
+          <span>
+            <span className="text-slate-500 dark:text-slate-400">Reheat needed: </span>
+            <span className="font-semibold text-rose-700 dark:text-rose-300">
+              {computedReheatKW.toFixed(2)} kW <span className="text-slate-400">({Math.round(reheatBTU).toLocaleString()} BTU/h)</span>
+            </span>
+          </span>
+        </div>
+      </div>
+
+      <div className="space-y-1.5">
+        {(Object.keys(DEHUMID_METHOD_LABELS) as DehumidMethod[]).map(m => {
+          const avail = methodAvailability[m];
+          const checked = method === m;
+          const label = DEHUMID_METHOD_LABELS[m];
+          return (
+            <label
+              key={m}
+              className={cn(
+                'flex items-start gap-2 text-sm',
+                avail.available ? 'cursor-pointer' : 'cursor-not-allowed opacity-50',
+              )}
+              title={avail.reason ?? ''}
+            >
+              <input
+                type="radio"
+                name={`dehumid-method-${scopeLabel}`}
+                checked={checked}
+                disabled={!avail.available}
+                onChange={() => avail.available && onChangeMethod(m)}
+                className="mt-0.5 accent-cyan-600"
+              />
+              <span className={cn('font-medium', checked ? 'text-cyan-800 dark:text-cyan-200' : 'text-slate-700 dark:text-slate-300')}>
+                {label}
+                {!avail.available && avail.reason && (
+                  <span className="ml-2 text-xs text-slate-400 dark:text-slate-500 italic">— {avail.reason}</span>
+                )}
+              </span>
+            </label>
+          );
+        })}
+      </div>
+
+      {/* Conditional sub-section based on method */}
+      {isReheatMethod && (
+        <div className="border-t border-cyan-200 dark:border-cyan-800 pt-2 space-y-1">
+          <div className="flex items-center gap-2 flex-wrap text-xs">
+            <span className="text-slate-600 dark:text-slate-400 font-medium">
+              {method === 'reheat-duct' ? 'Duct heater capacity' : method === 'reheat-hwc' ? 'HW coil heating capacity' : 'Electric heater capacity'}:
+            </span>
+            <input
+              type="number"
+              min={0}
+              step="0.1"
+              value={Number.isFinite(reheatKWOverride as number) && (reheatKWOverride as number) > 0 ? reheatKWOverride : ''}
+              placeholder={computedReheatKW.toFixed(2)}
+              onChange={e => {
+                const raw = e.target.value.trim();
+                if (raw === '') return onChangeReheatKWOverride(null);
+                const v = Number(raw);
+                if (Number.isFinite(v) && v >= 0) onChangeReheatKWOverride(v);
+              }}
+              className="h-7 w-20 text-xs text-right rounded border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 px-1.5"
+            />
+            <span className="text-slate-500 dark:text-slate-400">kW</span>
+            {reheatKWOverride != null && reheatKWOverride > 0 && (
+              <button
+                type="button"
+                onClick={() => onChangeReheatKWOverride(null)}
+                className="text-xs text-cyan-600 dark:text-cyan-400 hover:underline"
+              >
+                reset to auto ({computedReheatKW.toFixed(2)} kW)
+              </button>
+            )}
+            <span className="text-xs text-slate-400 dark:text-slate-500 italic">
+              · using {effectiveReheatKW.toFixed(2)} kW
+            </span>
+          </div>
+          {method === 'reheat-electric-ahu' && (
+            <div className="text-xs text-emerald-700 dark:text-emerald-400 pl-1">✓ Synced to AHU Configuration (Electric Heater enabled)</div>
+          )}
+          {method === 'reheat-hwc' && (
+            <div className="text-xs text-cyan-700 dark:text-cyan-400 pl-1">Heating coil in AHU is sized against this reheat duty in monsoon mode.</div>
+          )}
+          {method === 'reheat-duct' && (
+            <div className="text-xs text-cyan-700 dark:text-cyan-400 pl-1">Add this duct heater to your equipment schedule separately.</div>
+          )}
+        </div>
+      )}
+
+      {method === 'standalone' && (
+        <div className="border-t border-cyan-200 dark:border-cyan-800 pt-2">
+          <DehumidifierPickerRow
+            scopeLabel={scopeLabel}
+            requiredLPH={latentKgH}
+            units={units}
+            models={models}
+            onAdd={onAddDehumidifier}
+            onRemove={onRemoveDehumidifier}
+            onUpdateQty={onUpdateDehumidifierQty}
+            embedded
+          />
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Dehumidifier picker — one row per scope (whole system, or one AHU zone). Lets the
+// designer pick a catalog dehumidifier, set a quantity, see installed-vs-required, and
+// remove units. Stays inline (no dialog) — the dropdown lists ~10 models so a full
+// dialog adds friction without payoff. `embedded` strips the outer cyan card when this
+// renders inside the wider Dehumidification Strategy block.
+function DehumidifierPickerRow({
+  scopeLabel,
+  requiredLPH,
+  units,
+  models,
+  onAdd,
+  onRemove,
+  onUpdateQty,
+  embedded = false,
+}: {
+  scopeLabel: string;
+  requiredLPH: number;
+  units: DehumidifierUnit[];
+  models: EquipmentModel[];
+  onAdd: (model: EquipmentModel) => void | Promise<void>;
+  onRemove: (idx: number) => void | Promise<void>;
+  onUpdateQty: (idx: number, qty: number) => void | Promise<void>;
+  embedded?: boolean;
+}) {
+  const [pickedId, setPickedId] = useState<string>('');
+
+  const installedLPH = units.reduce((s, u) => s + (Number(u.capacityLPH) || 0) * (Number(u.quantity) || 1), 0);
+  const coverage = requiredLPH > 0 ? (installedLPH / requiredLPH) * 100 : 0;
+  const coverageBadge =
+    requiredLPH === 0
+      ? null
+      : coverage >= 100
+        ? <span className="text-emerald-700 dark:text-emerald-400 font-semibold">✓ {coverage.toFixed(0)}% covered</span>
+        : <span className="text-amber-700 dark:text-amber-400 font-semibold">⚠ {coverage.toFixed(0)}% — undersized</span>;
+
+  const handleAdd = () => {
+    if (!pickedId) return;
+    const model = models.find(m => m.id === pickedId);
+    if (!model) return;
+    void onAdd(model);
+    setPickedId('');
+  };
+
+  return (
+    <div className={embedded ? 'space-y-2' : 'rounded-lg border border-cyan-200 dark:border-cyan-800 bg-cyan-50/40 dark:bg-cyan-950/10 px-3 py-3 space-y-2'}>
+      {!embedded && (
+        <div className="flex items-center justify-between gap-3 flex-wrap">
+          <div className="text-xs font-bold uppercase text-cyan-700 dark:text-cyan-300">
+            Dehumidifier — {scopeLabel}
+          </div>
+          <div className="text-xs">
+            <span className="text-slate-500 dark:text-slate-400">Required: </span>
+            <span className="font-semibold text-cyan-900 dark:text-cyan-200">
+              {(requiredLPH * 1.0).toFixed(1)} kg/h ({requiredLPH.toFixed(1)} LPH)
+            </span>
+          </div>
+        </div>
+      )}
+
+      <div className="flex items-center gap-2 flex-wrap">
+        <select
+          value={pickedId}
+          onChange={e => setPickedId(e.target.value)}
+          className="h-8 text-xs rounded-md border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 px-2 min-w-[260px]"
+        >
+          <option value="">— Pick a dehumidifier model —</option>
+          {models.map(m => (
+            <option key={m.id} value={m.id}>
+              {m.brand} {m.modelSeries} — {m.capacityLPH} LPH ({m.subType ?? 'Dehumidifier'})
+            </option>
+          ))}
+        </select>
+        <button
+          type="button"
+          onClick={handleAdd}
+          disabled={!pickedId}
+          className="h-8 px-3 text-xs font-semibold rounded-md bg-cyan-600 hover:bg-cyan-700 disabled:bg-slate-300 disabled:dark:bg-slate-700 disabled:cursor-not-allowed text-white"
+        >
+          + Add
+        </button>
+      </div>
+
+      {units.length > 0 && (
+        <div className="overflow-x-auto">
+          <table className="w-full text-xs border-collapse">
+            <thead>
+              <tr className="text-slate-500 dark:text-slate-400 border-b dark:border-slate-700">
+                <th className="text-left py-1 pr-3 font-semibold">Model</th>
+                <th className="text-right py-1 px-2 font-semibold">Per Unit</th>
+                <th className="text-right py-1 px-2 font-semibold">Qty</th>
+                <th className="text-right py-1 px-2 font-semibold">Total</th>
+                <th className="text-right py-1 pl-2 font-semibold">&nbsp;</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-100 dark:divide-slate-700">
+              {units.map((u, idx) => {
+                const totalLPH = (Number(u.capacityLPH) || 0) * (Number(u.quantity) || 1);
+                return (
+                  <tr key={`${u.modelId}-${idx}`}>
+                    <td className="py-1 pr-3 dark:text-slate-300">
+                      <span className="font-semibold">{u.brand}</span> {u.modelSeries}
+                      {u.subType && <span className="text-slate-400 dark:text-slate-500"> · {u.subType}</span>}
+                    </td>
+                    <td className="text-right py-1 px-2 dark:text-slate-300">{u.capacityLPH} LPH</td>
+                    <td className="text-right py-1 px-2">
+                      <input
+                        type="number"
+                        min={1}
+                        max={20}
+                        value={u.quantity}
+                        onChange={e => {
+                          const v = Number(e.target.value);
+                          if (Number.isFinite(v) && v >= 1 && v <= 20) onUpdateQty(idx, v);
+                        }}
+                        className="h-7 w-14 text-xs text-right rounded border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 px-1"
+                      />
+                    </td>
+                    <td className="text-right py-1 px-2 font-semibold dark:text-slate-200">{totalLPH.toFixed(1)} LPH</td>
+                    <td className="text-right py-1 pl-2">
+                      <button
+                        type="button"
+                        onClick={() => onRemove(idx)}
+                        className="text-rose-600 hover:text-rose-800 dark:text-rose-400 dark:hover:text-rose-300"
+                        title="Remove"
+                      >
+                        ×
+                      </button>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+          <div className="mt-1 text-xs flex items-center justify-end gap-3">
+            <span className="text-slate-500 dark:text-slate-400">
+              Installed: <span className="font-semibold dark:text-slate-200">{installedLPH.toFixed(1)} LPH</span>
+            </span>
+            {coverageBadge}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function deriveCategory(projectSystemType?: string): string {
   const map: Record<string, string> = {
     'VRF':      'VRF',
@@ -2320,6 +2703,133 @@ export default function EquipmentSelection({
     }
   };
 
+  // ── Dehumidifier handlers ────────────────────────────────────────────────
+  // System-level: writes to system.dehumidifierUnits[].
+  // AHU per-zone: writes to system.zones[zoneIdx].dehumidifierUnits[].
+
+  const makeDehumidifierUnit = (model: EquipmentModel): DehumidifierUnit => ({
+    modelId: model.id,
+    brand: model.brand,
+    modelSeries: model.modelSeries,
+    subType: model.subType,
+    capacityLPH: Number(model.capacityLPH) || 0,
+    powerInputKW: Number(model.powerInputKW) || 0,
+    quantity: 1,
+  });
+
+  const addSystemDehumidifier = async (systemId: string, model: EquipmentModel) => {
+    const sys = equipSystems.find(s => s.id === systemId);
+    const current: DehumidifierUnit[] = (sys as any)?.dehumidifierUnits ?? [];
+    await updateSystemField(systemId, {
+      dehumidifierUnits: [...current, makeDehumidifierUnit(model)],
+    });
+  };
+
+  const removeSystemDehumidifier = async (systemId: string, idx: number) => {
+    const sys = equipSystems.find(s => s.id === systemId);
+    const current: DehumidifierUnit[] = [...((sys as any)?.dehumidifierUnits ?? [])];
+    if (idx < 0 || idx >= current.length) return;
+    current.splice(idx, 1);
+    await updateSystemField(systemId, { dehumidifierUnits: current });
+  };
+
+  const updateSystemDehumidifierQty = async (systemId: string, idx: number, qty: number) => {
+    if (!Number.isFinite(qty) || qty < 1 || qty > 20) return;
+    const sys = equipSystems.find(s => s.id === systemId);
+    const current: DehumidifierUnit[] = [...((sys as any)?.dehumidifierUnits ?? [])];
+    if (idx < 0 || idx >= current.length) return;
+    current[idx] = { ...current[idx], quantity: qty };
+    await updateSystemField(systemId, { dehumidifierUnits: current });
+  };
+
+  const mutateZoneDehumidifiers = async (
+    systemId: string,
+    zoneId: string,
+    mutator: (units: DehumidifierUnit[]) => DehumidifierUnit[],
+  ) => {
+    const sys = equipSystems.find(s => s.id === systemId);
+    if (!sys) return;
+    const zones = ((sys.zones ?? (sys as any).ahuGroups ?? []) as EquipmentZone[]).slice();
+    const idx = zones.findIndex(z => z.id === zoneId);
+    if (idx < 0) return;
+    const zone = zones[idx];
+    const existing: DehumidifierUnit[] = (zone as any).dehumidifierUnits ?? [];
+    const next = mutator(existing);
+    zones[idx] = { ...zone, dehumidifierUnits: next } as EquipmentZone;
+    await updateSystemField(systemId, { zones });
+  };
+
+  const addZoneDehumidifier = (systemId: string, zoneId: string, model: EquipmentModel) =>
+    mutateZoneDehumidifiers(systemId, zoneId, units => [...units, makeDehumidifierUnit(model)]);
+
+  const removeZoneDehumidifier = (systemId: string, zoneId: string, idx: number) =>
+    mutateZoneDehumidifiers(systemId, zoneId, units => units.filter((_, i) => i !== idx));
+
+  const updateZoneDehumidifierQty = (systemId: string, zoneId: string, idx: number, qty: number) => {
+    if (!Number.isFinite(qty) || qty < 1 || qty > 20) return;
+    return mutateZoneDehumidifiers(systemId, zoneId, units =>
+      units.map((u, i) => (i === idx ? { ...u, quantity: qty } : u)),
+    );
+  };
+
+  // ── Dehumidification method handlers ─────────────────────────────────────
+  // Writes `dehumidMethod` / `dehumidReheatKW` on the zone (or system, for zoneless). When method
+  // 'reheat-electric-ahu' is picked, also enables the AHU electric heater and pre-fills its kW
+  // (single source of truth — AHU Configuration UI reflects the same value).
+
+  const setZoneDehumidMethod = async (systemId: string, zoneId: string, method: DehumidMethod | null, reheatKW: number) => {
+    const sys = equipSystems.find(s => s.id === systemId);
+    if (!sys) return;
+    const zones = ((sys.zones ?? (sys as any).ahuGroups ?? []) as EquipmentZone[]).slice();
+    const idx = zones.findIndex(z => z.id === zoneId);
+    if (idx < 0) return;
+    const zone = zones[idx];
+    const next: any = { ...zone, dehumidMethod: method ?? null };
+    // Cross-link: method 2 turns on AHU electric heater. Other methods leave fahu untouched —
+    // we don't disable it on switch-away because an engineer may want the electric heater on
+    // for heating reasons independent of dehumidification.
+    if (method === 'reheat-electric-ahu') {
+      const fahu = zone.fahu ?? { hasElectricHeater: false, electricHeaterKW: 0, hasHumidifier: false, humidifierKgHr: 0 };
+      next.fahu = {
+        ...fahu,
+        hasElectricHeater: true,
+        electricHeaterKW: Math.max(Number(fahu.electricHeaterKW) || 0, Math.round(reheatKW * 100) / 100),
+      };
+    }
+    zones[idx] = next as EquipmentZone;
+    await updateSystemField(systemId, { zones });
+  };
+
+  const setZoneDehumidReheatKW = async (systemId: string, zoneId: string, kw: number | null) => {
+    const sys = equipSystems.find(s => s.id === systemId);
+    if (!sys) return;
+    const zones = ((sys.zones ?? (sys as any).ahuGroups ?? []) as EquipmentZone[]).slice();
+    const idx = zones.findIndex(z => z.id === zoneId);
+    if (idx < 0) return;
+    const zone = zones[idx];
+    const next: any = { ...zone };
+    if (kw == null) {
+      delete next.dehumidReheatKW;
+    } else {
+      next.dehumidReheatKW = kw;
+    }
+    // If method is reheat-electric-ahu, keep the AHU electricHeaterKW in sync with the override.
+    if ((zone as any).dehumidMethod === 'reheat-electric-ahu' && kw != null && kw > 0) {
+      const fahu = zone.fahu ?? { hasElectricHeater: false, electricHeaterKW: 0, hasHumidifier: false, humidifierKgHr: 0 };
+      next.fahu = { ...fahu, hasElectricHeater: true, electricHeaterKW: Math.round(kw * 100) / 100 };
+    }
+    zones[idx] = next as EquipmentZone;
+    await updateSystemField(systemId, { zones });
+  };
+
+  const setSystemDehumidMethod = async (systemId: string, method: DehumidMethod | null) => {
+    await updateSystemField(systemId, { dehumidMethod: method ?? deleteField() });
+  };
+
+  const setSystemDehumidReheatKW = async (systemId: string, kw: number | null) => {
+    await updateSystemField(systemId, { dehumidReheatKW: kw == null ? deleteField() : kw });
+  };
+
   const toggleRoomAssignment = async (system: EquipmentSystem, roomId: string) => {
     // Source of truth is the room document (zoneId/zoneName/systemId/systemName).
     const room = rooms.find((r: any) => r.id === roomId);
@@ -2639,6 +3149,14 @@ export default function EquipmentSelection({
     }
     const current = [...((sys as any).ctUnits as ODUCombinationUnit[])];
     current[idx] = { ...current[idx], quantity: qty };
+    await updateSystemField(systemId, { ctUnits: current });
+  };
+
+  const updateCTUnitRole = async (systemId: string, idx: number, role: 'working' | 'standby') => {
+    const sys = equipSystems.find(s => s.id === systemId);
+    const current = [...((sys as any)?.ctUnits as ODUCombinationUnit[] ?? [])];
+    if (current.length === 0) return;
+    current[idx] = { ...current[idx], role };
     await updateSystemField(systemId, { ctUnits: current });
   };
 
@@ -3128,12 +3646,97 @@ export default function EquipmentSelection({
     };
   };
 
+  // Returns the TFA/DOAS system (if any) that serves a given room.
+  // A room is TFA-served if EITHER:
+  //   (a) its primary system is in some DOAS's doasLinkedSystemIds (legacy, coarse),
+  //   (b) its zone is in some DOAS's doasLinkedZoneIds (preferred, Phase B+).
+  // First match wins. Used to switch computeRoomReqs into TFA mode.
+  const findDoasForRoom = (room: any) => {
+    const sysId = room?.systemId as string | undefined;
+    const zoneId = room?.zoneId as string | undefined;
+    if (!sysId && !zoneId) return null;
+    return equipSystems.find(s => {
+      if (s.type !== 'DOAS') return false;
+      const sysIds = ((s as any).doasLinkedSystemIds ?? []) as string[];
+      const zoneIds = ((s as any).doasLinkedZoneIds ?? []) as string[];
+      if (sysId && sysIds.includes(sysId)) return true;
+      if (zoneId && zoneIds.includes(zoneId)) return true;
+      // Also catch legacy case where sysId equals a linked id but room.zoneId is also set
+      if (sysId && zoneIds.includes(sysId)) return true;
+      return false;
+    }) ?? null;
+  };
+
+  // Effective TFA mode for a room — used by the engine (Phase C+).
+  // Resolution order:
+  //   1. explicit room.tfaMode if 'no-tfa' / 'tfa-served' / 'tfa-only'
+  //   2. zone.tfaDefaultMode (Phase E) if set on the room's LC zone doc
+  //   3. fallback to 'tfa-served' when zone is TFA-linked
+  //   4. 'no-tfa' when no DOAS serves this room
+  const getEffectiveTfaMode = (room: any, doas: any | null): 'no-tfa' | 'tfa-served' | 'tfa-only' => {
+    if (!doas) return 'no-tfa';
+    const raw = (room?.tfaMode as string | undefined) ?? 'inherit';
+    if (raw === 'no-tfa' || raw === 'tfa-served' || raw === 'tfa-only') return raw;
+    const zoneDoc = zoneDocs.find((z: any) => z.id === room?.zoneId);
+    const zoneDefault = (zoneDoc as any)?.tfaDefaultMode as string | undefined;
+    if (zoneDefault === 'tfa-only' || zoneDefault === 'tfa-served') return zoneDefault;
+    return 'tfa-served';
+  };
+
+  // Persist a zone's default TFA mode (Phase E). Writes to /zones/{zoneId}.
+  const updateZoneTfaDefaultMode = async (zoneId: string, mode: 'inherit' | 'tfa-served' | 'tfa-only') => {
+    try {
+      const ref = doc(db, 'projects', project.id, 'zones', zoneId);
+      const payload: any = mode === 'inherit' ? { tfaDefaultMode: deleteField() } : { tfaDefaultMode: mode };
+      payload.updatedAt = serverTimestamp();
+      await updateDoc(ref, payload);
+    } catch (err) {
+      handleFirestoreError(err, OperationType.WRITE, `zones/${zoneId}`);
+    }
+  };
+
+  // Persist a room's TFA mode override. 'inherit' deletes the field.
+  const updateRoomTfaMode = async (roomId: string, mode: 'inherit' | 'no-tfa' | 'tfa-served' | 'tfa-only') => {
+    try {
+      const ref = doc(db, 'projects', project.id, 'rooms', roomId);
+      const payload: any = mode === 'inherit' ? { tfaMode: deleteField() } : { tfaMode: mode };
+      payload.updatedAt = serverTimestamp();
+      await updateDoc(ref, payload);
+    } catch (err) {
+      handleFirestoreError(err, OperationType.WRITE, `rooms/${roomId}`);
+    }
+  };
+
   const computeRoomReqs = (room: any, elements: any[]) => {
-    const dc = getDesignConditionsForRoom(room);
+    const baseDc = getDesignConditionsForRoom(room);
     const monsoonTemp = project?.monsoonDesignTemp ?? project?.data?.monsoonDesignTemp ?? 85;
     const monsoonHum  = project?.monsoonDesignHumidity ?? project?.data?.monsoonDesignHumidity ?? 85;
     const incMonsoon  = !!(project?.includeMonsoon ?? project?.data?.includeMonsoon);
     const systemType  = project?.systemType ?? project?.data?.systemType;
+
+    // ── TFA / DOAS detection ──
+    // If the room's primary system (systemId or zoneId) is linked to a DOAS,
+    // switch the engine to 'tfa-cold' and pull TFA supply + ERV params from
+    // the DOAS doc. Defaults to undefined (engine falls back to 55°F / 90% RH
+    // / no ERV) when DOAS hasn't been configured by the user yet.
+    // Phase C: per-room override. A room marked 'no-tfa' opts out of the TFA
+    // branch even if its zone is TFA-linked (e.g. hi-wall split that can't take
+    // ducted TFA supply). 'tfa-only' is accepted but treated as 'tfa-served'
+    // by the engine until Phase D wires the corridor math.
+    const doasCandidate = findDoasForRoom(room);
+    const effectiveTfaMode = getEffectiveTfaMode(room, doasCandidate);
+    const doas = effectiveTfaMode === 'no-tfa' ? null : doasCandidate;
+    const isTFA = !!doas;
+    const dc: any = isTFA
+      ? {
+          ...baseDc,
+          ventilationStrategy: 'tfa-cold',
+          tfaSupplyTemp: (doas as any).tfaSupplyTemp,
+          tfaSupplyHumidity: (doas as any).tfaSupplyHumidity,
+          ervSensibleEffectiveness: (doas as any).ervSensibleEffectiveness,
+          ervLatentEffectiveness: (doas as any).ervLatentEffectiveness,
+        }
+      : baseDc;
 
     const rd = {
       id: room.id, name: room.name ?? '', floor: room.floor ?? 'Ground',
@@ -3155,38 +3758,67 @@ export default function EquipmentSelection({
     const envelope  = calculateEnvelopeGain(elements, dc);
     const internal  = calculateInternalGains(rd);
     const vent      = calculateVentilationLoad(rd, dc);
-    const erSens    = envelope.sensible + internal.sensible + vent.sensible * bf;
-    const erLat     = internal.latent + vent.latent * bf;
+    const tfa       = isTFA ? calculateTFALoad(rd, dc) : null;
+    // OA bypass-factor model only applies when OA enters the primary coil.
+    // In TFA mode, OA is conditioned by the DOAS — primary sees zero raw OA.
+    const erVentSen = isTFA ? 0 : vent.sensible * bf;
+    const erVentLat = isTFA ? 0 : vent.latent * bf;
+    const erSens    = envelope.sensible + internal.sensible + erVentSen;
+    const erLat     = internal.latent + erVentLat;
     const parasitic = calculateParasiticGains(erSens, erSens, ductPct, fanPct);
     const ersh = (erSens + parasitic.ductGain + parasitic.fanGain) * (1 + senSafePct / 100);
     const erlh = erLat * (1 + latSafePct / 100);
-    const coilSen   = ersh + vent.sensible * (1 - bf);
-    const coilLat   = erlh + vent.latent   * (1 - bf);
-    const grandTotalTR = (ersh + erlh + vent.sensible * (1 - bf) + vent.latent * (1 - bf)) / 12000;
+    const oaSen = isTFA ? 0 : vent.sensible * (1 - bf);
+    const oaLat = isTFA ? 0 : vent.latent   * (1 - bf);
+    // Cold-DOAS credit (engineering-correct, per locked decision 5).
+    const tfaOffSen = tfa ? tfa.spaceSensibleOffset : 0;
+    const tfaOffLat = tfa ? tfa.spaceLatentOffset   : 0;
+    // Phase D: tfa-only rooms route ALL their load through the TFA unit's
+    // supply-air carrying capacity. Primary contribution = 0. Engineering
+    // check: 1.08 × CFM_tfa × (T_room − T_supply) must ≥ ersh; warn if not.
+    const isTfaOnly = isTFA && effectiveTfaMode === 'tfa-only';
+    const tfaCarryingBTUH = tfa ? 1.08 * tfa.cfm * (dc.indoorTemp - tfa.supplyTemp) : 0;
+    const tfaCarryingDeficit = isTfaOnly ? Math.max(0, ersh - tfaCarryingBTUH) : 0;
+    const coilSen   = isTfaOnly ? 0 : (isTFA ? Math.max(0, ersh - tfaOffSen) : ersh + oaSen);
+    const coilLat   = isTfaOnly ? 0 : (isTFA ? Math.max(0, erlh - tfaOffLat) : erlh + oaLat);
+    const grandTotalTR = (coilSen + coilLat) / 12000;
 
     const presetACH  = getRecommendedAch(room.achProfile ?? room.activityType);
     const totalACH   = Math.max(presetACH, rd.facph);
     const supplyCFM  = (calculateRoomVolume(rd) * totalACH) / 60;
     const coilParams = calculateCoilParameters(coilSen, coilLat, dc.indoorTemp, dc.indoorHumidity, dc.altitude || 0, bf, 35, 65, getMinAdp(systemType));
-    const designCFM  = Math.max(coilParams.dehumidifiedCFM, supplyCFM);
+    // Use minAdpSensibleCFM (fixed system ADP) — not dehumidifiedCFM (floating ADP),
+    // which inflates high-sensible rooms. Matches LC's computeZoneTotals so the
+    // picker dialog and LC card show the same Design CFM. See CLAUDE.md "Critical invariant".
+    const designCFM  = Math.max(coilParams.minAdpSensibleCFM, supplyCFM);
     const cfmTR      = designCFM / 400;
-    const governingTR = Math.max(grandTotalTR, cfmTR);
+    // Plant TR is load-only (2026-05-20). cfmTR retained as sanity ratio.
+    const governingTR = grandTotalTR;
     const requiredTR  = governingTR * (1 + ovlSafePct / 100);
 
     // Monsoon season
-    const mDc = { ...dc, outdoorTemp: monsoonTemp, outdoorHumidity: monsoonHum };
+    const mDc: any = { ...dc, outdoorTemp: monsoonTemp, outdoorHumidity: monsoonHum };
     const mEnv = calculateEnvelopeGain(elements, mDc);
     const mVent = calculateVentilationLoad(rd, mDc);
-    const mErSens = mEnv.sensible + internal.sensible + mVent.sensible * bf;
-    const mErLat  = internal.latent + mVent.latent * bf;
+    const mTfa  = isTFA ? calculateTFALoad(rd, mDc) : null;
+    const mErVentSen = isTFA ? 0 : mVent.sensible * bf;
+    const mErVentLat = isTFA ? 0 : mVent.latent * bf;
+    const mErSens = mEnv.sensible + internal.sensible + mErVentSen;
+    const mErLat  = internal.latent + mErVentLat;
     const mPara   = calculateParasiticGains(mErSens, mErSens, ductPct, fanPct);
-    const mCoilSen = (mErSens + mPara.ductGain + mPara.fanGain) * (1 + senSafePct / 100) + mVent.sensible * (1 - bf);
-    const mCoilLat = mErLat * (1 + latSafePct / 100) + mVent.latent * (1 - bf);
+    const mErsh   = (mErSens + mPara.ductGain + mPara.fanGain) * (1 + senSafePct / 100);
+    const mErlh   = mErLat * (1 + latSafePct / 100);
+    const mOaSen  = isTFA ? 0 : mVent.sensible * (1 - bf);
+    const mOaLat  = isTFA ? 0 : mVent.latent   * (1 - bf);
+    const mTfaOffSen = mTfa ? mTfa.spaceSensibleOffset : 0;
+    const mTfaOffLat = mTfa ? mTfa.spaceLatentOffset   : 0;
+    const mCoilSen = isTfaOnly ? 0 : (isTFA ? Math.max(0, mErsh - mTfaOffSen) : mErsh + mOaSen);
+    const mCoilLat = isTfaOnly ? 0 : (isTFA ? Math.max(0, mErlh - mTfaOffLat) : mErlh + mOaLat);
     const mTotalTR = (mCoilSen + mCoilLat) / 12000;
     const mCoilP   = calculateCoilParameters(mCoilSen, mCoilLat, dc.indoorTemp, dc.indoorHumidity, dc.altitude || 0, bf, 35, 65, getMinAdp(systemType));
-    const mDesignCFM  = Math.max(mCoilP.dehumidifiedCFM, supplyCFM);
+    const mDesignCFM  = Math.max(mCoilP.minAdpSensibleCFM, supplyCFM);
     const mCfmTR      = mDesignCFM / 400;
-    const monsoonGoverningTR = Math.max(mTotalTR, mCfmTR);
+    const monsoonGoverningTR = mTotalTR;
     const monsoonRequiredTR  = monsoonGoverningTR * (1 + ovlSafePct / 100);
 
     const overallGoverningTR = incMonsoon ? Math.max(governingTR, monsoonGoverningTR) : governingTR;
@@ -3197,12 +3829,33 @@ export default function EquipmentSelection({
       requiredTR, governingTR, designCFM,
       monsoonLoadTR: mTotalTR, monsoonGoverningTR, monsoonRequiredTR, monsoonDesignCFM: mDesignCFM,
       overallGoverningTR, overallRequiredTR, overallDesignCFM,
+      // TFA / DOAS — zero when this room's primary is not DOAS-served.
+      tfaCoilBTUH: tfa ? tfa.coilSensible + tfa.coilLatent : 0,
+      tfaCoilTR: tfa ? (tfa.coilSensible + tfa.coilLatent) / 12000 : 0,
+      tfaCfm: tfa ? tfa.cfm : 0,
+      monsoonTfaCoilBTUH: mTfa ? mTfa.coilSensible + mTfa.coilLatent : 0,
+      monsoonTfaCoilTR: mTfa ? (mTfa.coilSensible + mTfa.coilLatent) / 12000 : 0,
+      // Phase D: tfa-only flag + carrying capacity diagnostics (for warnings).
+      isTFA,
+      isTfaOnly,
+      tfaCarryingBTUH,
+      tfaCarryingDeficit,
+      effectiveTfaMode,
     };
   };
 
   const recalcSystemRooms = async () => {
     if (!project?.id || !selectedSystemId) return;
-    const sysRooms = rooms.filter((r: any) => r.zoneId === selectedSystemId || r.systemId === selectedSystemId);
+    // For non-DOAS: rooms directly assigned to this system.
+    // For DOAS: rooms belonging to any primary system linked via doasLinkedSystemIds —
+    // computeRoomReqs will detect the DOAS link and switch to TFA mode.
+    const sys = equipSystems.find(s => s.id === selectedSystemId);
+    const linkedIds: string[] = sys && sys.type === 'DOAS'
+      ? ((sys as any).doasLinkedSystemIds ?? [])
+      : [];
+    const sysRooms = sys && sys.type === 'DOAS'
+      ? rooms.filter((r: any) => linkedIds.includes(r.zoneId) || linkedIds.includes(r.systemId))
+      : rooms.filter((r: any) => r.zoneId === selectedSystemId || r.systemId === selectedSystemId);
     if (sysRooms.length === 0) return;
     setRecalcLoading(true);
     try {
@@ -3253,6 +3906,14 @@ export default function EquipmentSelection({
       overallGoverningTR: Number(r?._calcOverallGoverningTR) || Number(r?._calcGoverningTR) || 0,
       overallRequiredTR:  Number(r?._calcOverallRequiredTR)  || summerReqTR,
       overallDesignCFM:   Number(r?._calcOverallDesignCFM)   || summerCFM,
+      // TFA fallback — only populated on rooms that were last persisted in
+      // TFA mode by LC. Live calc above will produce correct values regardless.
+      tfaCoilBTUH:        Number((r as any)?._calcTfaCoilBTUH) || 0,
+      tfaCoilTR:          Number((r as any)?._calcTfaCoilTR) || 0,
+      tfaCfm:             Number((r as any)?._calcTfaCfm) || 0,
+      monsoonTfaCoilBTUH: Number((r as any)?._calcMonsoonTfaCoilBTUH) || 0,
+      monsoonTfaCoilTR:   Number((r as any)?._calcMonsoonTfaCoilTR) || 0,
+      isTFA:              !!(r as any)?._calcTfaCoilBTUH,
     };
   };
 
@@ -3309,6 +3970,134 @@ export default function EquipmentSelection({
     return calcSystemVentilation62(zoneCalcs);
   }, [selectedSystem, rooms]);
 
+  // ── Project-wide DOAS status ────────────────────────────────────────────
+  // Used by the SD header chip so the user sees at a glance whether the
+  // project has any DOAS unit and what coverage it provides. DOAS is optional
+  // — when none exist, the chip explicitly says so (OA on primary).
+  const projectDoasAggregate = useMemo(() => {
+    const doasUnits = (equipSystems as any[]).filter(s => s?.type === 'DOAS');
+    // Linked IDs union: legacy system-links + Phase B+ zone-links.
+    const linkedIds = new Set<string>();
+    for (const d of doasUnits) {
+      for (const pid of ((d.doasLinkedSystemIds ?? []) as string[])) linkedIds.add(pid);
+      for (const zid of ((d.doasLinkedZoneIds ?? []) as string[])) linkedIds.add(zid);
+    }
+    // primaryCount = distinct primary system IDs touched (system-link OR via any zone-link's parent).
+    const linkedPrimaryIds = new Set<string>();
+    for (const r of rooms as any[]) {
+      if ((r.systemId && linkedIds.has(r.systemId)) || (r.zoneId && linkedIds.has(r.zoneId))) {
+        if (r.systemId) linkedPrimaryIds.add(r.systemId);
+      }
+    }
+    const servedRoomIds = (rooms as any[])
+      .filter((r: any) => linkedIds.has(r.systemId) || linkedIds.has(r.zoneId))
+      .map((r: any) => r.id);
+    const totalOACFM = servedRoomIds.reduce((sum, rid) => {
+      const r = rooms.find((x: any) => x.id === rid) as any;
+      if (!r) return sum;
+      return sum + (calculateRoomVolume(r) * (Number(r.facph) || 0)) / 60;
+    }, 0);
+    return {
+      hasDoas: doasUnits.length > 0,
+      doasCount: doasUnits.length,
+      primaryCount: linkedPrimaryIds.size,
+      roomCount: servedRoomIds.length,
+      totalOACFM,
+      firstDoasId: doasUnits[0]?.id as string | undefined,
+    };
+  }, [equipSystems, rooms]);
+
+  // ── DOAS aggregation ────────────────────────────────────────────────────
+  // DOAS systems have no rooms assigned directly — they serve rooms belonging
+  // to the primary systems listed in doasLinkedSystemIds. Aggregate those.
+  const doasServedRoomIds = useMemo(() => {
+    if (!selectedSystem || selectedSystem.type !== 'DOAS') return [] as string[];
+    const sysLinks: string[] = (selectedSystem as any).doasLinkedSystemIds ?? [];
+    const zoneLinks: string[] = (selectedSystem as any).doasLinkedZoneIds ?? [];
+    if (sysLinks.length === 0 && zoneLinks.length === 0) return [] as string[];
+    const linked = new Set<string>([...sysLinks, ...zoneLinks]);
+    return rooms
+      .filter((r: any) => linked.has(r.zoneId) || linked.has(r.systemId))
+      .map((r: any) => r.id);
+  }, [selectedSystem, rooms]);
+
+  // OA CFM for DOAS = sum of facph × volume over served rooms.
+  const doasOACFM = useMemo(
+    () => doasServedRoomIds.reduce((sum, rid) => {
+      const r = rooms.find((x: any) => x.id === rid) as any;
+      if (!r) return sum;
+      const vol = calculateRoomVolume(r);
+      return sum + vol * (Number(r.facph) || 0) / 60;
+    }, 0),
+    [doasServedRoomIds, rooms],
+  );
+
+  // TFA coil sizing — LIVE psychrometric calc using current supply settings.
+  //
+  // Previously this memo summed persisted _calcTfaCoilBTUH from rooms, but
+  // those values were locked to the supply temp/RH at the time of last persist.
+  // Result: changing Supply Temp or RH on the tile didn't refresh the displayed
+  // TFA coil load until the user manually hit Refresh Loads on each primary.
+  //
+  // Fix: always compute live from project design conditions + current DOAS
+  // supply + aggregated OA CFM. The persisted per-room values still drive
+  // downstream primary-coil sizing; this aggregate is purely the live preview
+  // of the DOAS unit duty against the supply settings the user is tuning.
+  const doasTFAAggregate = useMemo(() => {
+    if (doasOACFM <= 0) {
+      return {
+        summerCoilTR: 0,
+        monsoonCoilTR: 0,
+        governingCoilTR: 0,
+        governs: 'summer' as 'summer' | 'monsoon',
+        cfm: 0,
+        source: 'empty' as const,
+      };
+    }
+    const outdoorT  = Number(project?.summerDesignTemp ?? project?.data?.summerDesignTemp ?? 95);
+    const outdoorRH = Number(project?.summerDesignHumidity ?? project?.data?.summerDesignHumidity
+                            ?? project?.outsideSummerHumidity ?? project?.data?.outsideSummerHumidity ?? 70);
+    const indoorT   = Number(project?.insideSummerTemp ?? project?.data?.insideSummerTemp ?? 75);
+    const indoorRH  = Number(project?.insideSummerHumidity ?? project?.data?.insideSummerHumidity ?? 50);
+    const altitude  = Number(project?.altitude ?? project?.data?.altitude ?? 0);
+    const monsoonT  = Number(project?.monsoonDesignTemp ?? project?.data?.monsoonDesignTemp ?? outdoorT);
+    const monsoonRH = Number(project?.monsoonDesignHumidity ?? project?.data?.monsoonDesignHumidity ?? outdoorRH);
+    const incMonsoon = !!(project?.includeMonsoon ?? project?.data?.includeMonsoon);
+    const supplyT  = (selectedSystem as any)?.tfaSupplyTemp ?? 55;
+    const supplyRH = (selectedSystem as any)?.tfaSupplyHumidity ?? 90;
+    const epsS = Math.max(0, Math.min(1, (selectedSystem as any)?.ervSensibleEffectiveness ?? 0));
+    const epsL = Math.max(0, Math.min(1, (selectedSystem as any)?.ervLatentEffectiveness ?? 0));
+
+    const psyOut = calculatePsychrometrics(outdoorT, outdoorRH, altitude);
+    const psyIn  = calculatePsychrometrics(indoorT, indoorRH, altitude);
+    const psySup = calculatePsychrometrics(supplyT, supplyRH, altitude);
+
+    const sumSen = Math.max(0, 1.08 * doasOACFM * (outdoorT - supplyT)
+      - epsS * 1.08 * doasOACFM * (outdoorT - indoorT));
+    const sumLat = Math.max(0, 0.68 * doasOACFM * (psyOut.humidityRatio - psySup.humidityRatio) * 7000
+      - epsL * 0.68 * doasOACFM * (psyOut.humidityRatio - psyIn.humidityRatio) * 7000);
+    const sumTotal = sumSen + sumLat;
+
+    let monTotal = 0;
+    if (incMonsoon) {
+      const psyMon = calculatePsychrometrics(monsoonT, monsoonRH, altitude);
+      const monSen = Math.max(0, 1.08 * doasOACFM * (monsoonT - supplyT)
+        - epsS * 1.08 * doasOACFM * (monsoonT - indoorT));
+      const monLat = Math.max(0, 0.68 * doasOACFM * (psyMon.humidityRatio - psySup.humidityRatio) * 7000
+        - epsL * 0.68 * doasOACFM * (psyMon.humidityRatio - psyIn.humidityRatio) * 7000);
+      monTotal = monSen + monLat;
+    }
+    const govTotal = Math.max(sumTotal, monTotal);
+    return {
+      summerCoilTR: sumTotal / 12000,
+      monsoonCoilTR: monTotal / 12000,
+      governingCoilTR: govTotal / 12000,
+      governs: (monTotal > sumTotal ? 'monsoon' : 'summer') as 'summer' | 'monsoon',
+      cfm: doasOACFM,
+      source: 'live-supply' as const,
+    };
+  }, [doasOACFM, selectedSystem, project]);
+
   // VRF diversity calculation — individual IDUs + zone AHU/IDU selections
   const totalIDU_TR = selectedSystem
     ? Object.values(selectedSystem.iduSelections as any).reduce((s: number, x: any) => s + normalizeIDUList(x).reduce((ss, u) => ss + u.trCapacity * (u.quantity ?? 1), 0), 0)
@@ -3332,6 +4121,10 @@ export default function EquipmentSelection({
   const totalDesignCFM         = assignedRoomReqs.reduce((s, r) => s + r.overallDesignCFM, 0);
   const totalSummerRequiredTR  = assignedRoomReqs.reduce((s, r) => s + r.requiredTR, 0);
   const totalMonsoonRequiredTR = assignedRoomReqs.reduce((s, r) => s + r.monsoonRequiredTR, 0);
+  const totalSummerThermalTR   = systemRoomIds.reduce((s, rid) => {
+    const room = rooms.find((r: any) => r.id === rid) as any;
+    return s + (Number(room?._calcLoadTR) || 0);
+  }, 0);
   const totalMonsoonThermalTR  = assignedRoomReqs.reduce((s, r) => s + r.monsoonLoadTR, 0);
   const totalSummerDesignCFM   = assignedRoomReqs.reduce((s, r) => s + r.designCFM, 0);
   const totalMonsoonDesignCFM  = assignedRoomReqs.reduce((s, r) => s + r.monsoonDesignCFM, 0);
@@ -3377,21 +4170,66 @@ export default function EquipmentSelection({
   // Per-zone data for SpecSheet AHU unit-wise breakdown (all system types)
   const zoneUnitsForSpec = useMemo(() => {
     if (!selectedSystem) return [];
-    type ZEntry = { zoneName: string; requiredTR: number; designCFM: number; oaCFM: number };
+    type ZEntry = {
+      zoneId: string;
+      zoneName: string;
+      requiredTR: number;
+      designCFM: number;
+      oaCFM: number;
+      ahuConfig?: AHUConfig;
+      selectedAHUTotalTR?: number;
+      selectedAHUTotalCFM?: number;
+      selectedAHUQty?: number;
+      selectedAHUPerUnitTR?: number;
+      selectedAHUPerUnitCFM?: number;
+    };
     const zoneMap = new Map<string, ZEntry>();
     for (const roomId of systemRoomIds) {
       const room = rooms.find((r: any) => r.id === roomId) as any;
       if (!room) continue;
       const zId = room.zoneId ?? selectedSystem.id;
       const zName = room.zoneName ?? selectedSystem.name;
-      if (!zoneMap.has(zId)) zoneMap.set(zId, { zoneName: zName, requiredTR: 0, designCFM: 0, oaCFM: 0 });
+      if (!zoneMap.has(zId)) zoneMap.set(zId, { zoneId: zId, zoneName: zName, requiredTR: 0, designCFM: 0, oaCFM: 0 });
       const z = zoneMap.get(zId)!;
       const reqs = getRoomReqs(roomId);
-      z.requiredTR += reqs.overallRequiredTR;
+      // Use overallGoverningTR (max of summer/monsoon load — no safety) so that
+      // the AHU spec's own 10% safety in buildAHU is applied ONCE. Previously
+      // we used overallRequiredTR which already includes per-room safety, so
+      // buildAHU's 10% landed on top → ~1.6× double-safety stacking, inflating
+      // Zone 1 to 128 TR vs actual monsoon governing 72.78 TR (TEZPUR case).
+      z.requiredTR += reqs.overallGoverningTR;
       z.designCFM += reqs.overallDesignCFM;
       const vol = calculateRoomVolume(room);
       z.oaCFM += vol * (Number(room.facph) || 0) / 60;
     }
+
+    // Enrich with each zone's actually-selected AHU/FCU units so the spec sheet
+    // can show per-unit capacity & quantity from the user's picks instead of
+    // recomputing from load TR. Sum trCapacity × qty across all selected units
+    // in the zone. Per-unit values use the largest unit when models are mixed.
+    const sysZones = (selectedSystem.zones ?? []) as EquipmentZone[];
+    for (const z of zoneMap.values()) {
+      const zoneDoc = sysZones.find(sz => sz.id === z.zoneId);
+      // Capture per-zone ahuConfig (mixing box, mounting, fan, coil rows, filters)
+      // so the spec sheet honors zone-level overrides like ceiling-hung / no mixing box.
+      if (zoneDoc?.ahuConfig) z.ahuConfig = zoneDoc.ahuConfig;
+      const units = getZoneUnits(zoneDoc);
+      if (units.length === 0) continue;
+      const totalTR  = units.reduce((s, u) => s + (u.trCapacity ?? 0) * (u.quantity ?? 1), 0);
+      const totalCFM = units.reduce((s, u) => s + (u.cfmRated  ?? 0) * (u.quantity ?? 1), 0);
+      const totalQty = units.reduce((s, u) => s + (u.quantity ?? 1), 0);
+      if (totalTR <= 0 || totalQty <= 0) continue;
+      const distinct = new Set(units.map(u => `${u.brand}|${u.modelSeries}|${u.trCapacity}`));
+      const homogeneous = distinct.size === 1;
+      const perTR  = homogeneous ? (units[0].trCapacity ?? 0) : parseFloat((totalTR / totalQty).toFixed(2));
+      const perCFM = homogeneous ? (units[0].cfmRated  ?? 0) : Math.round(totalCFM / totalQty);
+      z.selectedAHUTotalTR     = totalTR;
+      z.selectedAHUTotalCFM    = totalCFM;
+      z.selectedAHUQty         = totalQty;
+      z.selectedAHUPerUnitTR   = perTR;
+      z.selectedAHUPerUnitCFM  = perCFM;
+    }
+
     return Array.from(zoneMap.values());
   }, [selectedSystem, systemRoomIds, rooms]);
 
@@ -3490,11 +4328,94 @@ export default function EquipmentSelection({
     };
   }, [selectedSystem?.id, systemRoomIds, rooms, project]);
 
-  // Chiller sizes on the governing required TR (max of summer and monsoon, considering both thermal and CFM-based loads).
-  // The AHU coil must handle all load components, so the chiller must meet the full required TR.
-  const chillerSummerThermalTR = totalSummerRequiredTR;
-  const chillerThermalTR = includeMonsoon && totalMonsoonRequiredTR > chillerSummerThermalTR
-    ? totalMonsoonRequiredTR
+  // ── Dehumidifier sizing — total LPH and per-zone breakdown (AHU) ─────────
+  // Catalog dehumidifier models, computed once.
+  const dehumidifierModels = useMemo(
+    () => EQUIPMENT_CATALOG.filter(m => m.type === 'Dehumidifier' && (m.capacityLPH ?? 0) > 0),
+    [],
+  );
+
+  // Per-zone moisture-removal map — works for any system that has zones (AHU, Chiller AHU
+  // terminals, zoned VRF, etc.). For systems without zones, the system-level picker takes
+  // over and uses systemTotalRoomDehumidLbsHr below.
+  //
+  // Sizes the dehumidifier as a SUPPLEMENTAL device alongside the AHU coil:
+  //   ROOM latent (erlh, includes the small BF × OA leak past the coil, with safety factor)
+  //   ÷ 1050 BTU·lb⁻¹ latent heat of vaporization.
+  // We do NOT use the saved `moisture.rate` here — that's coil total (room + OA) and would
+  // oversize a supplemental dehumidifier by 5–10× because the AHU coil handles OA latent.
+  const dehumidByZone = useMemo(() => {
+    const result = new Map<string, { name: string; lbsHr: number }>();
+    if (!selectedSystem) return result;
+    const zones = (selectedSystem.zones ?? (selectedSystem as any).ahuGroups ?? []) as EquipmentZone[];
+    for (const zone of zones) {
+      let lbsHr = 0;
+      for (const roomId of zone.roomIds ?? []) {
+        const room = rooms.find((r: any) => r.id === roomId) as any;
+        const erlh = Number(room?.analysis?.totals?.erlh) || 0;
+        if (erlh > 0) lbsHr += erlh / 1050;
+      }
+      result.set(zone.id, { name: zone.name, lbsHr });
+    }
+    return result;
+  }, [selectedSystem, rooms]);
+
+  // System-level room-only dehumid load — used by zoneless systems (Package, single-unit Split,
+  // DOAS) that don't have a per-zone breakdown.
+  const systemTotalRoomDehumidLbsHr = useMemo(() => {
+    if (!selectedSystem) return 0;
+    let lbsHr = 0;
+    for (const roomId of systemRoomIds) {
+      const room = rooms.find((r: any) => r.id === roomId) as any;
+      const erlh = Number(room?.analysis?.totals?.erlh) || 0;
+      if (erlh > 0) lbsHr += erlh / 1050;
+    }
+    return lbsHr;
+  }, [selectedSystem, systemRoomIds, rooms]);
+
+  // Reheat capacity (BTU/h) computed per zone and per system, matching the same room-SHF basis
+  // the engine uses (target SHR = 0.75 — see lib/hvac/reheat.ts). For methods 1/2/3, this is
+  // the heat the AHU/duct-heater must add to bring overcooled air back up to setpoint.
+  const computeRoomReheatBTU = (room: any): number => {
+    const sen = Number(room?.analysis?.totals?.ersh) || 0;
+    const lat = Number(room?.analysis?.totals?.erlh) || 0;
+    const tot = sen + lat;
+    const rSHR = tot > 0 ? sen / tot : 1;
+    const tSHR = 0.75;
+    if (rSHR >= tSHR) return 0;
+    return Math.max(0, (lat * tSHR) / (1 - tSHR) - sen);
+  };
+
+  const reheatByZone = useMemo(() => {
+    const result = new Map<string, number>();
+    if (!selectedSystem) return result;
+    const zones = (selectedSystem.zones ?? (selectedSystem as any).ahuGroups ?? []) as EquipmentZone[];
+    for (const zone of zones) {
+      let btu = 0;
+      for (const roomId of zone.roomIds ?? []) {
+        const room = rooms.find((r: any) => r.id === roomId);
+        btu += computeRoomReheatBTU(room);
+      }
+      result.set(zone.id, btu);
+    }
+    return result;
+  }, [selectedSystem, rooms]);
+
+  const systemTotalReheatBTU = useMemo(() => {
+    if (!selectedSystem) return 0;
+    let btu = 0;
+    for (const roomId of systemRoomIds) {
+      const room = rooms.find((r: any) => r.id === roomId);
+      btu += computeRoomReheatBTU(room);
+    }
+    return btu;
+  }, [selectedSystem, systemRoomIds, rooms]);
+
+  // Chiller plant load should track thermal zone load. Airflow-driven (CFM) uplift is used
+  // for air-side equipment sizing, but should not inflate plant tonnage display.
+  const chillerSummerThermalTR = totalSummerThermalTR;
+  const chillerThermalTR = includeMonsoon && totalMonsoonThermalTR > chillerSummerThermalTR
+    ? totalMonsoonThermalTR
     : chillerSummerThermalTR;
 
   // Diversity-adjusted chiller plant capacity (not all zones peak simultaneously)
@@ -3531,7 +4452,10 @@ export default function EquipmentSelection({
   }, [selectedSystem]);
 
   const ctTotalInstalledTR = effectiveCTUnits.reduce((s, u) => s + u.trCapacity * u.quantity, 0);
-  // Heat rejection duty ≈ chiller plant × 1.25 (accounts for compressor heat at COP ≈ 5)
+  const ctWorkingTR = effectiveCTUnits.filter(u => (u.role ?? 'working') === 'working').reduce((s, u) => s + u.trCapacity * u.quantity, 0);
+  const ctStandbyTR = effectiveCTUnits.filter(u => u.role === 'standby').reduce((s, u) => s + u.trCapacity * u.quantity, 0);
+  // Heat rejection duty ≈ chiller plant × 1.25 (accounts for compressor heat at COP ≈ 5).
+  // Standby CTs are redundancy and don't count toward duty coverage — compare against working only.
   const ctRequiredTR = chillerDiverseTR * 1.25;
 
   // All equipment selected across systems — drives the Library tab schedule
@@ -3699,8 +4623,33 @@ export default function EquipmentSelection({
     <div className="space-y-4 px-1">
       {/* Header + tabs row — single line, no wasted vertical space */}
       <div className="flex flex-wrap items-center justify-between gap-3 pb-2 border-b border-slate-200 dark:border-slate-700">
-        <div className="flex items-baseline gap-3">
+        <div className="flex items-baseline gap-3 flex-wrap">
           <h2 className="text-xl font-bold text-gray-900 dark:text-slate-100">Equipment Selection</h2>
+          {/* Project-level DOAS / TFA status chip. Optional system — chip is
+              always shown so the user can confirm at a glance which mode this
+              project is in. Clicking the active chip jumps to the DOAS unit. */}
+          {projectDoasAggregate.hasDoas ? (
+            <button
+              type="button"
+              onClick={() => projectDoasAggregate.firstDoasId && setSelectedSystemId(projectDoasAggregate.firstDoasId)}
+              className="self-center inline-flex items-center gap-1.5 rounded-full border border-teal-300 dark:border-teal-700 bg-teal-50 dark:bg-teal-950/30 px-2.5 py-0.5 text-[11px] font-semibold text-teal-700 dark:text-teal-300 hover:bg-teal-100 dark:hover:bg-teal-900/40 transition-colors"
+              title={`Project uses ${projectDoasAggregate.doasCount} TFA/DOAS unit${projectDoasAggregate.doasCount === 1 ? '' : 's'} serving ${projectDoasAggregate.primaryCount} primary system${projectDoasAggregate.primaryCount === 1 ? '' : 's'} and ${projectDoasAggregate.roomCount} room${projectDoasAggregate.roomCount === 1 ? '' : 's'} (${Math.round(projectDoasAggregate.totalOACFM).toLocaleString()} CFM OA). Click to open the TFA/DOAS unit.`}
+            >
+              <Wind className="w-3 h-3" />
+              TFA/DOAS Active
+              <span className="font-mono font-normal opacity-80">
+                · {projectDoasAggregate.doasCount} unit{projectDoasAggregate.doasCount === 1 ? '' : 's'} · {projectDoasAggregate.primaryCount} prim · {projectDoasAggregate.roomCount} room{projectDoasAggregate.roomCount === 1 ? '' : 's'}
+              </span>
+            </button>
+          ) : (
+            <span
+              className="self-center inline-flex items-center gap-1.5 rounded-full border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 px-2.5 py-0.5 text-[11px] font-medium text-slate-500 dark:text-slate-400"
+              title="No TFA/DOAS unit configured for this project — outdoor air is conditioned by the primary system(s). Add a TFA/DOAS system if you want a separate fresh-air handler."
+            >
+              <Wind className="w-3 h-3 opacity-60" />
+              No TFA/DOAS — OA on primary
+            </span>
+          )}
         </div>
         {/* Project Switcher */}
         <div className="flex items-center gap-2 shrink-0">
@@ -3765,11 +4714,19 @@ export default function EquipmentSelection({
 
           {/* Zone ↔ System Sync dialog */}
           {syncDialog && (
-            <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
-              <div className="bg-white dark:bg-slate-900 rounded-xl shadow-2xl w-full max-w-md p-6 space-y-4">
-                <div className="flex items-center gap-2">
+            <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+              <div className="bg-white dark:bg-slate-900 rounded-xl shadow-2xl w-full max-w-md p-6 space-y-4 max-h-[90vh] overflow-y-auto">
+                <div className="flex items-center gap-2 sticky top-0 bg-white dark:bg-slate-900 pb-2 -mt-2 pt-2 border-b border-slate-100 dark:border-slate-800 z-10">
                   <ArrowLeftRight className="w-5 h-5 text-blue-600" />
                   <h3 className="text-base font-bold text-slate-800 dark:text-slate-100">Bulk Re-map / Recovery</h3>
+                  <button
+                    type="button"
+                    className="ml-auto text-slate-400 hover:text-slate-600 dark:hover:text-slate-300 text-lg leading-none"
+                    onClick={() => setSyncDialog(false)}
+                    title="Close"
+                  >
+                    ×
+                  </button>
                 </div>
                 <div className="rounded-md border border-amber-200 dark:border-amber-800 bg-amber-50/60 dark:bg-amber-950/20 px-3 py-2 text-xs text-amber-800 dark:text-amber-300 leading-relaxed">
                   <strong>Day-to-day sync is automatic now</strong> — adding/moving rooms or zones in LC writes back to ES live, and vice-versa. Use this dialog only to bulk-remap a legacy project (by zone-name pattern) or to repair a desync.
@@ -3797,7 +4754,7 @@ export default function EquipmentSelection({
                         <div key={z} className="flex items-center gap-2 px-2 py-1.5">
                           <div className="flex-1 min-w-0">
                             <span className="text-xs font-medium text-slate-700 dark:text-slate-300 truncate">{z}</span>
-                            <span className="text-xs text-slate-400 dark:text-slate-500 ml-1">({n as number} rooms)</span>
+                            <span className="text-xs text-slate-400 dark:text-slate-500 ml-1">({n as number} room{(n as number) === 1 ? '' : 's'})</span>
                           </div>
                           <select
                             className="text-xs border border-emerald-200 dark:border-emerald-800 rounded px-1 py-0.5 bg-white dark:bg-slate-700 text-slate-700 dark:text-slate-300 max-w-[130px]"
@@ -3983,27 +4940,63 @@ export default function EquipmentSelection({
             </div>
           )}
 
-          {/* Recovery toolbar — visible for single-system project types (Chiller, Package, AHU, etc.)
-              where the sidebar that hosts the same button is hidden. */}
-          {!showSidebar && equipSystems.length > 0 && (
-            <div className="mb-2 flex justify-end">
-              <Button size="sm" variant="outline" className="h-8 text-xs gap-1.5"
-                onClick={() => {
-                  const initMap: Record<string, string> = {};
-                  const zNames = [...new Set(rooms.map((r: any) => (r.zoneName || 'Zone').trim()))];
-                  for (const z of zNames) {
-                    const match = equipSystems.find(s =>
-                      s.name.toLowerCase() === z.toLowerCase() ||
-                      s.name.toLowerCase().includes(z.toLowerCase()) ||
-                      z.toLowerCase().includes(s.name.toLowerCase()),
-                    );
-                    if (match) initMap[z] = match.id;
-                  }
-                  setZoneMapping(initMap);
-                  setSyncDialog(true);
-                }}>
-                <ArrowLeftRight className="w-3.5 h-3.5" /> Bulk Re-map / Recovery
-              </Button>
+          {/* Toolbar for single-system project types (Chiller, Package, AHU, etc.)
+              where the sidebar that hosts these buttons is hidden. Add System is
+              required here so secondary systems (notably DOAS) can be created on
+              top of the auto-created primary. When more than one system exists,
+              a chip row appears so the user can switch between them. */}
+          {!showSidebar && (
+            <div className="mb-2 flex items-center justify-between gap-2 flex-wrap">
+              {equipSystems.length > 1 ? (
+                <div className="flex items-center gap-1.5 flex-wrap">
+                  {equipSystems.map(s => (
+                    <button
+                      key={s.id}
+                      onClick={() => setSelectedSystemId(s.id)}
+                      className={cn(
+                        'inline-flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-full border font-medium transition-colors',
+                        s.id === selectedSystemId
+                          ? s.type === 'DOAS'
+                            ? 'bg-teal-100 dark:bg-teal-900/40 border-teal-400 dark:border-teal-600 text-teal-800 dark:text-teal-200'
+                            : 'bg-blue-100 dark:bg-blue-900/40 border-blue-400 dark:border-blue-600 text-blue-800 dark:text-blue-200'
+                          : 'bg-white dark:bg-slate-800 border-slate-200 dark:border-slate-600 text-slate-500 dark:text-slate-400 hover:border-slate-400 hover:text-slate-700',
+                      )}>
+                      {s.name}
+                      <span className="text-xs opacity-60">{s.type}</span>
+                    </button>
+                  ))}
+                </div>
+              ) : <div />}
+              <div className="flex gap-2">
+                <Button size="sm" className="h-8 text-xs gap-1.5"
+                  onClick={() => {
+                    // Default the new system to DOAS on Chiller / AHU / Package layouts —
+                    // those are the project types most likely to add a second system.
+                    setNewType('DOAS');
+                    setShowNewSystem(true);
+                  }}>
+                  <Plus className="w-3.5 h-3.5" /> Add System
+                </Button>
+                {equipSystems.length > 0 && (
+                  <Button size="sm" variant="outline" className="h-8 text-xs gap-1.5"
+                    onClick={() => {
+                      const initMap: Record<string, string> = {};
+                      const zNames = [...new Set(rooms.map((r: any) => (r.zoneName || 'Zone').trim()))];
+                      for (const z of zNames) {
+                        const match = equipSystems.find(s =>
+                          s.name.toLowerCase() === z.toLowerCase() ||
+                          s.name.toLowerCase().includes(z.toLowerCase()) ||
+                          z.toLowerCase().includes(s.name.toLowerCase()),
+                        );
+                        if (match) initMap[z] = match.id;
+                      }
+                      setZoneMapping(initMap);
+                      setSyncDialog(true);
+                    }}>
+                    <ArrowLeftRight className="w-3.5 h-3.5" /> Bulk Re-map / Recovery
+                  </Button>
+                )}
+              </div>
             </div>
           )}
 
@@ -4215,65 +5208,357 @@ export default function EquipmentSelection({
                     <div className="rounded-xl border border-teal-200 dark:border-teal-800 overflow-hidden shadow-sm">
                       <div className="bg-teal-50 dark:bg-teal-950/30 px-5 py-3 border-b border-teal-200 dark:border-teal-800 flex items-center gap-2">
                         <Wind className="w-4 h-4 text-teal-600 dark:text-teal-400" />
-                        <span className="text-sm font-bold uppercase text-teal-700 dark:text-teal-300 tracking-wide">DOAS Configuration</span>
+                        <span className="text-sm font-bold uppercase text-teal-700 dark:text-teal-300 tracking-wide">TFA/DOAS Configuration</span>
                         <span className="text-xs text-teal-500 dark:text-teal-500 ml-1">Dedicated Outdoor Air System</span>
                       </div>
                       <div className="p-5 space-y-5">
-                        {/* OA CFM summary */}
-                        <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+                        {/* OA CFM + TFA coil summary */}
+                        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                           <div className="rounded-lg border border-teal-200 dark:border-teal-800 bg-teal-50/60 dark:bg-teal-950/20 px-4 py-3">
                             <p className="text-xs font-bold uppercase tracking-wide text-teal-600 dark:text-teal-400">OA Flow Required</p>
-                            <p className="mt-1 font-mono text-xl font-bold text-teal-900 dark:text-teal-200">{Math.round(totalSystemOACFM).toLocaleString()}</p>
+                            <p className="mt-1 font-mono text-xl font-bold text-teal-900 dark:text-teal-200">{Math.round(doasOACFM).toLocaleString()}</p>
                             <p className="text-xs text-teal-500 dark:text-teal-400">CFM fresh air</p>
+                          </div>
+                          <div className="rounded-lg border border-teal-200 dark:border-teal-800 bg-teal-50/60 dark:bg-teal-950/20 px-4 py-3">
+                            <p className="text-xs font-bold uppercase tracking-wide text-teal-600 dark:text-teal-400">TFA Coil Load</p>
+                            <p className="mt-1 font-mono text-xl font-bold text-teal-900 dark:text-teal-200">{doasTFAAggregate.governingCoilTR.toFixed(1)}</p>
+                            <p className="text-xs text-teal-500 dark:text-teal-400">TR · {doasTFAAggregate.governs} governs</p>
                           </div>
                           <div className="rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 px-4 py-3">
                             <p className="text-xs font-bold uppercase tracking-wide text-slate-500 dark:text-slate-400">Rooms Served</p>
-                            <p className="mt-1 font-mono text-xl font-bold text-slate-800 dark:text-slate-200">{systemRoomIds.length}</p>
-                            <p className="text-xs text-slate-400">assigned to this DOAS</p>
-                          </div>
-                          <div className="rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 px-4 py-3">
-                            <p className="text-xs font-bold uppercase tracking-wide text-slate-500 dark:text-slate-400">Supply Condition</p>
-                            <p className="mt-1 font-mono text-sm font-bold text-slate-700 dark:text-slate-300">55°F / 90% RH</p>
-                            <p className="text-xs text-slate-400">ASHRAE DOAS target</p>
+                            <p className="mt-1 font-mono text-xl font-bold text-slate-800 dark:text-slate-200">{doasServedRoomIds.length}</p>
+                            <p className="text-xs text-slate-400">via linked primaries</p>
                           </div>
                         </div>
 
-                        {/* Linked primary systems */}
-                        <div>
-                          <p className="text-sm font-bold text-slate-700 dark:text-slate-200 mb-2">Linked Primary Systems</p>
-                          <p className="text-xs text-slate-400 dark:text-slate-500 mb-3">Select which VRF / Chiller / AHU systems this DOAS supplements for ventilation.</p>
-                          <div className="flex flex-wrap gap-2">
-                            {equipSystems.filter(s => s.id !== selectedSystem.id && s.type !== 'DOAS').map(s => {
-                              const linked = ((selectedSystem as any).doasLinkedSystemIds ?? []).includes(s.id);
-                              return (
-                                <button
-                                  key={s.id}
-                                  onClick={() => {
-                                    const current: string[] = (selectedSystem as any).doasLinkedSystemIds ?? [];
-                                    const updated = linked ? current.filter((id: string) => id !== s.id) : [...current, s.id];
-                                    void updateSystemField(selectedSystem.id, { doasLinkedSystemIds: updated });
-                                  }}
-                                  className={cn(
-                                    'inline-flex items-center gap-1.5 text-sm px-3 py-1.5 rounded-full border font-medium transition-colors',
-                                    linked
-                                      ? 'bg-teal-100 dark:bg-teal-900/40 border-teal-400 dark:border-teal-600 text-teal-800 dark:text-teal-200'
-                                      : 'bg-white dark:bg-slate-800 border-slate-200 dark:border-slate-600 text-slate-500 dark:text-slate-400 hover:border-teal-300 hover:text-teal-700',
-                                  )}>
-                                  {linked && <Check className="w-3 h-3" />}
-                                  {s.name}
-                                  <span className="text-xs opacity-60">{s.type}</span>
-                                </button>
-                              );
-                            })}
-                            {equipSystems.filter(s => s.id !== selectedSystem.id && s.type !== 'DOAS').length === 0 && (
-                              <p className="text-xs text-slate-400 italic">No other systems — create a VRF or Chiller system first.</p>
-                            )}
+                        {/* TFA Supply & Heat Recovery — editable */}
+                        <div className="rounded-lg border border-teal-200 dark:border-teal-800 bg-white dark:bg-slate-900 p-4">
+                          <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-2 mb-3">
+                            <div>
+                              <p className="text-sm font-bold text-slate-700 dark:text-slate-200">TFA Supply & Heat Recovery</p>
+                              <p className="text-xs text-slate-400 dark:text-slate-500 mt-0.5">Lower supply temp = more sensible offload to primary. Higher ERV effectiveness = less TFA/DOAS coil load. Defaults: 55°F / 90% RH / 0% ERV.</p>
+                            </div>
+                            <div className="flex gap-1.5 shrink-0">
+                              <button
+                                type="button"
+                                className="text-xs px-2.5 py-1 rounded-md bg-teal-50 dark:bg-teal-950/30 border border-teal-200 dark:border-teal-700 text-teal-700 dark:text-teal-300 hover:bg-teal-100 dark:hover:bg-teal-900/40 font-medium"
+                                title="Cold-TFA: 55°F / 90% RH — TFA/DOAS handles all latent + OA sensible; primary becomes sensible-only"
+                                onClick={() => void updateSystemField(selectedSystem.id, { tfaSupplyTemp: 55, tfaSupplyHumidity: 90 })}>
+                                Cold-TFA
+                              </button>
+                              <button
+                                type="button"
+                                className="text-xs px-2.5 py-1 rounded-md bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-700 text-amber-700 dark:text-amber-300 hover:bg-amber-100 dark:hover:bg-amber-900/40 font-medium"
+                                title="Neutral-TFA: 75°F / 60% RH — TFA/DOAS conditions OA to near room conditions; primary still handles indoor latent"
+                                onClick={() => void updateSystemField(selectedSystem.id, { tfaSupplyTemp: 75, tfaSupplyHumidity: 60 })}>
+                                Neutral-TFA
+                              </button>
+                            </div>
                           </div>
+                          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                            <label className="block">
+                              <span className="text-xs font-medium text-slate-500 dark:text-slate-400 inline-flex items-center gap-1">
+                                Supply Temp (°F)
+                                <span className="inline-flex cursor-help" title={
+                                    "Temperature at which the TFA/DOAS unit delivers conditioned air to the rooms.\n\n" +
+                                    "Typical values:\n" +
+                                    "• 55 °F  Cold-TFA — handles all latent + OA sensible; primary becomes sensible-only\n" +
+                                    "• 65–70 °F  Mid — partial latent handled by primary\n" +
+                                    "• 75 °F  Neutral-TFA — OA near room conditions; primary handles indoor latent\n\n" +
+                                    "Lower temp = more offload from primary, but supply duct may need re-heat if too cold for direct delivery.\n" +
+                                    "Range: 45–85 °F."
+                                  }>
+                                  <Info className="w-3 h-3 text-slate-400 dark:text-slate-500" />
+                                </span>
+                              </span>
+                              <input
+                                type="number"
+                                min={45}
+                                max={85}
+                                step={1}
+                                key={`tfaTemp-${selectedSystem.id}-${(selectedSystem as any).tfaSupplyTemp ?? 55}`}
+                                defaultValue={(selectedSystem as any).tfaSupplyTemp ?? 55}
+                                onBlur={e => {
+                                  const v = parseFloat(e.target.value);
+                                  if (Number.isFinite(v) && v >= 45 && v <= 85) {
+                                    void updateSystemField(selectedSystem.id, { tfaSupplyTemp: v });
+                                  } else {
+                                    e.target.value = String((selectedSystem as any).tfaSupplyTemp ?? 55);
+                                  }
+                                }}
+                                className="mt-1 w-full text-sm border border-slate-200 dark:border-slate-600 rounded-md px-2 py-1.5 bg-white dark:bg-slate-800 dark:text-slate-200 font-mono focus:outline-none focus:ring-1 focus:ring-teal-400"
+                              />
+                            </label>
+                            <label className="block">
+                              <span className="text-xs font-medium text-slate-500 dark:text-slate-400 inline-flex items-center gap-1">
+                                Supply RH (%)
+                                <span className="inline-flex cursor-help" title={
+                                    "Relative humidity of the TFA/DOAS supply air at the supply temperature.\n\n" +
+                                    "Typical values:\n" +
+                                    "• 90 % RH at 55 °F — saturated cold-DOAS; maximum dehumidification\n" +
+                                    "• 50–60 % RH at 75 °F — neutral-TFA delivering near room conditions\n\n" +
+                                    "Lower RH at any supply temp = more latent removed at the TFA coil = smaller residual latent on primary.\n" +
+                                    "Range: 30–95 %."
+                                  }>
+                                  <Info className="w-3 h-3 text-slate-400 dark:text-slate-500" />
+                                </span>
+                              </span>
+                              <input
+                                type="number"
+                                min={30}
+                                max={95}
+                                step={1}
+                                key={`tfaRH-${selectedSystem.id}-${(selectedSystem as any).tfaSupplyHumidity ?? 90}`}
+                                defaultValue={(selectedSystem as any).tfaSupplyHumidity ?? 90}
+                                onBlur={e => {
+                                  const v = parseFloat(e.target.value);
+                                  if (Number.isFinite(v) && v >= 30 && v <= 95) {
+                                    void updateSystemField(selectedSystem.id, { tfaSupplyHumidity: v });
+                                  } else {
+                                    e.target.value = String((selectedSystem as any).tfaSupplyHumidity ?? 90);
+                                  }
+                                }}
+                                className="mt-1 w-full text-sm border border-slate-200 dark:border-slate-600 rounded-md px-2 py-1.5 bg-white dark:bg-slate-800 dark:text-slate-200 font-mono focus:outline-none focus:ring-1 focus:ring-teal-400"
+                              />
+                            </label>
+                            <label className="block">
+                              <span className="text-xs font-medium text-slate-500 dark:text-slate-400 inline-flex items-center gap-1">
+                                ERV Sensible Eff (%)
+                                <span className="inline-flex cursor-help" title={
+                                    "Sensible energy recovery effectiveness of the ERV / HRV between exhaust and incoming OA streams.\n\n" +
+                                    "Typical values:\n" +
+                                    "• 0 %  No recovery (plain TFA without ERV)\n" +
+                                    "• 65–75 %  Plate / fixed-plate heat exchanger\n" +
+                                    "• 70–80 %  Enthalpy wheel (rotary)\n\n" +
+                                    "Higher value = less sensible load on TFA coil = smaller chiller plant. Effect is strongest when ΔT between OA and indoor is large.\n" +
+                                    "Range: 0–95 %."
+                                  }>
+                                  <Info className="w-3 h-3 text-slate-400 dark:text-slate-500" />
+                                </span>
+                              </span>
+                              <input
+                                type="number"
+                                min={0}
+                                max={95}
+                                step={1}
+                                key={`ervS-${selectedSystem.id}-${(selectedSystem as any).ervSensibleEffectiveness ?? 0}`}
+                                defaultValue={Math.round(((selectedSystem as any).ervSensibleEffectiveness ?? 0) * 100)}
+                                onBlur={e => {
+                                  const v = parseFloat(e.target.value);
+                                  if (Number.isFinite(v) && v >= 0 && v <= 95) {
+                                    void updateSystemField(selectedSystem.id, { ervSensibleEffectiveness: v / 100 });
+                                  } else {
+                                    e.target.value = String(Math.round(((selectedSystem as any).ervSensibleEffectiveness ?? 0) * 100));
+                                  }
+                                }}
+                                className="mt-1 w-full text-sm border border-slate-200 dark:border-slate-600 rounded-md px-2 py-1.5 bg-white dark:bg-slate-800 dark:text-slate-200 font-mono focus:outline-none focus:ring-1 focus:ring-teal-400"
+                              />
+                            </label>
+                            <label className="block">
+                              <span className="text-xs font-medium text-slate-500 dark:text-slate-400 inline-flex items-center gap-1">
+                                ERV Latent Eff (%)
+                                <span className="inline-flex cursor-help" title={
+                                    "Latent (moisture) recovery effectiveness between exhaust and incoming OA streams.\n\n" +
+                                    "Typical values:\n" +
+                                    "• 0 %  HRV / plate exchanger (sensible-only — no moisture transfer)\n" +
+                                    "• 65–75 %  Enthalpy wheel with desiccant coating\n" +
+                                    "• 50–70 %  Membrane-type plate enthalpy exchanger\n\n" +
+                                    "Critical in humid Indian climates — high latent recovery dramatically reduces TFA dehumidification load in monsoon design.\n" +
+                                    "Range: 0–95 %."
+                                  }>
+                                  <Info className="w-3 h-3 text-slate-400 dark:text-slate-500" />
+                                </span>
+                              </span>
+                              <input
+                                type="number"
+                                min={0}
+                                max={95}
+                                step={1}
+                                key={`ervL-${selectedSystem.id}-${(selectedSystem as any).ervLatentEffectiveness ?? 0}`}
+                                defaultValue={Math.round(((selectedSystem as any).ervLatentEffectiveness ?? 0) * 100)}
+                                onBlur={e => {
+                                  const v = parseFloat(e.target.value);
+                                  if (Number.isFinite(v) && v >= 0 && v <= 95) {
+                                    void updateSystemField(selectedSystem.id, { ervLatentEffectiveness: v / 100 });
+                                  } else {
+                                    e.target.value = String(Math.round(((selectedSystem as any).ervLatentEffectiveness ?? 0) * 100));
+                                  }
+                                }}
+                                className="mt-1 w-full text-sm border border-slate-200 dark:border-slate-600 rounded-md px-2 py-1.5 bg-white dark:bg-slate-800 dark:text-slate-200 font-mono focus:outline-none focus:ring-1 focus:ring-teal-400"
+                              />
+                            </label>
+                          </div>
+                          <p className="text-xs text-slate-400 dark:text-slate-500 mt-3 italic">
+                            Changing these values updates TFA/DOAS sizing live. To re-persist primary system room loads, switch to the linked primary and click <strong>Refresh Loads</strong>, or use <strong>Recalculate</strong> in Load Calculator project summary.
+                          </p>
+                        </div>
+
+                        {/* Linked zones (Phase B) — TFA/DOAS links to specific zones,
+                            not whole systems. Real practice: TFA serves selected zones
+                            of a system, not every zone. Legacy whole-system links are
+                            preserved and shown with a convert-to-zone button. */}
+                        <div>
+                          <p className="text-sm font-bold text-slate-700 dark:text-slate-200 mb-2">Linked Zones</p>
+                          <p className="text-xs text-slate-400 dark:text-slate-500 mb-3">
+                            Pick the zones this TFA/DOAS unit serves. Leave specific zones unselected if they handle their own ventilation (e.g. server-room split, kitchen exhaust-driven).
+                          </p>
+                          {(() => {
+                            const primarySystems = equipSystems.filter(s => s.id !== selectedSystem.id && s.type !== 'DOAS');
+                            if (primarySystems.length === 0) {
+                              return <p className="text-xs text-slate-400 italic">No other systems — create a primary system first.</p>;
+                            }
+                            const sysLinks = ((selectedSystem as any).doasLinkedSystemIds ?? []) as string[];
+                            const zoneLinks = ((selectedSystem as any).doasLinkedZoneIds ?? []) as string[];
+                            return (
+                              <div className="space-y-2.5">
+                                {primarySystems.map(sys => {
+                                  const sysIsLegacyLinked = sysLinks.includes(sys.id);
+                                  const sysZones = ((sys as any).zones ?? []) as { id: string; name: string; roomIds?: string[] }[];
+                                  const hasZones = sysZones.length > 0;
+                                  const toggleZone = (zoneId: string) => {
+                                    const isLinked = zoneLinks.includes(zoneId);
+                                    const updated = isLinked
+                                      ? zoneLinks.filter(id => id !== zoneId)
+                                      : [...zoneLinks, zoneId];
+                                    void updateSystemField(selectedSystem.id, { doasLinkedZoneIds: updated });
+                                  };
+                                  return (
+                                    <div key={sys.id} className="rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50/40 dark:bg-slate-900/40 p-3">
+                                      <div className="flex items-center justify-between mb-2 gap-2 flex-wrap">
+                                        <div className="flex items-center gap-2 flex-wrap">
+                                          <span className="text-sm font-semibold text-slate-700 dark:text-slate-200">{sys.name}</span>
+                                          <span className="text-[10px] px-1.5 py-0.5 rounded bg-slate-200 dark:bg-slate-700 text-slate-600 dark:text-slate-400 font-mono">{sys.type}</span>
+                                          {sysIsLegacyLinked && (
+                                            <span
+                                              className="text-[10px] px-1.5 py-0.5 rounded bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-400 border border-amber-200 dark:border-amber-700"
+                                              title="Legacy whole-system link active. All zones in this system are served as a group. Convert to zone-level links to pick specific zones."
+                                            >
+                                              Legacy: whole system
+                                            </span>
+                                          )}
+                                        </div>
+                                        {sysIsLegacyLinked && hasZones && (
+                                          <button
+                                            type="button"
+                                            onClick={() => {
+                                              const newZoneLinks = Array.from(new Set([...zoneLinks, ...sysZones.map(z => z.id)]));
+                                              const newSysLinks = sysLinks.filter(id => id !== sys.id);
+                                              void updateSystemField(selectedSystem.id, {
+                                                doasLinkedSystemIds: newSysLinks,
+                                                doasLinkedZoneIds: newZoneLinks,
+                                              });
+                                            }}
+                                            className="text-[10px] px-2 py-0.5 rounded bg-teal-50 dark:bg-teal-950/30 border border-teal-200 dark:border-teal-700 text-teal-700 dark:text-teal-300 hover:bg-teal-100 dark:hover:bg-teal-900/40 font-semibold"
+                                          >
+                                            Convert to zone links
+                                          </button>
+                                        )}
+                                      </div>
+                                      <div className="flex flex-wrap gap-1.5">
+                                        {hasZones ? sysZones.map(z => {
+                                          const zoneLinked = zoneLinks.includes(z.id);
+                                          const effective = zoneLinked || sysIsLegacyLinked;
+                                          // Count rooms by live room.zoneId (source of truth) — NOT
+                                          // by system.zones[].roomIds[] which can drift stale when
+                                          // rooms are reassigned. Matches what the TFA engine actually
+                                          // serves: rooms.filter(r => linked.has(r.zoneId)).
+                                          const roomCount = (rooms as any[]).filter(r => r.zoneId === z.id).length;
+                                          const staleRoomIdCount = (z.roomIds ?? []).length;
+                                          const isStale = staleRoomIdCount !== roomCount;
+                                          const locked = sysIsLegacyLinked && !zoneLinked;
+                                          // Phase E: zone default TFA mode — only meaningful when zone is effectively linked.
+                                          const zoneDoc = zoneDocs.find((zd: any) => zd.id === z.id);
+                                          const zoneDefaultMode = ((zoneDoc as any)?.tfaDefaultMode as string | undefined) ?? 'inherit';
+                                          return (
+                                            <div key={z.id} className="inline-flex items-center gap-1">
+                                              <button
+                                                type="button"
+                                                disabled={locked}
+                                                onClick={() => !locked && toggleZone(z.id)}
+                                                title={
+                                                  locked
+                                                    ? 'Locked by legacy system-link — Convert to zone links to edit individually'
+                                                    : isStale
+                                                      ? `Live room count: ${roomCount} (room.zoneId match). SD system.zones[].roomIds[] is stale (says ${staleRoomIdCount}). Engine uses live count.`
+                                                      : undefined
+                                                }
+                                                className={cn(
+                                                  'inline-flex items-center gap-1.5 text-xs px-2.5 py-1 rounded-full border font-medium transition-colors',
+                                                  effective
+                                                    ? 'bg-teal-100 dark:bg-teal-900/40 border-teal-400 dark:border-teal-600 text-teal-800 dark:text-teal-200'
+                                                    : 'bg-white dark:bg-slate-800 border-slate-200 dark:border-slate-600 text-slate-500 dark:text-slate-400 hover:border-teal-300 hover:text-teal-700',
+                                                  locked && 'opacity-60 cursor-not-allowed',
+                                                )}
+                                              >
+                                                {effective && <Check className="w-3 h-3" />}
+                                                {z.name}
+                                                <span className="opacity-60">({roomCount} room{roomCount === 1 ? '' : 's'})</span>
+                                                {isStale && (
+                                                  <span
+                                                    className="text-[9px] px-1 py-0 rounded bg-amber-100 dark:bg-amber-900/40 border border-amber-300 dark:border-amber-700 text-amber-700 dark:text-amber-300 font-semibold"
+                                                    title={`SD says ${staleRoomIdCount}, live is ${roomCount} — run Clean Orphan Data to fix the system.zones[].roomIds[] drift`}
+                                                  >
+                                                    ⚠ SD drift
+                                                  </span>
+                                                )}
+                                              </button>
+                                              {effective && (
+                                                <select
+                                                  value={zoneDefaultMode}
+                                                  onChange={e => void updateZoneTfaDefaultMode(z.id, e.target.value as any)}
+                                                  title="Default TFA mode for rooms in this zone. Individual rooms can override."
+                                                  className={cn(
+                                                    'h-6 text-[10px] px-1 py-0 rounded border font-semibold uppercase tracking-wide cursor-pointer',
+                                                    zoneDefaultMode === 'tfa-only'
+                                                      ? 'border-violet-300 bg-violet-50 dark:bg-violet-950/30 text-violet-700 dark:text-violet-300'
+                                                      : 'border-teal-300 bg-teal-50 dark:bg-teal-950/30 text-teal-700 dark:text-teal-300',
+                                                  )}
+                                                >
+                                                  <option value="inherit">Default: TFA-served</option>
+                                                  <option value="tfa-served">All TFA-served</option>
+                                                  <option value="tfa-only">All TFA-only (corridor)</option>
+                                                </select>
+                                              )}
+                                            </div>
+                                          );
+                                        }) : (
+                                          (() => {
+                                            // Zoneless system (e.g. Split, single-AHU Package) — system itself is the unit of TFA linkage.
+                                            const sysIdLinked = zoneLinks.includes(sys.id);
+                                            const effective = sysIdLinked || sysIsLegacyLinked;
+                                            const locked = sysIsLegacyLinked && !sysIdLinked;
+                                            return (
+                                              <button
+                                                type="button"
+                                                disabled={locked}
+                                                onClick={() => !locked && toggleZone(sys.id)}
+                                                title={locked ? 'Locked by legacy system-link — already TFA-served' : undefined}
+                                                className={cn(
+                                                  'inline-flex items-center gap-1.5 text-xs px-2.5 py-1 rounded-full border font-medium transition-colors',
+                                                  effective
+                                                    ? 'bg-teal-100 dark:bg-teal-900/40 border-teal-400 dark:border-teal-600 text-teal-800 dark:text-teal-200'
+                                                    : 'bg-white dark:bg-slate-800 border-slate-200 dark:border-slate-600 text-slate-500 dark:text-slate-400 hover:border-teal-300 hover:text-teal-700',
+                                                  locked && 'opacity-60 cursor-not-allowed',
+                                                )}
+                                              >
+                                                {effective && <Check className="w-3 h-3" />}
+                                                Whole system (no zones)
+                                              </button>
+                                            );
+                                          })()
+                                        )}
+                                      </div>
+                                    </div>
+                                  );
+                                })}
+                              </div>
+                            );
+                          })()}
                         </div>
 
                         {/* Unit selection */}
                         <div>
-                          <p className="text-sm font-bold text-slate-700 dark:text-slate-200 mb-2">DOAS Unit Selection</p>
+                          <p className="text-sm font-bold text-slate-700 dark:text-slate-200 mb-2">TFA/DOAS Unit Selection</p>
                           {selectedSystem.unitSelection ? (
                             <div className="flex items-center gap-3 rounded-lg border border-emerald-200 dark:border-emerald-800 bg-emerald-50 dark:bg-emerald-950/20 px-4 py-3">
                               <div className="flex-1">
@@ -4299,10 +5584,10 @@ export default function EquipmentSelection({
                           ) : (
                             <div className="rounded-lg border border-dashed border-teal-300 dark:border-teal-700 bg-teal-50/40 dark:bg-teal-950/10 p-4 flex flex-col items-center gap-2 text-center">
                               <p className="text-sm text-slate-500 dark:text-slate-400">No unit selected</p>
-                              <p className="text-xs text-slate-400 dark:text-slate-500">Pick an ERV, HRV, or FAHU sized for <strong>{Math.round(totalSystemOACFM).toLocaleString()} CFM</strong> OA</p>
+                              <p className="text-xs text-slate-400 dark:text-slate-500">Pick an ERV, HRV, or FAHU sized for <strong>{doasTFAAggregate.governingCoilTR.toFixed(1)} TR</strong> · <strong>{Math.round(doasOACFM).toLocaleString()} CFM</strong> OA</p>
                               <Button size="sm" className="mt-1 h-8 text-sm px-4 bg-teal-600 hover:bg-teal-700"
                                 onClick={() => setUnitPicker(true)}>
-                                Select DOAS Unit
+                                Select TFA/DOAS Unit
                               </Button>
                             </div>
                           )}
@@ -4314,7 +5599,7 @@ export default function EquipmentSelection({
                           <textarea
                             className="w-full text-sm border border-slate-200 dark:border-slate-600 rounded-lg px-3 py-2 bg-white dark:bg-slate-800 dark:text-slate-200 resize-none focus:outline-none focus:ring-1 focus:ring-teal-400"
                             rows={2}
-                            placeholder="e.g. DOAS serves office floors 1–3; ERV with enthalpy wheel; supply at neutral air (55 °F / 90 % RH)"
+                            placeholder="e.g. TFA serves office floors 1–3; ERV with enthalpy wheel; supply at neutral air (55 °F / 90 % RH)"
                             value={(selectedSystem as any).notes ?? ''}
                             onChange={e => void updateSystemField(selectedSystem.id, { notes: e.target.value })}
                           />
@@ -4414,14 +5699,21 @@ export default function EquipmentSelection({
                       <div className="divide-y divide-slate-100 dark:divide-slate-700">
                         {((selectedSystem.zones ?? []) as EquipmentZone[]).map((zone: EquipmentZone) => {
                           const zoneRooms = zone.roomIds.map(id => rooms.find((r: any) => r.id === id)).filter(Boolean) as any[];
-                          const zoneTR  = zoneRooms.reduce((s: number, r: any) => s + (Number(r._calcOverallRequiredTR) || Number(r._calcRequiredTR) || 0), 0);
-                          const zoneCFM = zoneRooms.reduce((s: number, r: any) => s + (Number(r._calcOverallDesignCFM) || Number(r._calcDesignCFM) || 0), 0);
+                          // Use getRoomReqs (live recalc when available, stored otherwise) so the
+                          // picker dialog shows the same TR/CFM the LC card is showing — previously
+                          // we read stored _calc* fields directly which went stale after any DC /
+                          // ACH / occupancy edit until the user re-persisted from LC.
+                          const zoneRoomReqs = zoneRooms.map((r: any) => ({ r, reqs: getRoomReqs(r.id) }));
+                          const zoneTR  = zoneRoomReqs.reduce((s, { reqs }) => s + (reqs.overallRequiredTR || 0), 0);
+                          const zoneCFM = zoneRoomReqs.reduce((s, { reqs }) => s + (reqs.overallDesignCFM  || 0), 0);
                           // Coil Duty (thermal load only, no cfmTR floor) — used as the sizing
                           // requirement for chiller AHU pickers since AHU coils are custom-built
                           // to project duty, not catalog-rated TR.
-                          const zoneCoilTR = zoneRooms.reduce((s: number, r: any) => {
+                          const zoneCoilTR = zoneRoomReqs.reduce((s, { r, reqs }) => {
+                            // Live recalc exposes monsoonLoadTR; live summer load lives in governingTR
+                            // (without the CFM floor it equals load TR — we approximate from live req).
                             const sum = Number(r._calcLoadTR) || 0;
-                            const mon = Number(r._calcMonsoonLoadTR) || 0;
+                            const mon = (reqs as any).monsoonLoadTR ?? Number(r._calcMonsoonLoadTR) ?? 0;
                             return s + Math.max(sum, mon);
                           }, 0);
                           const zoneHeatingBTUH = zoneRooms.reduce((s: number, r: any) => s + (Number(r._calcWinterHeatingBTUH) || 0), 0);
@@ -4448,9 +5740,10 @@ export default function EquipmentSelection({
                               0,
                             );
                           }
+                          const zoneSizingRequiredTR = selectedSystem.type === 'Chiller' ? zoneCoilTR : zoneTR;
                           const zoneSizing: 'ok' | 'undersized' | 'no-equipment' =
                             zoneInstalledTR === 0 ? 'no-equipment'
-                            : zoneInstalledTR < zoneTR * 0.98 ? 'undersized'
+                            : zoneInstalledTR < zoneSizingRequiredTR * 0.98 ? 'undersized'
                             : 'ok';
 
                           return (
@@ -4486,8 +5779,8 @@ export default function EquipmentSelection({
                                   {zoneSizing === 'undersized' && (
                                     <span
                                       className="text-xs px-2.5 py-1 rounded-full bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-300 border border-amber-300 dark:border-amber-700 font-semibold"
-                                      title={`Required ${zoneTR.toFixed(2)} TR · Installed ${zoneInstalledTR.toFixed(2)} TR — review IDU sizing after recent load changes`}>
-                                      ⚠ Undersized · {zoneInstalledTR.toFixed(1)} / {zoneTR.toFixed(1)} TR
+                                      title={`Required ${zoneSizingRequiredTR.toFixed(2)} TR · Installed ${zoneInstalledTR.toFixed(2)} TR — review IDU sizing after recent load changes`}>
+                                      ⚠ Undersized · {zoneInstalledTR.toFixed(1)} / {zoneSizingRequiredTR.toFixed(1)} TR
                                     </span>
                                   )}
                                   {zoneTR > 0 && (
@@ -4529,6 +5822,10 @@ export default function EquipmentSelection({
                                     const installed = list.reduce((s: number, i: any) => s + (Number(i.trCapacity) || 0) * (Number(i.quantity) || 1), 0);
                                     roomUndersized = installed > 0 && installed < required * 0.98;
                                   }
+                                  // Per-room TFA mode (Phase C). Only show when this room's zone is TFA-linked.
+                                  const roomDoasChip = findDoasForRoom(r);
+                                  const roomTfaModeChip = (r.tfaMode as string | undefined) ?? 'inherit';
+                                  const effectiveModeChip = getEffectiveTfaMode(r, roomDoasChip);
                                   return (
                                     <span key={r.id} className={cn(
                                       'inline-flex items-center gap-2 text-sm px-3 py-1.5 rounded-full font-medium border',
@@ -4539,6 +5836,25 @@ export default function EquipmentSelection({
                                       {roomUndersized && <span title="Room IDU under-rated for current load — review">⚠</span>}
                                       {r.name}
                                       {r.floor && <span className={cn('text-sm', roomUndersized ? 'text-amber-500' : 'text-blue-400 dark:text-blue-500')}>{r.floor}</span>}
+                                      {roomDoasChip && (
+                                        <select
+                                          value={roomTfaModeChip}
+                                          onChange={e => void updateRoomTfaMode(r.id, e.target.value as any)}
+                                          title={`TFA mode for this room. Zone linked to TFA/DOAS "${roomDoasChip.name}". Effective: ${effectiveModeChip}.`}
+                                          className={cn(
+                                            'h-5 text-[10px] px-1 py-0 rounded border font-semibold uppercase tracking-wide cursor-pointer',
+                                            effectiveModeChip === 'tfa-served' ? 'border-teal-300 bg-teal-50 dark:bg-teal-950/30 text-teal-700 dark:text-teal-300' :
+                                            effectiveModeChip === 'tfa-only'   ? 'border-violet-300 bg-violet-50 dark:bg-violet-950/30 text-violet-700 dark:text-violet-300' :
+                                                                                  'border-slate-300 bg-slate-50 dark:bg-slate-800 text-slate-600 dark:text-slate-400',
+                                          )}
+                                          onClick={e => e.stopPropagation()}
+                                        >
+                                          <option value="inherit">Inherit ({effectiveModeChip})</option>
+                                          <option value="tfa-served">TFA-served</option>
+                                          <option value="tfa-only">TFA-only (corridor)</option>
+                                          <option value="no-tfa">No TFA</option>
+                                        </select>
+                                      )}
                                       <button onClick={() => void handleRemoveRoomFromZone(zone.id, r.id)}
                                         className={cn('leading-none ml-0.5 text-base font-bold hover:text-red-500', roomUndersized ? 'text-amber-400' : 'text-blue-400')}>×</button>
                                     </span>
@@ -4848,11 +6164,11 @@ export default function EquipmentSelection({
                                               <span className="text-sm font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400 w-10 shrink-0">ESP</span>
                                               <NumericInput
                                                 integer min={0}
-                                                value={ahuCfg.extStaticPa ?? 150}
-                                                onChange={(n) => void updateAHUCfg({ extStaticPa: Math.max(0, n ?? 0) })}
+                                                value={paToMmWg(ahuCfg.extStaticPa ?? 150)}
+                                                onChange={(n) => void updateAHUCfg({ extStaticPa: Math.max(0, mmWgToPa(n) ?? 0) })}
                                                 className="w-24 h-8 text-sm font-mono border border-slate-300 dark:border-slate-600 rounded-md px-2.5 bg-white dark:bg-slate-800 dark:text-slate-300 focus:outline-none focus:ring-2 focus:ring-sky-400"
                                               />
-                                              <span className="text-xs text-slate-600 dark:text-slate-400 font-medium">Pa</span>
+                                              <span className="text-xs text-slate-600 dark:text-slate-400 font-medium">mm WG</span>
                                               <span className="text-xs text-slate-400 dark:text-slate-500 italic">· TSP (total static) by manufacturer</span>
                                             </div>
 
@@ -4992,6 +6308,40 @@ export default function EquipmentSelection({
                                             </div>
                                           );
                                         })()}
+
+                                        {/* Per-zone Dehumidification strategy — 4 methods, zone-scoped.
+                                            Renders for any zoned system (AHU, Chiller AHU terminals, zoned
+                                            VRF). Visible when this zone has dehumid load, a chosen method,
+                                            or already-picked dehumidifier units. */}
+                                        {(() => {
+                                          const zoneDehumidLbsHr = dehumidByZone.get(zone.id)?.lbsHr ?? 0;
+                                          const zoneDehumidUnits: DehumidifierUnit[] = (zone as any).dehumidifierUnits ?? [];
+                                          const zoneMethod: DehumidMethod | null = (zone as any).dehumidMethod ?? null;
+                                          const zoneReheatKWOverride: number | undefined = (zone as any).dehumidReheatKW;
+                                          const zoneReheatBTU = reheatByZone.get(zone.id) ?? 0;
+                                          if (zoneDehumidLbsHr <= 0 && zoneReheatBTU <= 0 && !zoneMethod && zoneDehumidUnits.length === 0) return null;
+                                          // Zone-level AHU config drives whether HW coil reheat is available.
+                                          const zoneAhuCfg: AHUConfig = zone.ahuConfig ?? (selectedSystem as any).ahuConfig ?? DEFAULT_AHU_CONFIG;
+                                          return (
+                                            <DehumidificationStrategySection
+                                              scopeLabel={`Zone ${zone.name}`}
+                                              latentLbsHr={zoneDehumidLbsHr}
+                                              reheatBTU={zoneReheatBTU}
+                                              method={zoneMethod}
+                                              reheatKWOverride={zoneReheatKWOverride}
+                                              units={zoneDehumidUnits}
+                                              isVRF={selectedSystem.type === 'VRF'}
+                                              hasHeatingCoilInAHU={!!zoneAhuCfg.hasHeatingCoil}
+                                              isSystemLevel={false}
+                                              models={dehumidifierModels}
+                                              onChangeMethod={(m) => setZoneDehumidMethod(selectedSystem.id, zone.id, m, zoneReheatBTU / BTUH_PER_KW)}
+                                              onChangeReheatKWOverride={(kw) => setZoneDehumidReheatKW(selectedSystem.id, zone.id, kw)}
+                                              onAddDehumidifier={(model) => addZoneDehumidifier(selectedSystem.id, zone.id, model)}
+                                              onRemoveDehumidifier={(idx) => removeZoneDehumidifier(selectedSystem.id, zone.id, idx)}
+                                              onUpdateDehumidifierQty={(idx, qty) => updateZoneDehumidifierQty(selectedSystem.id, zone.id, idx, qty)}
+                                            />
+                                          );
+                                        })()}
                                       </div>
                                     );
                                   })()}
@@ -5005,13 +6355,34 @@ export default function EquipmentSelection({
                                         const idus = normalizeIDUList((selectedSystem.iduSelections as any)[r.id]);
                                         const reqTR = reqs.overallRequiredTR || reqs.requiredTR || 0;
                                         const reqCFM = reqs.overallDesignCFM || reqs.designCFM || 0;
+                                        const roomDoas = findDoasForRoom(r);
+                                        const roomTfaModeRaw = (r.tfaMode as string | undefined) ?? 'inherit';
+                                        const effectiveMode = getEffectiveTfaMode(r, roomDoas);
                                         return (
                                           <div key={r.id} className="flex items-start gap-2.5 px-3 py-2">
                                             <div className="flex-1 min-w-0">
-                                              <div className="flex items-center gap-1.5">
+                                              <div className="flex items-center gap-1.5 flex-wrap">
                                                 <span className="text-sm font-semibold text-slate-800 dark:text-slate-200">{r.name}</span>
                                                 {r.floor && <span className="text-xs text-slate-400 dark:text-slate-500">{r.floor}</span>}
                                                 {reqTR > 0 && <span className="text-xs text-slate-400 dark:text-slate-500 font-mono">{reqTR.toFixed(2)} TR req.</span>}
+                                                {roomDoas && (
+                                                  <select
+                                                    value={roomTfaModeRaw}
+                                                    onChange={e => void updateRoomTfaMode(r.id, e.target.value as any)}
+                                                    title={`TFA mode for this room. Zone linked to TFA/DOAS "${roomDoas.name}". Effective: ${effectiveMode}.`}
+                                                    className={cn(
+                                                      'h-5 text-[10px] px-1 py-0 rounded border font-semibold uppercase tracking-wide cursor-pointer',
+                                                      effectiveMode === 'tfa-served' ? 'border-teal-300 bg-teal-50 dark:bg-teal-950/30 text-teal-700 dark:text-teal-300' :
+                                                      effectiveMode === 'tfa-only'   ? 'border-violet-300 bg-violet-50 dark:bg-violet-950/30 text-violet-700 dark:text-violet-300' :
+                                                                                       'border-slate-300 bg-slate-50 dark:bg-slate-800 text-slate-600 dark:text-slate-400',
+                                                    )}
+                                                  >
+                                                    <option value="inherit">Inherit ({effectiveMode})</option>
+                                                    <option value="tfa-served">TFA-served</option>
+                                                    <option value="tfa-only">TFA-only (Phase D)</option>
+                                                    <option value="no-tfa">No TFA</option>
+                                                  </select>
+                                                )}
                                               </div>
                                               {idus.length > 0 && (
                                                 <div className="flex flex-wrap gap-1 mt-1">
@@ -5297,10 +6668,17 @@ export default function EquipmentSelection({
                               <div className="flex items-center gap-2 flex-wrap">
                                 <span className="text-sm font-semibold text-slate-700 dark:text-slate-300">Cooling Towers:</span>
                                 {ctTotalInstalledTR > 0 && (
-                                  <span className={cn('text-xs font-semibold', ctTotalInstalledTR >= ctRequiredTR * 0.98 ? 'text-emerald-600 dark:text-emerald-400' : 'text-amber-600 dark:text-amber-400')}>
-                                    {ctTotalInstalledTR.toFixed(1)} TR installed
-                                    {ctTotalInstalledTR >= ctRequiredTR * 0.98 ? ' ✓' : ` · need ${(ctRequiredTR - ctTotalInstalledTR).toFixed(1)} TR more`}
-                                  </span>
+                                  <>
+                                    <span className={cn('text-xs font-semibold', ctWorkingTR >= ctRequiredTR * 0.98 ? 'text-emerald-600 dark:text-emerald-400' : 'text-amber-600 dark:text-amber-400')}>
+                                      {ctWorkingTR.toFixed(1)} TR Working
+                                      {ctWorkingTR >= ctRequiredTR * 0.98 ? ' ✓' : ` · need ${(ctRequiredTR - ctWorkingTR).toFixed(1)} TR more`}
+                                    </span>
+                                    {ctStandbyTR > 0 && (
+                                      <span className="font-semibold text-xs text-amber-600 dark:text-amber-400">
+                                        + {ctStandbyTR.toFixed(1)} TR Standby
+                                      </span>
+                                    )}
+                                  </>
                                 )}
                                 <span className="text-xs text-slate-400 dark:text-slate-500 italic">duty ≈ {ctRequiredTR.toFixed(1)} TR</span>
                               </div>
@@ -5331,6 +6709,25 @@ export default function EquipmentSelection({
                                         {u.quantity > 1 && <span className="text-blue-600 dark:text-blue-400 font-bold">= {(u.trCapacity * u.quantity).toFixed(0)} TR total</span>}
                                         {isLegacyCT && <span className="text-xs px-1.5 py-0.5 rounded bg-amber-50 dark:bg-amber-950/20 text-amber-600 dark:text-amber-400 border border-amber-200 dark:border-amber-800">legacy</span>}
                                       </span>
+                                      {/* Working / Standby role toggle — only for new (non-legacy) units */}
+                                      {!isLegacyCT && (
+                                        <div className="inline-flex rounded-md border border-slate-200 dark:border-slate-700 overflow-hidden shrink-0 text-xs font-semibold">
+                                          <button
+                                            onClick={() => void updateCTUnitRole(selectedSystem.id, idx, 'working')}
+                                            className={cn('px-2 py-1 transition-colors', (u.role ?? 'working') === 'working'
+                                              ? 'bg-emerald-500 text-white'
+                                              : 'bg-white dark:bg-slate-800 text-slate-500 dark:text-slate-400 hover:bg-emerald-50 dark:hover:bg-emerald-950/20')}>
+                                            Working
+                                          </button>
+                                          <button
+                                            onClick={() => void updateCTUnitRole(selectedSystem.id, idx, 'standby')}
+                                            className={cn('px-2 py-1 transition-colors border-l border-slate-200 dark:border-slate-700', u.role === 'standby'
+                                              ? 'bg-amber-500 text-white'
+                                              : 'bg-white dark:bg-slate-800 text-slate-500 dark:text-slate-400 hover:bg-amber-50 dark:hover:bg-amber-950/20')}>
+                                            Standby
+                                          </button>
+                                        </div>
+                                      )}
                                       <button className="text-slate-400 hover:text-red-500 shrink-0 p-1"
                                         onClick={() => void removeCTUnit(selectedSystem.id, idx)}>
                                         <Trash2 className="w-4 h-4" />
@@ -5378,7 +6775,7 @@ export default function EquipmentSelection({
                               <span key={idx} className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-sky-50 dark:bg-sky-900/20 border border-sky-200 dark:border-sky-800 text-sky-800 dark:text-sky-300 text-sm font-medium">
                                 {(u.quantity ?? 1) > 1 && <span className="text-blue-600 dark:text-blue-400 font-bold">{u.quantity}×</span>}
                                 {u.brand} {u.modelSeries} · {u.trCapacity} TR
-                                {u.staticPressurePa && <span className="text-orange-600 dark:text-orange-400 text-xs ml-0.5">{u.staticPressurePa} Pa</span>}
+                                {u.staticPressurePa && <span className="text-orange-600 dark:text-orange-400 text-xs ml-0.5">{paToMmWg(u.staticPressurePa)} mm WG</span>}
                                 <div className="inline-flex items-center gap-0.5 ml-1 border-l border-sky-200 dark:border-sky-700 pl-1">
                                   <button className="w-4 h-4 text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 text-xs flex items-center justify-center" onClick={() => updateAHUUnitQty(selectedSystem.id, idx, (u.quantity ?? 1) - 1)} disabled={(u.quantity ?? 1) <= 1}>−</button>
                                   <span className="w-4 text-center text-xs font-bold">{u.quantity ?? 1}</span>
@@ -5617,6 +7014,40 @@ export default function EquipmentSelection({
                             )}
                           </div>
                         )}
+
+                        {/* ── Dehumidification strategy (system-level, zoneless only) ─────
+                            Systems with zones render the strategy block per-zone inside the zone
+                            (right under AHU Humidifier). This system-level row is the fallback for
+                            zoneless systems (Package, DuctableSplit, single-unit Split, DOAS) so
+                            the user can still pick a method + dehumidifier for the whole system.
+                            HW coil and AHU electric heater methods are hidden here — no zone AHU. */}
+                        {(() => {
+                          const hasZones = ((selectedSystem.zones ?? (selectedSystem as any).ahuGroups ?? []) as EquipmentZone[]).length > 0;
+                          if (hasZones) return null;
+                          const sysUnits: DehumidifierUnit[] = (selectedSystem as any).dehumidifierUnits ?? [];
+                          const sysMethod: DehumidMethod | null = (selectedSystem as any).dehumidMethod ?? null;
+                          const sysReheatKWOverride: number | undefined = (selectedSystem as any).dehumidReheatKW;
+                          if (systemTotalRoomDehumidLbsHr <= 0 && systemTotalReheatBTU <= 0 && !sysMethod && sysUnits.length === 0) return null;
+                          return (
+                            <DehumidificationStrategySection
+                              scopeLabel={selectedSystem.name}
+                              latentLbsHr={systemTotalRoomDehumidLbsHr}
+                              reheatBTU={systemTotalReheatBTU}
+                              method={sysMethod}
+                              reheatKWOverride={sysReheatKWOverride}
+                              units={sysUnits}
+                              isVRF={selectedSystem.type === 'VRF'}
+                              hasHeatingCoilInAHU={false}
+                              isSystemLevel={true}
+                              models={dehumidifierModels}
+                              onChangeMethod={(m) => setSystemDehumidMethod(selectedSystem.id, m)}
+                              onChangeReheatKWOverride={(kw) => setSystemDehumidReheatKW(selectedSystem.id, kw)}
+                              onAddDehumidifier={(model) => addSystemDehumidifier(selectedSystem.id, model)}
+                              onRemoveDehumidifier={(idx) => removeSystemDehumidifier(selectedSystem.id, idx)}
+                              onUpdateDehumidifierQty={(idx, qty) => updateSystemDehumidifierQty(selectedSystem.id, idx, qty)}
+                            />
+                          );
+                        })()}
 
                         {/* Per-room breakdown table */}
                         <details className="group">
@@ -5946,6 +7377,15 @@ export default function EquipmentSelection({
                       const anyZoneHasHeat = ((selectedSystem.zones ?? []) as EquipmentZone[]).some(z => z.selection?.coilType === 'cooling-heating');
                       return anyZoneHasHeat ? { ...base, hasHeatingCoil: true } : base;
                     })();
+                    const specAHUSelections: SingleUnitSelection[] = (() => {
+                      if (selectedSystem.type !== 'AHU') return [];
+                      const arr: SingleUnitSelection[] = (selectedSystem as any).ahuUnits ?? [];
+                      if (arr.length > 0) return arr;
+                      return selectedSystem.unitSelection ? [selectedSystem.unitSelection] : [];
+                    })();
+                    const specPackageUnit = (selectedSystem.type === 'Package' || selectedSystem.type === 'DuctableSplit')
+                      ? (selectedSystem.unitSelection ?? null)
+                      : null;
                     return (
                     <SpecSheet
                       system={selectedSystem}
@@ -5966,6 +7406,10 @@ export default function EquipmentSelection({
                       systemReheatKW={(systemPsychro?.totalReheatBTU ?? 0) / 3412}
                       chillerPlantTR={selectedSystem.type === 'Chiller' ? chillerDiverseTR : 0}
                       zoneUnits={zoneUnitsForSpec}
+                      selectedChillerUnits={selectedSystem.type === 'Chiller' ? effectiveChillerUnits : undefined}
+                      selectedCTUnits={selectedSystem.type === 'Chiller' ? effectiveCTUnits : undefined}
+                      selectedPackageUnit={specPackageUnit}
+                      selectedAHUUnits={specAHUSelections}
                       onSave={async (spec) => {
                         await updateDoc(doc(db, 'projects', project.id, 'equipmentSystems', selectedSystem.id), {
                           customSpec: spec,
@@ -5982,7 +7426,7 @@ export default function EquipmentSelection({
         </TabsContent>
 
         {/* ── Summary Tab ── */}
-        <TabsContent value="summary" className="space-y-8">
+        <TabsContent value="summary" className="w-full space-y-8">
 
           {/* System Status Table */}
           <div>
@@ -6000,18 +7444,19 @@ export default function EquipmentSelection({
                 <p className="text-xs">Create systems in the System Design tab first.</p>
               </div>
             ) : (
-              <div className="rounded-xl border border-slate-200 dark:border-slate-700 overflow-hidden bg-white dark:bg-slate-900">
-                <Table>
+              <div className="w-full rounded-xl border border-slate-200 dark:border-slate-700 overflow-hidden bg-white dark:bg-slate-900">
+                <Table className="w-full">
                   <TableHeader>
                     <TableRow className="bg-slate-50 dark:bg-slate-800 text-xs uppercase">
                       <TableHead className="w-8">#</TableHead>
-                      <TableHead>System</TableHead>
+                      <TableHead className="w-full">System</TableHead>
                       <TableHead>Type</TableHead>
                       <TableHead className="text-right">Rooms</TableHead>
                       <TableHead className="text-right">Required TR</TableHead>
                       <TableHead className="text-right">Installed TR</TableHead>
                       <TableHead className="text-right">Coverage</TableHead>
                       <TableHead>Status</TableHead>
+                      <TableHead className="w-10 text-center"></TableHead>
                     </TableRow>
                   </TableHeader>
                   <TableBody>
@@ -6059,6 +7504,20 @@ export default function EquipmentSelection({
                             {s.status === 'no-equipment' && <span className="text-sm font-bold px-1.5 py-0.5 rounded bg-red-50 dark:bg-red-950/20 text-red-700 dark:text-red-300 border border-red-200 dark:border-red-800">✗ No Equipment</span>}
                             {s.status === 'no-rooms'     && <span className="text-xs text-slate-400 dark:text-slate-500 italic">— No Rooms</span>}
                           </TableCell>
+                          <TableCell className="text-center">
+                            <button
+                              type="button"
+                              title="Delete system"
+                              className="w-7 h-7 rounded inline-flex items-center justify-center text-slate-400 hover:text-red-600 hover:bg-red-50 dark:hover:bg-red-950/30 transition-colors"
+                              onClick={e => {
+                                e.stopPropagation();
+                                if (window.confirm(`Delete system "${s.name}"? This removes the system and any equipment selections on it. Rooms assigned to this system will be unassigned but not deleted.`)) {
+                                  void deleteSystem(s.id);
+                                }
+                              }}>
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          </TableCell>
                         </TableRow>
                       );
                     })}
@@ -6068,7 +7527,7 @@ export default function EquipmentSelection({
                         <TableCell className="text-right font-mono py-2">{systemSummaries.reduce((s, x) => s + x.roomCount, 0)}</TableCell>
                         <TableCell className="text-right font-mono py-2">{systemSummaries.reduce((s, x) => s + x.requiredTR, 0).toFixed(2)}</TableCell>
                         <TableCell className="text-right font-mono py-2">{systemSummaries.reduce((s, x) => s + x.installedTR, 0).toFixed(2)}</TableCell>
-                        <TableCell colSpan={2} />
+                        <TableCell colSpan={3} />
                       </TableRow>
                     )}
                   </TableBody>
@@ -6087,14 +7546,14 @@ export default function EquipmentSelection({
                 <h3 className="text-base font-semibold text-slate-800 dark:text-slate-100">Equipment Schedule</h3>
                 <p className="text-slate-500 dark:text-slate-400 text-xs">All selected equipment grouped by system.</p>
               </div>
-              <div className="rounded-xl border border-slate-200 dark:border-slate-700 overflow-hidden bg-white dark:bg-slate-900">
-                <Table>
+              <div className="w-full rounded-xl border border-slate-200 dark:border-slate-700 overflow-hidden bg-white dark:bg-slate-900">
+                <Table className="w-full">
                   <TableHeader>
                     <TableRow className="bg-slate-50 dark:bg-slate-800 text-xs uppercase">
                       <TableHead>Type</TableHead>
                       <TableHead>Room / Zone</TableHead>
                       <TableHead>Brand</TableHead>
-                      <TableHead>Model</TableHead>
+                      <TableHead className="w-full">Model</TableHead>
                       <TableHead>Sub-Type</TableHead>
                       <TableHead className="text-right">TR Each</TableHead>
                       <TableHead className="text-right">Qty</TableHead>
@@ -6334,6 +7793,7 @@ export default function EquipmentSelection({
                   <SelectItem value="AHU">AHU (Air Handling Unit)</SelectItem>
                   <SelectItem value="Chiller">Chiller Plant</SelectItem>
                   <SelectItem value="Split">Split Unit (dedicated room)</SelectItem>
+                  <SelectItem value="DOAS">TFA / DOAS (Treated Fresh Air / Dedicated Outdoor Air System)</SelectItem>
                 </SelectContent>
               </Select>
             </div>
@@ -6633,10 +8093,14 @@ export default function EquipmentSelection({
             selectedSystem.type === 'Chiller'
               ? Math.max(0.5, chillerDiverseTR - chillerTotalInstalledTR)
               : selectedSystem.type === 'DOAS'
-              ? totalSystemOACFM / 600
+              // DOAS sized off the aggregated TFA coil load across served rooms
+              // (governing summer/monsoon). Falls back to the OA-CFM heuristic
+              // only when no rooms are linked yet (e.g., user just created the
+              // DOAS system and hasn't picked primaries).
+              ? Math.max(0.5, doasTFAAggregate.governingCoilTR || (doasOACFM / 600))
               : (unitQuantity > 1 ? totalRequiredTR / unitQuantity : totalRequiredTR)
           }
-          designCFM={selectedSystem.type === 'DOAS' ? totalSystemOACFM : (unitQuantity > 1 ? totalDesignCFM / unitQuantity : totalDesignCFM)}
+          designCFM={selectedSystem.type === 'DOAS' ? doasOACFM : (unitQuantity > 1 ? totalDesignCFM / unitQuantity : totalDesignCFM)}
           customItems={customEquipment}
           systemName={selectedSystem.name}
           onSaveToLibrary={async (item) => { await saveCustomEquipment_item(item); }}

@@ -22,6 +22,20 @@ export interface DesignConditions {
   // distinct from facph (designed fresh-air ACH) which oversizes heating.
   // Typical values: 0.3 (tight), 0.5 (moderate), 1.0 (loose).
   winterInfiltrationACH?: number;
+
+  // ─── TFA / DOAS (Treated Fresh Air / Dedicated Outdoor Air System) ───
+  // When set to 'tfa-cold', outdoor air is conditioned by a separate DOAS unit
+  // (not the primary coil). Defaults to 'primary' / undefined for backward
+  // compatibility — existing projects produce bit-identical output.
+  ventilationStrategy?: 'primary' | 'tfa-cold';
+  // TFA supply air leaving the DOAS unit. Cold-DOAS default ~55°F / 90% RH
+  // (low absolute humidity, handles all latent + sub-cools the space).
+  tfaSupplyTemp?: number;      // °F
+  tfaSupplyHumidity?: number;  // % RH at supply temp
+  // ERV / HRV effectiveness (0..1). 0 or undefined = no energy recovery.
+  // Typical wheel: 0.70 sensible, 0.65 latent. HRV: latent = 0.
+  ervSensibleEffectiveness?: number;
+  ervLatentEffectiveness?: number;
 }
 
 export interface WallType {
@@ -207,6 +221,31 @@ export interface VentilationLoadResult {
   indoor: PsychrometricProperties;
   deltaT: number;
   deltaW: number;
+}
+
+// TFA / DOAS load result — produced when ventilationStrategy === 'tfa-cold'.
+// The TFA coil handles outdoor air; the cold supply also offsets primary loads.
+export interface TFALoadResult {
+  // TFA coil load (sizes the DOAS unit) — conditions OA from outdoor to supply.
+  coilSensible: number;        // BTU/h
+  coilLatent: number;          // BTU/h
+  coilTotal: number;           // BTU/h
+  // Credits applied back to the primary system (cold-DOAS effect).
+  // Cold dry supply cools and dehumidifies the space.
+  spaceSensibleOffset: number; // BTU/h subtracted from primary sensible
+  spaceLatentOffset: number;   // BTU/h subtracted from primary latent
+  // ERV / HRV energy recovered (already netted out of coilSensible/Latent).
+  ervSensibleRecovered: number;
+  ervLatentRecovered: number;
+  // Air flow and supply state for reporting.
+  cfm: number;
+  supplyTemp: number;          // °F
+  supplyHumidity: number;      // % RH
+  supplyHumidityRatio: number; // lb/lb (computed)
+  // Winter heating load on the TFA unit (heats OA from winter outdoor to supply).
+  // Zero when winter inputs are missing.
+  winterCoilSensible: number;  // BTU/h
+  warning?: string;
 }
 
 export interface HeatingLoadResult {

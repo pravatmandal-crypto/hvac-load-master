@@ -256,18 +256,23 @@ function ZoneSummaryBar({
     [zoneRooms, envelopeElements, monsoonDc, isChiller, includeMonsoon],
   );
 
-  if (zoneRooms.length === 0) return null;
+  if (zoneRooms.length === 0) return (
+    <div className="border-t border-slate-100 dark:border-slate-700/50 px-4 py-3 text-xs text-slate-400 dark:text-slate-500 italic">
+      No rooms in this zone yet — add rooms using the &ldquo;Add Room&rdquo; button above.
+    </div>
+  );
   const n = (v: number) => Math.round(v).toLocaleString();
   const summerCfmTR = summerTotals.totalDesignCfm > 0 ? summerTotals.totalDesignCfm / 400 : 0;
   const monsoonCfmTR = monsoonTotals && monsoonTotals.totalDesignCfm > 0 ? monsoonTotals.totalDesignCfm / 400 : 0;
-  const summerGoverningTR = Math.max(summerTotals.totalTR, summerCfmTR);
-  const monsoonGoverningTR = monsoonTotals ? Math.max(monsoonTotals.totalTR, monsoonCfmTR) : 0;
+  // Plant TR = load-only (2026-05-20). cfmTR retained as sanity ratio.
+  const summerGoverningTR = summerTotals.totalTR;
+  const monsoonGoverningTR = monsoonTotals ? monsoonTotals.totalTR : 0;
   const governingLoadSeason = includeMonsoon && monsoonTotals && monsoonTotals.totalTR > summerTotals.totalTR ? 'Monsoon' : 'Summer';
   const governingAirflowSeason = includeMonsoon && monsoonTotals && monsoonCfmTR > summerCfmTR ? 'Monsoon' : 'Summer';
   const governingLoadTR = includeMonsoon && monsoonTotals ? Math.max(summerTotals.totalTR, monsoonTotals.totalTR) : summerTotals.totalTR;
   const governingCfmTR = includeMonsoon && monsoonTotals ? Math.max(summerCfmTR, monsoonCfmTR) : summerCfmTR;
-  const governingTR = Math.max(governingLoadTR, governingCfmTR);
-  const peakSeason = governingTR === governingCfmTR ? governingAirflowSeason : governingLoadSeason;
+  const governingTR = governingLoadTR;
+  const peakSeason = governingLoadSeason;
   const t = peakSeason === 'Monsoon' && monsoonTotals ? monsoonTotals : summerTotals;
   const governingDesignCfm = includeMonsoon && monsoonTotals
     ? Math.max(summerTotals.totalDesignCfm, monsoonTotals.totalDesignCfm)
@@ -281,12 +286,20 @@ function ZoneSummaryBar({
   const governingRoomInfo = peakSeason === 'Monsoon' && monsoonGoverningRoom ? monsoonGoverningRoom : summerGoverningRoom;
 
   const zoneRoomIdSet = new Set(zoneRooms.map((r: any) => r.id));
+  // Some equipment zones have empty roomIds (e.g. created via the new SD flow where
+  // rooms are inferred via room.zoneId). Also allow matching when the equipment zone's
+  // own id matches this LC zone's id, or when any room in this LC zone points to the
+  // equipment zone via room.zoneId.
+  const roomZoneIds = new Set(zoneRooms.map((r: any) => r.zoneId).filter(Boolean));
+  if (zoneId) roomZoneIds.add(zoneId);
   const installedForZone = (equipSystems ?? []).reduce<{ tr: number; cfm: number }>(
     (acc, sys) => {
-      // Zone-level IDU selections: match by room membership (equipment zones use grp-* IDs, not LC zone IDs)
+      // Zone-level IDU selections: match by room membership OR by zone-id, so equipment
+      // selections survive even when eqZone.roomIds is stale/empty.
       for (const eqZone of (sys.zones ?? []) as any[]) {
         const overlaps = (eqZone.roomIds ?? []).some((rid: string) => zoneRoomIdSet.has(rid));
-        if (!overlaps) continue;
+        const idMatch  = roomZoneIds.has(eqZone.id);
+        if (!overlaps && !idMatch) continue;
         if (eqZone.unitSelections?.length) {
           acc.tr  += (eqZone.unitSelections as any[]).reduce((s: number, u: any) => s + (u.trCapacity ?? 0) * (u.quantity ?? 1), 0);
           acc.cfm += (eqZone.unitSelections as any[]).reduce((s: number, u: any) => s + (u.cfmRated  ?? 0) * (u.quantity ?? 1), 0);
@@ -298,14 +311,14 @@ function ZoneSummaryBar({
       // Room-level selections (Split / per-room modes)
       for (const room of zoneRooms) {
         const roomSel = (sys.roomSelections?.[room.id] ?? []) as any[];
-        acc.tr  += roomSel.reduce((s: number, u: any) => s + (u.trCapacity ?? 0), 0);
-        acc.cfm += roomSel.reduce((s: number, u: any) => s + (u.cfmRated  ?? 0), 0);
+        acc.tr  += roomSel.reduce((s: number, u: any) => s + (u.trCapacity ?? 0) * (u.quantity ?? 1), 0);
+        acc.cfm += roomSel.reduce((s: number, u: any) => s + (u.cfmRated  ?? 0) * (u.quantity ?? 1), 0);
         // iduSelections (legacy per-room record)
         const iduSel = sys.iduSelections?.[room.id];
         if (iduSel) {
           const units = Array.isArray(iduSel) ? iduSel : [iduSel];
-          acc.tr  += (units as any[]).reduce((s: number, u: any) => s + (u.trCapacity ?? 0), 0);
-          acc.cfm += (units as any[]).reduce((s: number, u: any) => s + (u.cfmRated  ?? 0), 0);
+          acc.tr  += (units as any[]).reduce((s: number, u: any) => s + (u.trCapacity ?? 0) * (u.quantity ?? 1), 0);
+          acc.cfm += (units as any[]).reduce((s: number, u: any) => s + (u.cfmRated  ?? 0) * (u.quantity ?? 1), 0);
         }
       }
       return acc;
@@ -322,9 +335,9 @@ function ZoneSummaryBar({
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div className="min-w-0 flex-1">
             <div className="flex flex-wrap items-center gap-2">
-              <span className="rounded-full border border-orange-200 dark:border-orange-800 bg-white dark:bg-slate-800 px-2 py-0.5 text-[10px] font-semibold text-orange-700 dark:text-orange-400">{zoneRooms.length} room{zoneRooms.length !== 1 ? 's' : ''}</span>
-              <span className="rounded-full border border-slate-200 dark:border-slate-600 bg-slate-100 dark:bg-slate-700 px-2 py-0.5 text-[10px] font-semibold text-slate-700 dark:text-slate-300">AHU Basis: {peakSeason}</span>
-              <span className="rounded-full border border-indigo-200 dark:border-indigo-800 bg-indigo-50 dark:bg-indigo-950/30 px-2 py-0.5 text-[10px] font-semibold text-indigo-700 dark:text-indigo-400">{governingTR === governingCfmTR ? 'CFM Gov' : 'Load Gov'}</span>
+              <span className="rounded-full border border-orange-200 dark:border-orange-800 bg-white dark:bg-slate-800 px-2 py-0.5 text-xs font-semibold text-orange-700 dark:text-orange-400">{zoneRooms.length} room{zoneRooms.length !== 1 ? 's' : ''}</span>
+              <span className="rounded-full border border-slate-200 dark:border-slate-600 bg-slate-100 dark:bg-slate-700 px-2 py-0.5 text-[10px] font-semibold text-slate-700 dark:text-slate-300">Peak season: {peakSeason}</span>
+              <span className="rounded-full border border-indigo-200 dark:border-indigo-800 bg-indigo-50 dark:bg-indigo-950/30 px-2 py-0.5 text-[10px] font-semibold text-indigo-700 dark:text-indigo-400" title="Sanity ratio — typical 350–450 CFM/TR">{governingTR > 0 ? Math.round(governingDesignCfm / governingTR) : 0} CFM/TR</span>
               {governingRoomInfo && zoneRooms.length > 1 && (
                 <span className="rounded-full border border-amber-200 dark:border-amber-800 bg-amber-50 dark:bg-amber-950/30 px-2 py-0.5 text-[10px] font-semibold text-amber-700 dark:text-amber-400" title={`Highest load room: ${governingRoomInfo.loadTR.toFixed(2)} TR`}>
                   Peak: {governingRoomInfo.name}
@@ -333,12 +346,12 @@ function ZoneSummaryBar({
             </div>
             <div className="mt-3 grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-6">
               <div className="rounded-lg border border-orange-200 dark:border-orange-800 bg-white dark:bg-slate-800 px-3 py-2">
-                <p className="text-[10px] font-bold uppercase tracking-[0.14em] text-orange-700 dark:text-orange-400">Summer Cooling</p>
+                <p className="text-xs font-bold uppercase tracking-wide text-orange-700 dark:text-orange-400">Summer Cooling</p>
                 <p className="mt-1 font-mono text-lg font-bold text-orange-900 dark:text-orange-200">{summerGoverningTR.toFixed(2)} <span className="text-[11px] font-semibold text-orange-600 dark:text-orange-400">TR</span></p>
                 <p className="text-[10px] text-orange-600 dark:text-orange-400">{n(summerTotals.totalCooling)} BTU/h</p>
               </div>
               <div className={`rounded-lg border bg-white dark:bg-slate-800 px-3 py-2 ${includeMonsoon ? 'border-teal-200 dark:border-teal-800' : 'border-slate-200 dark:border-slate-700'}`}>
-                <p className={`text-[10px] font-bold uppercase tracking-[0.14em] ${includeMonsoon ? 'text-teal-700 dark:text-teal-400' : 'text-slate-500 dark:text-slate-400'}`}>Monsoon Cooling</p>
+                <p className={`text-xs font-bold uppercase tracking-wide ${includeMonsoon ? 'text-teal-700 dark:text-teal-400' : 'text-slate-500 dark:text-slate-400'}`}>Monsoon Cooling</p>
                 <p className={`mt-1 font-mono text-lg font-bold ${includeMonsoon ? 'text-teal-900 dark:text-teal-200' : 'text-slate-500 dark:text-slate-400'}`}>
                   {includeMonsoon && monsoonTotals ? monsoonGoverningTR.toFixed(2) : '--'}
                   <span className={`text-[11px] font-semibold ml-1 ${includeMonsoon ? 'text-teal-600 dark:text-teal-400' : 'text-slate-400 dark:text-slate-500'}`}>TR</span>
@@ -348,22 +361,22 @@ function ZoneSummaryBar({
                 </p>
               </div>
               <div className="rounded-lg border border-blue-200 dark:border-blue-800 bg-white dark:bg-slate-800 px-3 py-2">
-                <p className="text-[10px] font-bold uppercase tracking-[0.14em] text-blue-700 dark:text-blue-400">Heating</p>
+                <p className="text-xs font-bold uppercase tracking-wide text-blue-700 dark:text-blue-400">Heating</p>
                 <p className="mt-1 font-mono text-lg font-bold text-blue-900 dark:text-blue-200">{n(summerTotals.totalHeating)}</p>
                 <p className="text-[10px] text-blue-600 dark:text-blue-400">BTU/h winter load</p>
               </div>
               <div className="rounded-lg border border-emerald-200 dark:border-emerald-800 bg-white dark:bg-slate-800 px-3 py-2">
-                <p className="text-[10px] font-bold uppercase tracking-[0.14em] text-emerald-700 dark:text-emerald-400">Design CFM</p>
+                <p className="text-xs font-bold uppercase tracking-wide text-emerald-700 dark:text-emerald-400">Design CFM</p>
                 <p className="mt-1 font-mono text-lg font-bold text-emerald-900 dark:text-emerald-200">{Math.round(governingDesignCfm)}</p>
                 <p className="text-[10px] text-emerald-600 dark:text-emerald-400">w/o Reheat · OA {Math.round(t.totalOaCfm)} CFM</p>
               </div>
               <div className="rounded-lg border border-violet-200 dark:border-violet-800 bg-white dark:bg-slate-800 px-3 py-2">
-                <p className="text-[10px] font-bold uppercase tracking-[0.14em] text-violet-700 dark:text-violet-400">Area</p>
+                <p className="text-xs font-bold uppercase tracking-wide text-violet-700 dark:text-violet-400">Area</p>
                 <p className="mt-1 font-mono text-lg font-bold text-violet-900 dark:text-violet-200">{Math.round(t.totalArea)}</p>
                 <p className="text-[10px] text-violet-600 dark:text-violet-400">ft² conditioned</p>
               </div>
               <div className={`rounded-lg border bg-white dark:bg-slate-800 px-3 py-2 ${instFit === 'ok' ? 'border-green-300 dark:border-green-700' : instFit === 'low' ? 'border-red-300 dark:border-red-700' : 'border-slate-200 dark:border-slate-700'}`}>
-                <p className="text-[10px] font-bold uppercase tracking-[0.14em] text-slate-600 dark:text-slate-400">Equipment</p>
+                <p className="text-xs font-bold uppercase tracking-wide text-slate-600 dark:text-slate-400">Equipment</p>
                 <p className="mt-1 font-mono text-lg font-bold text-slate-900 dark:text-slate-100">{requiredTR.toFixed(2)} <span className="text-[11px] font-normal text-slate-500 dark:text-slate-400">TR req'd</span></p>
                 {instFit === 'none' ? (
                   <p className="text-[10px] text-slate-400">No equipment selected</p>
@@ -429,7 +442,7 @@ function ZoneCollapsedBadge({
   if (zoneRooms.length === 0) return null;
 
   return (
-    <span className="hidden md:flex items-center gap-2 rounded-full border border-orange-200 dark:border-orange-800 bg-gradient-to-r from-orange-50 to-amber-50 dark:from-orange-950/30 dark:to-amber-950/30 px-2.5 py-1 text-[11px] font-semibold text-orange-700 dark:text-orange-400 flex-shrink-0 shadow-sm">
+    <span className="hidden md:flex items-center gap-2 rounded-full border border-orange-200 dark:border-orange-800 bg-gradient-to-r from-orange-50 to-amber-50 dark:from-orange-950/30 dark:to-amber-950/30 px-2.5 py-1 text-xs font-semibold text-orange-700 dark:text-orange-400 flex-shrink-0 shadow-sm">
       <span>{t.totalTR.toFixed(2)} TR</span>
       <span className="h-3 w-px bg-orange-200" />
       <span>{Math.round(t.totalDesignCfm)} CFM</span>
@@ -769,7 +782,7 @@ const ZoneList = ({
       if (t === 'Chiller') return { has: (sys.chillerUnits?.length ?? 0) > 0 || !!sys.unitSelection, label: 'Plant' };
       if (t === 'AHU')     return { has: (sys.ahuUnits?.length ?? 0) > 0 || !!sys.unitSelection, label: 'Condensing Unit' };
       if (t === 'Package' || t === 'DuctableSplit') return { has: !!sys.unitSelection, label: 'Unit' };
-      if (t === 'DOAS')    return { has: !!sys.unitSelection, label: 'DOAS Unit' };
+      if (t === 'DOAS')    return { has: !!sys.unitSelection, label: 'TFA/DOAS Unit' };
       if (t === 'Split') {
         const sels = sys.roomSelections ?? {};
         return { has: Object.values(sels).some((v: any) => (Array.isArray(v) ? v.length > 0 : !!v)), label: 'Per-Room ODU' };
@@ -782,7 +795,7 @@ const ZoneList = ({
         {/* Zone header row */}
         <div
           className={`flex items-center gap-3 px-4 py-3 cursor-pointer select-none transition-colors border-l-2 ${
-            isOpen ? 'bg-orange-50 dark:bg-orange-950/20 border-l-orange-500' : 'hover:bg-gray-50 dark:hover:bg-slate-700/50 border-l-transparent'
+            isOpen ? 'bg-orange-50 dark:bg-orange-950/20 border-l-orange-500' : 'hover:bg-slate-50 dark:hover:bg-slate-700/50 border-l-transparent'
           }`}
           onClick={() => {
             if (blockDirtyZoneNavigation(isOpen ? null : zoneId)) return;
@@ -799,7 +812,7 @@ const ZoneList = ({
             value={zone.name}
             title="Zone name"
             aria-label="Zone name"
-            className="flex-1 min-w-0 font-semibold text-sm text-gray-900 dark:text-slate-100 bg-transparent border-none outline-none focus:ring-0 p-0 placeholder:text-slate-400"
+            className="flex-1 min-w-0 font-semibold text-sm text-slate-900 dark:text-slate-100 bg-transparent border-none outline-none focus:ring-0 p-0 placeholder:text-slate-400"
             onClick={e => e.stopPropagation()}
             onChange={e =>
               isSystem
@@ -883,7 +896,7 @@ const ZoneList = ({
           )}
 
           {/* Room count */}
-          <span className="text-xs text-gray-400 dark:text-slate-400 flex-shrink-0 rounded bg-slate-100 dark:bg-slate-700 px-1.5 py-0.5">
+          <span className="text-xs text-slate-500 dark:text-slate-400 flex-shrink-0 rounded bg-slate-100 dark:bg-slate-700 px-1.5 py-0.5 font-medium">
             {zoneRooms.length} room{zoneRooms.length !== 1 ? 's' : ''}
           </span>
 

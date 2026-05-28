@@ -3,7 +3,7 @@
  * ASHRAE Fundamentals 2017, Chapters 6, 18, and 25
  */
 
-import { RoomDetails, DesignConditions, VentilationLoadResult, HeatingLoadResult, ASHRAE_CONSTANTS } from './constants';
+import { RoomDetails, DesignConditions, VentilationLoadResult, HeatingLoadResult, TFALoadResult, ASHRAE_CONSTANTS } from './constants';
 import { calculateRoomVolume } from './geometry';
 import { calculatePsychrometrics } from './psychrometrics';
 import { EnvelopeElement } from './constants';
@@ -103,5 +103,113 @@ export const calculateHeatingLoad = (
     slabLoss,
     totalHeatingLoad,
     cfm,
+  };
+};
+
+/**
+ * Calculate TFA / DOAS load (separate outdoor-air conditioning unit).
+ *
+ * When `design.ventilationStrategy === 'tfa-cold'`, outdoor air is conditioned
+ * by a DOAS unit to a user-defined supply state (default 55°F / 90% RH) — cold
+ * and dry. The TFA coil handles the full OA load (sensible + latent), and the
+ * cold dry supply delivered to the space offsets a portion of the primary
+ * system's room load.
+ *
+ * Returns zero loads when strategy is not TFA — caller should branch on the
+ * strategy before subtracting offsets from primary coil load.
+ *
+ * ASHRAE Fundamentals 2017, Chapters 6 and 25.
+ */
+export const calculateTFALoad = (
+  room: RoomDetails,
+  design: DesignConditions
+): TFALoadResult => {
+  // Use the same designed-OA CFM as ventilation (room.facph drives both).
+  const volume = calculateRoomVolume(room);
+  const cfm = (volume * room.facph) / ASHRAE_CONSTANTS.CFM_TO_VOLUME_CORRECTION;
+
+  // Defaults match the locked engineering decision: cold-DOAS at 55°F / 90% RH.
+  const supplyTemp = typeof design.tfaSupplyTemp === 'number' ? design.tfaSupplyTemp : 55;
+  const supplyRH = typeof design.tfaSupplyHumidity === 'number' ? design.tfaSupplyHumidity : 90;
+  const altitude = design.altitude || 0;
+
+  const outdoor = calculatePsychrometrics(design.outdoorTemp, design.outdoorHumidity, altitude);
+  const indoor = calculatePsychrometrics(design.indoorTemp, design.indoorHumidity, altitude);
+  const supply = calculatePsychrometrics(supplyTemp, supplyRH, altitude);
+
+  // ── TFA coil load (DOAS sizes off this) ──
+  // Sensible: cool OA from outdoor to supply temp.
+  // Latent: remove moisture from OA W to supply W.
+  const deltaT_OAtoSupply = design.outdoorTemp - supplyTemp;
+  const deltaW_OAtoSupply = outdoor.humidityRatio - supply.humidityRatio;
+  let coilSensible = ASHRAE_CONSTANTS.SENSIBLE_COOLING_CONSTANT * cfm * deltaT_OAtoSupply;
+  let coilLatent =
+    ASHRAE_CONSTANTS.LATENT_COOLING_CONSTANT * cfm * (deltaW_OAtoSupply * ASHRAE_CONSTANTS.GRAINS_PER_LB);
+
+  // ── ERV / HRV pre-conditioning ──
+  // Recovers energy between exhaust (≈ indoor) and incoming OA streams.
+  // Reduces TFA coil load.
+  const epsS = Math.max(0, Math.min(1, design.ervSensibleEffectiveness ?? 0));
+  const epsL = Math.max(0, Math.min(1, design.ervLatentEffectiveness ?? 0));
+  const ervSensibleRecovered =
+    epsS * ASHRAE_CONSTANTS.SENSIBLE_COOLING_CONSTANT * cfm * (design.outdoorTemp - design.indoorTemp);
+  const ervLatentRecovered =
+    epsL *
+    ASHRAE_CONSTANTS.LATENT_COOLING_CONSTANT *
+    cfm *
+    ((outdoor.humidityRatio - indoor.humidityRatio) * ASHRAE_CONSTANTS.GRAINS_PER_LB);
+  coilSensible = Math.max(0, coilSensible - ervSensibleRecovered);
+  coilLatent = Math.max(0, coilLatent - ervLatentRecovered);
+
+  // ── Space offsets (cold-DOAS credit to primary) ──
+  // Cold dry supply cools and dehumidifies the room as it mixes in. Clamp at
+  // zero so a warm or humid supply does not produce a negative offset (which
+  // would inflate primary sizing in an unexpected way for Phase 1).
+  const spaceSensibleOffset = Math.max(
+    0,
+    ASHRAE_CONSTANTS.SENSIBLE_COOLING_CONSTANT * cfm * (design.indoorTemp - supplyTemp),
+  );
+  const spaceLatentOffset = Math.max(
+    0,
+    ASHRAE_CONSTANTS.LATENT_COOLING_CONSTANT *
+      cfm *
+      ((indoor.humidityRatio - supply.humidityRatio) * ASHRAE_CONSTANTS.GRAINS_PER_LB),
+  );
+
+  // ── Winter heating on TFA (heats OA from winter outdoor to supply temp) ──
+  let winterCoilSensible = 0;
+  let warning: string | undefined;
+  if (typeof design.winterOutdoorTemp === 'number') {
+    const winterDeltaT = supplyTemp - design.winterOutdoorTemp;
+    if (winterDeltaT > 0) {
+      winterCoilSensible = ASHRAE_CONSTANTS.SENSIBLE_COOLING_CONSTANT * cfm * winterDeltaT;
+      // ERV sensible recovery applies in winter too — exhaust at indoor temp
+      // pre-heats incoming OA.
+      const winterIndoorTemp = design.winterIndoorTemp ?? design.indoorTemp;
+      const winterErvRecovered =
+        epsS *
+        ASHRAE_CONSTANTS.SENSIBLE_COOLING_CONSTANT *
+        cfm *
+        (winterIndoorTemp - design.winterOutdoorTemp);
+      winterCoilSensible = Math.max(0, winterCoilSensible - winterErvRecovered);
+    }
+  } else {
+    warning = 'Winter outdoor temperature missing — TFA winter heating not computed.';
+  }
+
+  return {
+    coilSensible,
+    coilLatent,
+    coilTotal: coilSensible + coilLatent,
+    spaceSensibleOffset,
+    spaceLatentOffset,
+    ervSensibleRecovered,
+    ervLatentRecovered,
+    cfm,
+    supplyTemp,
+    supplyHumidity: supplyRH,
+    supplyHumidityRatio: supply.humidityRatio,
+    winterCoilSensible,
+    warning,
   };
 };

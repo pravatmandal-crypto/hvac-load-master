@@ -7,8 +7,12 @@ import { Button } from '../ui/button';
 import { Input } from '../ui/input';
 import { NumericInput } from '../ui/numeric-input';
 import { toast } from 'sonner';
-import type { EquipmentSystem, AHUConfig } from '../../types/equipment-systems';
+import type { EquipmentSystem, AHUConfig, ODUCombinationUnit, SingleUnitSelection } from '../../types/equipment-systems';
 import type { AHUData, AHUZoneData, ChillerData, CTData, PackageData, HumidifierData, FullSpec } from '../../types/equipment-specs';
+
+// Effective per-unit capacity at site conditions: prefer actualTR (OEM-confirmed
+// at this project's entering CW/ambient temps), fall back to catalog Nominal TR.
+const effUnitTR = (u: ODUCombinationUnit) => (u.actualTR != null && u.actualTR > 0 ? u.actualTR : u.trCapacity);
 
 // ─── Auto-fill helpers ────────────────────────────────────────────────────────
 
@@ -36,7 +40,11 @@ function dn(lps: number): number {
 
 function fToC(f: number) { return parseFloat(((f - 32) * 5 / 9).toFixed(1)); }
 
-function buildAHU(project: any, psychro: any, tr: number, cfm: number, systemOACFM = 0, config?: AHUConfig, ventHeatingKW = 0, reheatKW = 0): AHUData {
+// When `exactTR` is true, the passed `tr` is taken as the per-unit cooling
+// capacity exactly (e.g., the user-selected AHU catalog TR) — no 10% safety
+// is added. When false (default), `tr` is treated as a load requirement and
+// the function adds 10% safety + rounds up to the nearest 0.5 TR.
+function buildAHU(project: any, psychro: any, tr: number, cfm: number, systemOACFM = 0, config?: AHUConfig, ventHeatingKW = 0, reheatKW = 0, ahuQuantity = 1, exactTR = false): AHUData {
   const odbF = Number(project?.summerDesignTemp ?? 95);
   const oRH  = Number(project?.summerDesignHumidity ?? 60);
   const idbF = psychro?.indoorTemp ?? 75;
@@ -50,7 +58,9 @@ function buildAHU(project: any, psychro: any, tr: number, cfm: number, systemOAC
   const mixWB = cfm > 0 ? (owbF * oaCFM + iwbF * retCFM) / cfm : owbF;
   const lvDB = (psychro?.coil as any)?.supplyTemp ?? 55;
   const lvRH = (psychro?.coil as any)?.supplyRH ?? 95;
-  const capTR = Math.ceil(tr * 1.1 * 2) / 2;
+  // exactTR=true → caller passed the selected catalog per-unit TR; use as-is.
+  // exactTR=false → caller passed a load requirement; add 10% safety and round to 0.5 TR.
+  const capTR = exactTR ? parseFloat(tr.toFixed(2)) : Math.ceil(tr * 1.1 * 2) / 2;
   const capKW = parseFloat((capTR * 3.517).toFixed(1));
   const flow  = parseFloat((capKW / (4.186 * 5)).toFixed(2));
   const extSP = config?.extStaticPa ?? 150;
@@ -112,6 +122,7 @@ function buildAHU(project: any, psychro: any, tr: number, cfm: number, systemOAC
   const heatCoilTubeDepth = hasHeat ? heatRows * rowPitch : 0;
 
   return {
+    quantity: ahuQuantity,
     supplyAirCFM: Math.round(cfm),
     outsideAirPct: oaPct,
     outsideAirCFM: oaCFM,
@@ -167,14 +178,40 @@ function buildAHU(project: any, psychro: any, tr: number, cfm: number, systemOAC
   };
 }
 
-function buildChiller(tr: number, isWC: boolean): ChillerData {
-  const capTR = Math.ceil(tr * 1.1 * 2) / 2;
+// buildChiller — when selectedUnits is provided, use the installed working
+// capacity & quantity from the user's selection (standby units excluded —
+// redundancy doesn't count toward plant duty). Otherwise fall back to
+// load-derived generic sizing (loadTR × 1.1 safety).
+function buildChiller(tr: number, isWC: boolean, selectedUnits?: ODUCombinationUnit[]): ChillerData {
+  const workingUnits = (selectedUnits ?? []).filter(u => (u.role ?? 'working') === 'working');
+  let perUnitTR: number;
+  let quantity: number;
+  let autoNote: string;
+
+  if (workingUnits.length > 0) {
+    const totalTR  = workingUnits.reduce((s, u) => s + effUnitTR(u) * u.quantity, 0);
+    const totalQty = workingUnits.reduce((s, u) => s + u.quantity, 0);
+    const distinctModels = new Set(workingUnits.map(u => `${u.brand}|${u.modelSeries}|${effUnitTR(u)}`));
+    const homogeneous = distinctModels.size === 1;
+    perUnitTR = homogeneous ? effUnitTR(workingUnits[0]) : parseFloat((totalTR / totalQty).toFixed(2));
+    quantity  = totalQty;
+    autoNote  = homogeneous
+      ? `Plant: ${totalQty} × ${perUnitTR.toFixed(1)} TR working = ${totalTR.toFixed(1)} TR installed (standby units excluded).`
+      : `Plant: ${totalTR.toFixed(1)} TR total across ${totalQty} working units (mixed models — see Equipment Schedule for breakdown).`;
+  } else {
+    perUnitTR = Math.ceil(tr * 1.1 * 2) / 2;
+    quantity  = 1;
+    autoNote  = '';
+  }
+
+  const capTR = perUnitTR;
   const capKW = parseFloat((capTR * 3.517).toFixed(1));
   const cop   = isWC ? 5.0 : 3.5;
   const ipKW  = parseFloat((capKW / cop).toFixed(1));
   const chFl  = parseFloat((capKW / (4.186 * 5)).toFixed(2));
   const cwFl  = isWC ? parseFloat(((capKW + ipKW) / (4.186 * 6)).toFixed(2)) : 0;
   return {
+    quantity,
     coolingCapTR: capTR,
     coolingCapKW: capKW,
     copRated: cop,
@@ -190,12 +227,35 @@ function buildChiller(tr: number, isWC: boolean): ChillerData {
     cwPipeDN: isWC ? dn(cwFl) : 0,
     inputKW: ipKW,
     voltageHz: '415 V / 3Ph / 50 Hz',
-    notes: '',
+    notes: autoNote,
   };
 }
 
-function buildCT(chillerCapTR: number, chillerInputKW: number, project: any): CTData {
-  const dutyTR = Math.ceil(chillerCapTR * 1.25 * 2) / 2;
+// buildCT — when selectedCTUnits provided, use installed working CT capacity
+// (standby excluded). Otherwise size from chiller heat rejection (cap × 1.25).
+function buildCT(chillerCapTR: number, chillerInputKW: number, project: any, selectedCTUnits?: ODUCombinationUnit[]): CTData {
+  const workingCTs = (selectedCTUnits ?? []).filter(u => (u.role ?? 'working') === 'working');
+  let perUnitTR: number;
+  let quantity: number;
+  let autoNote: string;
+
+  if (workingCTs.length > 0) {
+    const totalTR  = workingCTs.reduce((s, u) => s + u.trCapacity * u.quantity, 0);
+    const totalQty = workingCTs.reduce((s, u) => s + u.quantity, 0);
+    const distinctModels = new Set(workingCTs.map(u => `${u.brand}|${u.modelSeries}|${u.trCapacity}`));
+    const homogeneous = distinctModels.size === 1;
+    perUnitTR = homogeneous ? workingCTs[0].trCapacity : parseFloat((totalTR / totalQty).toFixed(2));
+    quantity  = totalQty;
+    autoNote  = homogeneous
+      ? `Plant: ${totalQty} × ${perUnitTR.toFixed(1)} TR working = ${totalTR.toFixed(1)} TR installed (standby excluded).`
+      : `Plant: ${totalTR.toFixed(1)} TR total across ${totalQty} working CTs (mixed models).`;
+  } else {
+    perUnitTR = Math.ceil(chillerCapTR * 1.25 * 2) / 2;
+    quantity  = 1;
+    autoNote  = '';
+  }
+
+  const dutyTR = perUnitTR;
   const dutyKW = parseFloat((dutyTR * 3.517).toFixed(1));
   const hot = 35; const cold = 29;
   const odbF  = Number(project?.summerDesignTemp ?? 95);
@@ -206,6 +266,7 @@ function buildCT(chillerCapTR: number, chillerInputKW: number, project: any): CT
   const fanKW = parseFloat((dutyTR * 0.025).toFixed(2));
   const pipeDn = dn(flow);
   return {
+    quantity,
     dutyTR, dutyKW,
     hotWaterTempC: hot,
     coldWaterTempC: cold,
@@ -221,12 +282,25 @@ function buildCT(chillerCapTR: number, chillerInputKW: number, project: any): CT
     fanMotorKW: fanKW,
     inletPipeDN: pipeDn,
     outletPipeDN: pipeDn,
-    notes: '',
+    notes: autoNote,
   };
 }
 
-function buildPackage(tr: number, cfm: number): PackageData {
-  const capTR = Math.ceil(tr * 1.1 * 2) / 2;
+// buildPackage — when a unit is selected, use its per-unit TR/CFM/qty;
+// otherwise generic sizing from required TR with 10% safety.
+function buildPackage(tr: number, cfm: number, selectedUnit?: SingleUnitSelection | null): PackageData {
+  let capTR: number;
+  let qty: number;
+  let supplyCFM: number;
+  if (selectedUnit && (selectedUnit.trCapacity ?? 0) > 0) {
+    capTR     = selectedUnit.trCapacity;
+    qty       = selectedUnit.quantity ?? 1;
+    supplyCFM = Math.round(selectedUnit.cfmRated ?? cfm);
+  } else {
+    capTR     = Math.ceil(tr * 1.1 * 2) / 2;
+    qty       = 1;
+    supplyCFM = Math.round(cfm);
+  }
   const capKW = parseFloat((capTR * 3.517).toFixed(1));
   const ipKW  = parseFloat((capKW / (10 / 3.412)).toFixed(1));
   return {
@@ -234,10 +308,10 @@ function buildPackage(tr: number, cfm: number): PackageData {
     coolingCapKW: capKW,
     eerRated: 10,
     refrigerant: 'R-410A',
-    supplyAirCFM: Math.round(cfm),
+    supplyAirCFM: supplyCFM,
     extStaticPa: 100,
     inputKW: ipKW,
-    quantity: 1,
+    quantity: qty,
     notes: '',
   };
 }
@@ -324,7 +398,8 @@ function generatePrintHTML(system: EquipmentSystem, project: any, spec: FullSpec
       row('Supply Air (Leaving Coil) DB / RH',`${a.leavingAirDBF}°F (${fToC(a.leavingAirDBF)}°C) DB  /  ${a.leavingAirRHPct}% RH`),
     ].join(''));
     out += section(`${++unitN}. Chilled Water Coil`, [
-      row('Total Cooling Capacity',           `${a.coolingCapTR} TR  (${a.coolingCapKW} kW)`),
+      row('Quantity',                         `${a.quantity ?? 1} nos`),
+      row('Cooling Capacity (per unit)',      `${a.coolingCapTR} TR  (${a.coolingCapKW} kW)`),
       row('Coil Type',                        a.coilType),
       row('No. of Rows',                      `${a.coolingCoilRows ?? '—'} rows`),
       row('Coil Face Dimensions (approx.)',   `${a.coolCoilWidthMM ?? '—'} W × ${a.coolCoilHeightMM ?? '—'} H mm`),
@@ -405,7 +480,9 @@ function generatePrintHTML(system: EquipmentSystem, project: any, spec: FullSpec
     if (spec.ahu) body += grpHeader('B. Central Chiller Plant');
     n = 0;
     body += section(`${++n}. Cooling Capacity & Performance`, [
-      row('Nominal Cooling Capacity',         `${c.coolingCapTR} TR  (${c.coolingCapKW} kW)`),
+      row('Quantity (Working Units)',         `${c.quantity ?? 1} nos`),
+      row('Cooling Capacity (per unit)',      `${c.coolingCapTR} TR  (${c.coolingCapKW} kW)`),
+      row('Total Installed (Working)',        `${((c.quantity ?? 1) * c.coolingCapTR).toFixed(2)} TR  (${((c.quantity ?? 1) * c.coolingCapKW).toFixed(1)} kW)`),
       row('Rated COP',                        `${c.copRated}`),
       row('Compressor Input Power (est.)',    `${c.inputKW} kW`),
       row('Refrigerant',                      c.refrigerant),
@@ -440,7 +517,9 @@ function generatePrintHTML(system: EquipmentSystem, project: any, spec: FullSpec
     if (spec.chiller) body += grpHeader('C. Cooling Tower');
     n = 0;
     body += section(`${++n}. Thermal Duty & Design Temperatures`, [
-      row('Nominal Thermal Duty',             `${t.dutyTR} TR  (${t.dutyKW} kW)`),
+      row('Quantity (Working Units)',         `${t.quantity ?? 1} nos`),
+      row('Thermal Duty (per unit)',          `${t.dutyTR} TR  (${t.dutyKW} kW)`),
+      row('Total Installed (Working)',        `${((t.quantity ?? 1) * t.dutyTR).toFixed(2)} TR  (${((t.quantity ?? 1) * t.dutyKW).toFixed(1)} kW)`),
       row('Hot Water Inlet Temperature',      `${t.hotWaterTempC}°C`),
       row('Cold Water Outlet Temperature',    `${t.coldWaterTempC}°C`),
       row('Design Wet-Bulb Temperature',      `${t.designWBTC}°C`),
@@ -467,7 +546,9 @@ function generatePrintHTML(system: EquipmentSystem, project: any, spec: FullSpec
     const p = spec.pkg;
     n = 0;
     body += section(`${++n}. Cooling Performance`, [
-      row('Nominal Cooling Capacity',         `${p.coolingCapTR} TR  (${p.coolingCapKW} kW)`),
+      row('Quantity',                         `${p.quantity ?? 1} nos`),
+      row('Cooling Capacity (per unit)',      `${p.coolingCapTR} TR  (${p.coolingCapKW} kW)`),
+      row('Total Installed',                  `${((p.quantity ?? 1) * p.coolingCapTR).toFixed(2)} TR  (${((p.quantity ?? 1) * p.coolingCapKW).toFixed(1)} kW)`),
       row('Rated EER',                        `${p.eerRated} BTU/W·h`),
       row('Compressor Input Power (est.)',    `${p.inputKW} kW`),
       row('Refrigerant',                      p.refrigerant),
@@ -664,6 +745,7 @@ function AHUUnitForm({ ahu, onChange, ahuConfig }: {
   return (
     <>
       <Sec title="Air Performance" color="sky">
+        <SF label="Quantity" value={ahu.quantity ?? 1} onChange={v => onChange('quantity', v)} unit="nos" />
         <SF label="Total Supply Air" value={ahu.supplyAirCFM} onChange={v => onChange('supplyAirCFM', v)} unit="CFM" />
         <SF label="Outside Air %" value={ahu.outsideAirPct} onChange={v => onChange('outsideAirPct', v)} unit="%" />
         <SF label="Outside Air (CFM)" value={ahu.outsideAirCFM} onChange={v => onChange('outsideAirCFM', v)} unit="CFM" />
@@ -800,6 +882,18 @@ interface ZoneUnit {
   requiredTR: number;
   designCFM: number;
   oaCFM?: number;
+  // Per-zone AHU config (mixing box, mounting, coil rows, fan, filters).
+  // When set, overrides the system-level ahuConfig in autoFill so zones with
+  // ceiling-hung / no-mixing-box / different fan types render correctly.
+  ahuConfig?: AHUConfig;
+  // Selected AHU/FCU units for this zone (from zone.unitSelections[] / zone.selection).
+  // When present, the spec uses these instead of recomputing from load TR × 1.1
+  // so the AHU spec reflects what the user actually picked.
+  selectedAHUTotalTR?: number;
+  selectedAHUTotalCFM?: number;
+  selectedAHUQty?: number;
+  selectedAHUPerUnitTR?: number;
+  selectedAHUPerUnitCFM?: number;
 }
 
 interface SpecSheetProps {
@@ -817,13 +911,21 @@ interface SpecSheetProps {
   systemReheatKW?: number;
   chillerPlantTR?: number;
   zoneUnits?: ZoneUnit[];
+  // Actually-selected equipment from the user's picks in Equipment Selection.
+  // When present, Auto-Fill uses these for capacity & quantity instead of
+  // recomputing from load TR. Standby units are excluded in the build helpers.
+  selectedChillerUnits?: ODUCombinationUnit[];
+  selectedCTUnits?: ODUCombinationUnit[];
+  selectedPackageUnit?: SingleUnitSelection | null;
+  selectedAHUUnits?: SingleUnitSelection[];
   onSave: (spec: Record<string, any>) => Promise<void>;
 }
 
 export default function SpecSheet({
   system, project, systemPsychro, totalRequiredTR, totalDesignCFM, hvacCategory,
   systemNeedsHumidifier = false, humidifierCapacityKgHr = 0, systemOACFM = 0, ahuConfig,
-  systemVentHeatingKW = 0, systemReheatKW = 0, chillerPlantTR = 0, zoneUnits, onSave,
+  systemVentHeatingKW = 0, systemReheatKW = 0, chillerPlantTR = 0, zoneUnits,
+  selectedChillerUnits, selectedCTUnits, selectedPackageUnit, selectedAHUUnits, onSave,
 }: SpecSheetProps) {
   const [expanded, setExpanded]   = useState(false);
   const [spec, setSpec]           = useState<FullSpec>({ specType: system.type });
@@ -849,18 +951,40 @@ export default function SpecSheet({
     const humidType: 'steam-electrode' | 'ultrasonic' =
       spec.humidifier?.humidifierType ?? (spec.humidifier?.type?.includes('Ultrasonic') ? 'ultrasonic' : 'steam-electrode');
 
-    // Build per-zone AHU units when zone breakdown is available; otherwise single aggregate
+    // For AHU systems, derive AHU quantity from the user's selected unit list
+    // (the DX condensing units act as the AHU count). For Chiller/VRF systems
+    // this defaults to 1 — each zone has its own AHU spec already.
+    const ahuQty = (system.type === 'AHU' && selectedAHUUnits && selectedAHUUnits.length > 0)
+      ? selectedAHUUnits.reduce((s, u) => s + (u.quantity ?? 1), 0)
+      : 1;
+
+    // Build per-zone AHU units when zone breakdown is available; otherwise single aggregate.
+    // When a zone has user-selected AHU units, use those for per-unit TR/CFM and quantity
+    // — load values become a fallback only.
     const buildAHUUnitsOrSingle = (specType: string): Partial<FullSpec> => {
       if (zoneUnits && zoneUnits.length > 0) {
-        const units: AHUZoneData[] = zoneUnits.map(z => ({
-          ...buildAHU(project, systemPsychro, z.requiredTR, z.designCFM, z.oaCFM ?? 0, ahuConfig, 0, 0),
-          zoneName: z.zoneName,
-        }));
+        const units: AHUZoneData[] = zoneUnits.map(z => {
+          const hasSelected = (z.selectedAHUQty ?? 0) > 0 && (z.selectedAHUPerUnitTR ?? 0) > 0;
+          const perUnitTR  = hasSelected ? (z.selectedAHUPerUnitTR ?? 0) : z.requiredTR;
+          const perUnitCFM = hasSelected ? (z.selectedAHUPerUnitCFM ?? 0) : z.designCFM;
+          const zoneQty    = hasSelected ? (z.selectedAHUQty ?? 1) : 1;
+          // OA stays at the zone-total level (it's a ventilation requirement, not equipment-specific).
+          // Divide by qty so per-unit OA CFM is meaningful when multiple AHUs serve one zone.
+          const perUnitOA  = hasSelected && zoneQty > 0 ? (z.oaCFM ?? 0) / zoneQty : (z.oaCFM ?? 0);
+          // Per-zone ahuConfig (mixing box, fan type, coil rows, filters) overrides
+          // the system-level config — so ceiling-hung zones with no mixing box are
+          // sized & rendered correctly instead of inheriting another zone's config.
+          const zoneAhuConfig = z.ahuConfig ?? ahuConfig;
+          return {
+            ...buildAHU(project, systemPsychro, perUnitTR, perUnitCFM, perUnitOA, zoneAhuConfig, 0, 0, zoneQty, hasSelected),
+            zoneName: z.zoneName,
+          };
+        });
         return { specType, ahuUnits: units };
       }
       return {
         specType,
-        ahu: buildAHU(project, systemPsychro, totalRequiredTR, totalDesignCFM, systemOACFM, ahuConfig, systemVentHeatingKW, systemReheatKW),
+        ahu: buildAHU(project, systemPsychro, totalRequiredTR, totalDesignCFM, systemOACFM, ahuConfig, systemVentHeatingKW, systemReheatKW, ahuQty),
       };
     };
 
@@ -872,10 +996,10 @@ export default function SpecSheet({
       setSpec(newSpec);
     } else if (system.type === 'Chiller') {
       const plantTR = chillerPlantTR > 0 ? chillerPlantTR : totalRequiredTR;
-      const chiller = buildChiller(plantTR, isWC);
+      const chiller = buildChiller(plantTR, isWC, selectedChillerUnits);
       const specTypeName = isWC ? 'Chiller (Water-Cooled) + AHU/FCU' : 'Chiller (Air-Cooled) + AHU/FCU';
       const newSpec: FullSpec = { ...buildAHUUnitsOrSingle(specTypeName), chiller } as FullSpec;
-      if (isWC) newSpec.ct = buildCT(chiller.coolingCapTR, chiller.inputKW, project);
+      if (isWC) newSpec.ct = buildCT(chiller.coolingCapTR, chiller.inputKW, project, selectedCTUnits);
       if (systemNeedsHumidifier && humidifierCapacityKgHr > 0) {
         newSpec.humidifier = buildHumidifier(humidifierCapacityKgHr, humidType);
       }
@@ -883,7 +1007,7 @@ export default function SpecSheet({
     } else if (system.type === 'Package' || system.type === 'DuctableSplit') {
       const newSpec: FullSpec = {
         specType: system.type === 'Package' ? 'Package AC' : 'Ductable Split',
-        pkg: buildPackage(totalRequiredTR, totalDesignCFM),
+        pkg: buildPackage(totalRequiredTR, totalDesignCFM, selectedPackageUnit),
       };
       if (systemNeedsHumidifier && humidifierCapacityKgHr > 0) {
         newSpec.humidifier = buildHumidifier(humidifierCapacityKgHr, humidType);
@@ -903,7 +1027,7 @@ export default function SpecSheet({
       toast.error('Auto-fill failed: ' + String(err));
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [system.type, project, systemPsychro, totalRequiredTR, totalDesignCFM, isWC, systemNeedsHumidifier, humidifierCapacityKgHr, systemOACFM, ahuConfig, systemVentHeatingKW, systemReheatKW, chillerPlantTR, zoneUnits, spec.humidifier?.humidifierType, spec.humidifier?.type]);
+  }, [system.type, project, systemPsychro, totalRequiredTR, totalDesignCFM, isWC, systemNeedsHumidifier, humidifierCapacityKgHr, systemOACFM, ahuConfig, systemVentHeatingKW, systemReheatKW, chillerPlantTR, zoneUnits, selectedChillerUnits, selectedCTUnits, selectedPackageUnit, selectedAHUUnits, spec.humidifier?.humidifierType, spec.humidifier?.type]);
 
   const handleSave = async () => {
     setSaving(true);
@@ -1134,8 +1258,9 @@ export default function SpecSheet({
               </div>
 
               <Sec title="Cooling Capacity & Performance" color={sysColor}>
-                <SF label="Cooling Capacity" value={spec.chiller.coolingCapTR} onChange={v => upd('chiller', 'coolingCapTR', v)} unit="TR" />
-                <SF label="Cooling Capacity" value={spec.chiller.coolingCapKW} onChange={v => upd('chiller', 'coolingCapKW', v)} unit="kW" />
+                <SF label="Quantity (Working Units)" value={spec.chiller.quantity ?? 1} onChange={v => upd('chiller', 'quantity', v)} unit="nos" />
+                <SF label="Cooling Capacity (per unit)" value={spec.chiller.coolingCapTR} onChange={v => upd('chiller', 'coolingCapTR', v)} unit="TR" />
+                <SF label="Cooling Capacity (per unit)" value={spec.chiller.coolingCapKW} onChange={v => upd('chiller', 'coolingCapKW', v)} unit="kW" />
                 <SF label="Rated COP" value={spec.chiller.copRated} onChange={v => upd('chiller', 'copRated', v)} />
                 <SF label="Compressor Input (est.)" value={spec.chiller.inputKW} onChange={v => upd('chiller', 'inputKW', v)} unit="kW" />
                 <SF label="Refrigerant" value={spec.chiller.refrigerant} onChange={v => upd('chiller', 'refrigerant', v)} type="text" wide />
@@ -1182,8 +1307,9 @@ export default function SpecSheet({
               </div>
 
               <Sec title="Thermal Duty & Design Temperatures" color="blue">
-                <SF label="Nominal Thermal Duty" value={spec.ct.dutyTR} onChange={v => upd('ct', 'dutyTR', v)} unit="TR" />
-                <SF label="Thermal Duty" value={spec.ct.dutyKW} onChange={v => upd('ct', 'dutyKW', v)} unit="kW" />
+                <SF label="Quantity (Working Units)" value={spec.ct.quantity ?? 1} onChange={v => upd('ct', 'quantity', v)} unit="nos" />
+                <SF label="Nominal Thermal Duty (per unit)" value={spec.ct.dutyTR} onChange={v => upd('ct', 'dutyTR', v)} unit="TR" />
+                <SF label="Thermal Duty (per unit)" value={spec.ct.dutyKW} onChange={v => upd('ct', 'dutyKW', v)} unit="kW" />
                 <SF label="Hot Water Inlet Temp" value={spec.ct.hotWaterTempC} onChange={v => upd('ct', 'hotWaterTempC', v)} unit="°C" />
                 <SF label="Cold Water Outlet Temp" value={spec.ct.coldWaterTempC} onChange={v => upd('ct', 'coldWaterTempC', v)} unit="°C" />
                 <SF label="Design Wet-Bulb Temp (est.)" value={spec.ct.designWBTC} onChange={v => upd('ct', 'designWBTC', v)} unit="°C" />

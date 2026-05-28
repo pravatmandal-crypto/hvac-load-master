@@ -144,6 +144,7 @@ type DetailedMetrics = {
 // ─── Theme ───────────────────────────────────────────────────────────────────
 
 type Theme = {
+  eco:       boolean;
   ink:       [number,number,number];
   subInk:    [number,number,number];
   line:      [number,number,number];
@@ -154,6 +155,7 @@ type Theme = {
   total:     [number,number,number];
   grandBg:   [number,number,number];
   grandFg:   [number,number,number];
+  headFg:    [number,number,number];
   coverText: [number,number,number];
   adpBg:     [number,number,number];
   summerBg:  [number,number,number];
@@ -161,22 +163,29 @@ type Theme = {
   monsoonBg: [number,number,number];
 };
 
+// Eco mode: no fills, only borderlines. All *Bg / panel / accent fillColors
+// resolve to white so rect 'F' draws become invisible on white pages, leaving
+// only the table grid borders + dark text. headFg / grandFg / coverText flip
+// to dark so text remains legible on the now-white surfaces.
+const ECO_WHITE: [number,number,number] = [255, 255, 255];
 const makeTheme = (eco: boolean): Theme => ({
+  eco,
   ink:       [15,  35,  60],
   subInk:    [75,  90, 110],
-  line:      eco ? [185, 185, 185] : [190, 200, 215],
-  panel:     eco ? [248, 248, 248] : [240, 244, 250],
-  panelDark: eco ? [228, 228, 228] : [210, 220, 235],
-  accent:    eco ? [55,  55,  55]  : [15,  80, 160],
-  accentBg:  eco ? [238, 238, 238] : [230, 240, 255],
-  total:     eco ? [228, 228, 228] : [220, 235, 255],
-  grandBg:   eco ? [55,  55,  55]  : [15,  80, 160],
-  grandFg:   [255, 255, 255],
-  coverText: eco ? [200, 200, 200] : [200, 220, 255],
-  adpBg:     eco ? [242, 242, 242] : [255, 238, 210],
-  summerBg:  eco ? [252, 252, 252] : [255, 245, 230],
-  winterBg:  eco ? [252, 252, 252] : [230, 245, 255],
-  monsoonBg: eco ? [252, 252, 252] : [230, 255, 245],
+  line:      eco ? [120, 120, 120] : [190, 200, 215],
+  panel:     eco ? ECO_WHITE : [240, 244, 250],
+  panelDark: eco ? ECO_WHITE : [210, 220, 235],
+  accent:    eco ? ECO_WHITE : [15,  80, 160],
+  accentBg:  eco ? ECO_WHITE : [230, 240, 255],
+  total:     eco ? ECO_WHITE : [220, 235, 255],
+  grandBg:   eco ? ECO_WHITE : [15,  80, 160],
+  grandFg:   eco ? [15, 35, 60] : [255, 255, 255],
+  headFg:    eco ? [15, 35, 60] : [255, 255, 255],
+  coverText: eco ? [80,  80,  80] : [200, 220, 255],
+  adpBg:     eco ? ECO_WHITE : [255, 238, 210],
+  summerBg:  eco ? ECO_WHITE : [255, 245, 230],
+  winterBg:  eco ? ECO_WHITE : [230, 245, 255],
+  monsoonBg: eco ? ECO_WHITE : [230, 255, 245],
 });
 
 // Default (colour) theme — used by helper functions that don't receive a theme param
@@ -198,11 +207,17 @@ const dash = (v: number) => v > 0 ? n0(v) : '-';
 
 const drawHeader = (doc: jsPDF, project: any, pageNo: number, totalPages: number, C: Theme = DEFAULT_THEME) => {
   const w = doc.internal.pageSize.getWidth();
-  doc.setFillColor(...C.accent);
-  doc.rect(0, 0, w, 10, 'F');
+  if (C.eco) {
+    doc.setDrawColor(...C.line);
+    doc.setLineWidth(0.3);
+    doc.line(0, 10, w, 10);
+  } else {
+    doc.setFillColor(...C.accent);
+    doc.rect(0, 0, w, 10, 'F');
+  }
   doc.setFont('helvetica', 'bold');
   doc.setFontSize(7.5);
-  doc.setTextColor(255, 255, 255);
+  doc.setTextColor(...C.headFg);
   doc.text(String(project?.name || 'PROJECT').toUpperCase(), PAGE.left, 6.5);
   doc.setFont('helvetica', 'normal');
   doc.text('HVAC LOAD CALCULATION REPORT', w / 2, 6.5, { align: 'center' });
@@ -227,19 +242,31 @@ const drawFooter = (doc: jsPDF, C: Theme = DEFAULT_THEME) => {
 
 const sectionBanner = (doc: jsPDF, text: string, y: number, C: Theme = DEFAULT_THEME) => {
   const w = doc.internal.pageSize.getWidth();
-  doc.setFillColor(...C.accent);
-  doc.rect(PAGE.left, y - 4, w - PAGE.left - PAGE.right, 7, 'F');
+  if (C.eco) {
+    doc.setDrawColor(...C.line);
+    doc.setLineWidth(0.3);
+    doc.rect(PAGE.left, y - 4, w - PAGE.left - PAGE.right, 7, 'S');
+  } else {
+    doc.setFillColor(...C.accent);
+    doc.rect(PAGE.left, y - 4, w - PAGE.left - PAGE.right, 7, 'F');
+  }
   doc.setFont('helvetica', 'bold');
   doc.setFontSize(9.5);
-  doc.setTextColor(255, 255, 255);
+  doc.setTextColor(...C.headFg);
   doc.text(text, PAGE.left + 3, y + 0.8);
   return y + 7;
 };
 
 const subBanner = (doc: jsPDF, text: string, y: number, C: Theme = DEFAULT_THEME) => {
   const w = doc.internal.pageSize.getWidth();
-  doc.setFillColor(...C.panelDark);
-  doc.rect(PAGE.left, y - 3.5, w - PAGE.left - PAGE.right, 6.5, 'F');
+  if (C.eco) {
+    doc.setDrawColor(...C.line);
+    doc.setLineWidth(0.3);
+    doc.rect(PAGE.left, y - 3.5, w - PAGE.left - PAGE.right, 6.5, 'S');
+  } else {
+    doc.setFillColor(...C.panelDark);
+    doc.rect(PAGE.left, y - 3.5, w - PAGE.left - PAGE.right, 6.5, 'F');
+  }
   doc.setFont('helvetica', 'bold');
   doc.setFontSize(8.5);
   doc.setTextColor(...C.ink);
@@ -482,17 +509,50 @@ const computeZoneCoilDuty = (zone: any, flatRooms: any[]): { coilTR: number; des
   return foundAny ? { coilTR: trSum, designCFM: cfmSum } : null;
 };
 
-// Returns a per-system summary of the diversity factor for VRF and Chiller plants.
-// Example: "VRF System 1: 75%  |  Chiller Plant: 80%". Returns '—' when no system
-// has a non-unity diversity factor.
-const formatDiversitySummary = (systems: any[]): string => {
+// Returns a per-system summary of the EFFECTIVE diversity actually achieved by
+// the installed plant — installed working TR / sum of zone governing TR for
+// rooms feeding the plant. This is the truth-on-the-ground number; the design
+// DF the engineer typed during selection is intentionally not shown here.
+//   Example: "Chiller Plant: 89% (164.00 / 184.30 TR)"
+const formatDiversitySummary = (
+  systems: any[],
+  flatRooms: any[],
+  roomGovTR: Map<string, number>,
+): string => {
   const parts: string[] = [];
   for (const sys of systems) {
     const t = String(sys.type ?? '');
     if (t !== 'VRF' && t !== 'Chiller') continue;
-    const df = sys.diversityFactor;
-    if (df == null || df === 1) continue;
-    parts.push(`${sys.name ?? sys.id}: ${(df * 100).toFixed(0)}%`);
+
+    // Installed plant TR — working only for chillers (standby excluded); ODU effective TR for VRF
+    let installedTR = 0;
+    if (t === 'Chiller') {
+      const units: any[] = sys.chillerUnits?.length
+        ? sys.chillerUnits
+        : (sys.unitSelection ? [{ ...sys.unitSelection, quantity: sys.unitSelection.quantity ?? 1 }] : []);
+      for (const u of units) {
+        if (u.role === 'standby') continue;
+        const per = (u.actualTR != null && u.actualTR > 0) ? u.actualTR : (u.trCapacity ?? 0);
+        installedTR += per * (u.quantity ?? 1);
+      }
+    } else {
+      const odu = sys.oduSelection;
+      if (odu) installedTR = odu.effectiveTR ?? ((odu.trCapacity ?? 0) * (odu.modules ?? 1));
+    }
+
+    // Sum of zone governing TR for rooms tied to this system
+    let sumRoomTR = 0;
+    for (const r of flatRooms) {
+      if (r.systemId === sys.id || r.zoneId === sys.id || r.hvacSystemId === sys.id) {
+        sumRoomTR += roomGovTR.get(r.id) ?? 0;
+      }
+    }
+
+    const effDf = (sumRoomTR > 0 && installedTR > 0) ? (installedTR / sumRoomTR) : null;
+    if (effDf == null) continue;
+
+    const name = sys.name ?? sys.id;
+    parts.push(`${name}: ${(effDf * 100).toFixed(0)}% (${n2(installedTR)} / ${n2(sumRoomTR)} TR)`);
   }
   return parts.length > 0 ? parts.join('  |  ') : '—  (all systems at 100%)';
 };
@@ -1053,13 +1113,19 @@ export const generatePDFReport = (
 
   // ═══ COVER PAGE ═══════════════════════════════════════════════════════════
 
-  // Blue top band
-  doc.setFillColor(...C.accent);
-  doc.rect(0, 0, pageW, 52, 'F');
+  // Top band — filled in colour mode, thin separator line in eco mode
+  if (C.eco) {
+    doc.setDrawColor(...C.line);
+    doc.setLineWidth(0.5);
+    doc.line(PAGE.left, 52, pageW - PAGE.right, 52);
+  } else {
+    doc.setFillColor(...C.accent);
+    doc.rect(0, 0, pageW, 52, 'F');
+  }
 
   doc.setFont('helvetica', 'bold');
   doc.setFontSize(22);
-  doc.setTextColor(255, 255, 255);
+  doc.setTextColor(...C.headFg);
   doc.text('HVAC LOAD CALCULATION', PAGE.left, 22);
   doc.text('REPORT', PAGE.left, 32);
 
@@ -1198,7 +1264,25 @@ export const generatePDFReport = (
     ? `${n2(totalIDU.tr)} TR  ·  ${n0(totalIDU.cfm)} CFM`
     : '—  (no equipment selected)';
   const totalPlantStr = computeTotalInstalledPlant(activeEquipSystems);
-  const diversityStr = formatDiversitySummary(activeEquipSystems);
+
+  // Per-room peak governing TR (max across cooling seasons) — drives effective diversity calc
+  const roomGovTR = new Map<string, number>();
+  const coolingSeasonsForRoom = seasons.filter(s => s.key !== 'winter');
+  entities.forEach((entity) => {
+    entity.rooms.forEach((room) => {
+      let maxGov = 0;
+      for (const season of coolingSeasonsForRoom) {
+        const dc = resolveEntityDC(entity, season, project);
+        const m = computeDetailed(room, envelopeElements[room.id] || [], dc, project);
+        const lt = m.grandTotal / 12000;
+        const ct = m.designCfm / 400;
+        const gov = Math.max(lt, ct);
+        if (gov > maxGov) maxGov = gov;
+      }
+      roomGovTR.set(room.id, maxGov);
+    });
+  });
+  const diversityStr = formatDiversitySummary(activeEquipSystems, flatRoomDocs, roomGovTR);
   autoTable(doc, {
     startY: y,
     body: [
@@ -1454,7 +1538,7 @@ export const generatePDFReport = (
         body: fitBody,
         theme: 'grid',
         styles:     { fontSize: 7.5, cellPadding: 2, textColor: C.ink },
-        headStyles: { fillColor: C.accent, textColor: [255, 255, 255] as [number,number,number], fontStyle: 'bold', fontSize: 7.5 },
+        headStyles: { fillColor: C.accent, textColor: C.headFg, fontStyle: 'bold', fontSize: 7.5 },
         columnStyles: {
           0: { fontStyle: 'bold', cellWidth: 48 },
           1: { halign: 'right' as const, cellWidth: 24, fontStyle: 'bold' },
@@ -2159,7 +2243,7 @@ export const generatePDFReport = (
         ],
         theme: 'grid',
         styles: { fontSize: 7.5, cellPadding: 2, textColor: C.ink },
-        headStyles: { fillColor: [30, 90, 180] as [number,number,number], textColor: [255,255,255] as [number,number,number], fontStyle: 'bold', fontSize: 7.5 },
+        headStyles: { fillColor: C.eco ? C.panel : [30, 90, 180] as [number,number,number], textColor: C.headFg, fontStyle: 'bold', fontSize: 7.5 },
         columnStyles: {
           0: { fontStyle: 'bold', fillColor: C.panel, cellWidth: 85 },
           1: { halign: 'right' as const, cellWidth: 38 },
@@ -2170,13 +2254,13 @@ export const generatePDFReport = (
             const lastRow = wm.includeHumidifier && wm.humNeeded ? 5 : 4;
             const pickupRow = lastRow - 1;
             if (data.row.index === lastRow) {
-              data.cell.styles.fillColor = [30, 90, 180] as [number,number,number];
-              data.cell.styles.textColor = [255,255,255] as [number,number,number];
+              data.cell.styles.fillColor = C.eco ? C.panel : [30, 90, 180] as [number,number,number];
+              data.cell.styles.textColor = C.eco ? C.ink : [255,255,255] as [number,number,number];
               data.cell.styles.fontStyle = 'bold';
             } else if (data.row.index === pickupRow) {
-              data.cell.styles.fillColor = [255, 248, 220] as [number,number,number];
+              data.cell.styles.fillColor = C.eco ? C.panel : [255, 248, 220] as [number,number,number];
             } else if (wm.includeHumidifier && wm.humNeeded && data.row.index === 2) {
-              data.cell.styles.fillColor = [225, 245, 255] as [number,number,number];
+              data.cell.styles.fillColor = C.eco ? C.panel : [225, 245, 255] as [number,number,number];
             }
           }
         },
@@ -2452,8 +2536,9 @@ const renderEquipmentScheduleBody = (
       }
       const ctUnits: any[] = sys.ctUnits?.length ? sys.ctUnits : (sys.ctSelection ? [{ ...sys.ctSelection, quantity: sys.ctSelection.quantity ?? 1 }] : []);
       ctUnits.forEach((ct: any) => {
+        const ctRoleLabel = ct.role === 'standby' ? 'Standby' : (ct.role === 'working' ? 'Working (Duty)' : '—');
         eqBody.push([sysName, 'Cooling Tower', String(ct.brand || sysBrand),
-          ms(ct), '—', n2(ct.trCapacity ?? 0), '—', String(ct.quantity ?? 1)]);
+          ms(ct), ctRoleLabel, n2(ct.trCapacity ?? 0), '—', String(ct.quantity ?? 1)]);
       });
     }
     if (sysType === 'AHU' && sys.unitSelection) {
@@ -2464,7 +2549,7 @@ const renderEquipmentScheduleBody = (
     if (sysType === 'DOAS' && sys.unitSelection) {
       const u = sys.unitSelection;
       const oaNote = String(u.subType || 'ERV/HRV/FAHU');
-      eqBody.push([sysName, 'DOAS Unit', String(u.brand || sysBrand),
+      eqBody.push([sysName, 'TFA/DOAS Unit', String(u.brand || sysBrand),
         ms(u),
         oaNote, n2(u.trCapacity ?? 0), n0(u.cfmRated ?? 0), String(u.quantity ?? 1)]);
       const linked: string[] = (sys as any).doasLinkedSystemIds ?? [];
@@ -2479,55 +2564,74 @@ const renderEquipmentScheduleBody = (
         ms(u), String(u.subType || '—'), n2(u.trCapacity ?? 0), n0(u.cfmRated ?? 0), String(u.quantity ?? 1)]);
     }
 
-    // Zone-level IDUs
-    let chillerCoilDutyShown = false;
+    // Zone-level IDUs / AHUs / FCUs — show the AHU's catalog-rated TR and CFM
+    // (as selected from the Global Equipment Library / custom catalog), matching
+    // the in-app Summary's Equipment Schedule.
     dedupedZones.forEach((zone: any) => {
       const zoneName = String(zone.name || `Zone ${zone.id}`);
       const unitSels = (zone.unitSelections ?? []) as any[];
-      // For chiller AHU/FCU rows: prefer Coil Duty (thermal load) and Design CFM
-      // (dehumidified airflow) from room calcs over the catalog rating of the picked
-      // model. Custom AHUs are built to the project's duty, not catalog-rated TR.
-      const zoneDuty = sysType === 'Chiller' ? computeZoneCoilDuty(zone, flatRooms) : null;
-      if (zoneDuty) chillerCoilDutyShown = true;
       if (unitSels.length > 0) {
-        // Multi-different-model zone: if we have a zone duty, split it equally across
-        // selected models (we don't know the manual split). Single-model multi-qty uses
-        // full zone duty divided by qty per unit.
-        const totalQty = unitSels.reduce((s, u) => s + (u.quantity ?? 1), 0);
         unitSels.forEach((u: any) => {
           const lbl = sysType === 'Chiller' ? 'FCU' : sysType === 'AHU' ? 'AHU-DX' : 'IDU';
           const qty = u.quantity ?? 1;
-          if (zoneDuty && totalQty > 0) {
-            const trPer = zoneDuty.coilTR * (qty / totalQty) / qty;
-            const cfmPer = zoneDuty.designCFM * (qty / totalQty) / qty;
-            eqBody.push([zoneName, lbl, String(u.brand || sysBrand), ms(u), String(u.subType || '—'), n2(trPer), n0(cfmPer), String(qty)]);
-          } else {
-            eqBody.push([zoneName, lbl, String(u.brand || sysBrand), ms(u), String(u.subType || '—'), n2(u.trCapacity ?? 0), n0(u.cfmRated ?? 0), String(qty)]);
-          }
+          eqBody.push([zoneName, lbl, String(u.brand || sysBrand), ms(u), String(u.subType || '—'), n2(u.trCapacity ?? 0), n0(u.cfmRated ?? 0), String(qty)]);
         });
       } else if (zone.selection) {
         const sel = zone.selection;
         const lbl = sysType === 'Chiller' ? 'FCU / AHU' : sysType === 'AHU' ? 'AHU-DX' : 'IDU';
         const qty = sel.quantity ?? 1;
-        if (zoneDuty && qty > 0) {
-          // Split zone duty across qty same-spec AHUs
-          const trPer = zoneDuty.coilTR / qty;
-          const cfmPer = zoneDuty.designCFM / qty;
-          eqBody.push([zoneName, lbl, String(sel.brand || sysBrand), ms(sel), String(sel.subType || '—'), n2(trPer), n0(cfmPer), String(qty)]);
-        } else {
-          eqBody.push([zoneName, lbl, String(sel.brand || sysBrand), ms(sel), String(sel.subType || '—'), n2(sel.trCapacity ?? 0), n0(sel.cfmRated ?? 0), String(qty)]);
-        }
+        eqBody.push([zoneName, lbl, String(sel.brand || sysBrand), ms(sel), String(sel.subType || '—'), n2(sel.trCapacity ?? 0), n0(sel.cfmRated ?? 0), String(qty)]);
         // Multi-AHU same-spec zone: annotate so engineers reading the BOM know it's
         // not a typo and that each AHU has its own duct.
         if (qty > 1) {
-          const totalTR  = zoneDuty ? zoneDuty.coilTR    : (sel.trCapacity ?? 0) * qty;
-          const totalCFM = zoneDuty ? zoneDuty.designCFM : (sel.cfmRated ?? 0) * qty;
+          const totalTR  = (sel.trCapacity ?? 0) * qty;
+          const totalCFM = (sel.cfmRated ?? 0) * qty;
           eqBody.push([{
             content: `  ↳ Multi-AHU zone — ${qty} × same-spec, each with own dedicated duct. Total: ${n2(totalTR)} TR · ${n0(totalCFM)} CFM`,
             colSpan: 8,
             styles: { fontStyle: 'italic' as const, fontSize: 6.5, textColor: C.subInk, fillColor: C.panel as [number,number,number] },
           }]);
         }
+      }
+    });
+
+    // FAHU accessories (humidifier + electric heater) — mirrors the in-app
+    // Summary's Equipment Schedule so the PDF lists Rapidcool / steam / electric
+    // humidifiers and reheat coils as discrete BOM lines with brand + model.
+    // Capacity (kg/hr for humidifier, kW for heater) goes in the rate-style column
+    // so engineers scanning the BOM see the numeric value, not just dashes.
+    dedupedZones.forEach((zone: any) => {
+      const fahu: any = zone.fahu ?? {};
+      const zoneName = String(zone.name || `Zone ${zone.id}`);
+      const ahuQty = Number(zone.selection?.quantity ?? 1) || 1;
+      if (fahu.hasElectricHeater && (fahu.electricHeaterKW ?? 0) > 0) {
+        eqBody.push([
+          zoneName,
+          'Electric Heater',
+          'Electric',
+          'Reheat Coil',
+          'Reheat',
+          '—',
+          `${fahu.electricHeaterKW} kW`,
+          String(ahuQty),
+        ]);
+      }
+      if (fahu.hasHumidifier && (fahu.humidifierKgHr ?? 0) > 0) {
+        const hmModel = String(fahu.humidifierModel ?? '');
+        const humBrand = hmModel ? hmModel.split(' ')[0] : 'Steam/Electric';
+        const humModelStr = hmModel
+          ? hmModel.split(' ').slice(1).join(' ')
+          : 'Humidifier';
+        eqBody.push([
+          zoneName,
+          'Humidifier',
+          humBrand,
+          humModelStr,
+          String(fahu.humidifierSubType || 'Humidification'),
+          '—',
+          `${fahu.humidifierKgHr} kg/hr`,
+          String(ahuQty),
+        ]);
       }
     });
 
@@ -2554,17 +2658,6 @@ const renderEquipmentScheduleBody = (
         (idus as any[]).forEach((u: any) => eqBody.push([String(rId), 'Split IDU', String(u.brand || sysBrand), ms(u), String(u.subType || '—'), n2(u.trCapacity ?? 0), n0(u.cfmRated ?? 0), String(u.quantity ?? 1)]));
       });
     }
-    // Chiller AHU/FCU column-meaning note. When the row values come from room calcs
-    // (coil duty + design CFM), the 400 CFM/TR rule does NOT apply — that rule is a
-    // packaged-DX convention. Spell it out so OEMs don't build an oversized coil to
-    // hit a nominal ratio.
-    if (sysType === 'Chiller' && chillerCoilDutyShown) {
-      eqBody.push([{
-        content: '  AHU / FCU rows: TR = Coil Duty (project thermal load, not catalog rating)  ·  CFM = Design dehumidified airflow. The 400 CFM/TR rule does not apply to chiller-fed AHUs.',
-        colSpan: 8,
-        styles: { fontStyle: 'italic' as const, fontSize: 7, textColor: C.subInk }
-      }]);
-    }
     // Skip systems with no equipment — avoids ghost/placeholder system blocks in the PDF
     if (eqBody.length === 0) continue;
 
@@ -2581,7 +2674,7 @@ const renderEquipmentScheduleBody = (
     autoTable(doc, {
       startY: y, head: [eqHead], body: eqBody, theme: 'grid',
       styles:     { fontSize: 7.5, cellPadding: 2, textColor: C.ink },
-      headStyles: { fillColor: C.accent, textColor: [255, 255, 255] as [number, number, number], fontStyle: 'bold', fontSize: 7 },
+      headStyles: { fillColor: C.accent, textColor: C.headFg, fontStyle: 'bold', fontSize: 7 },
       columnStyles: {
         0: { cellWidth: 30, fontStyle: 'bold' }, 1: { cellWidth: 24 }, 2: { cellWidth: 18 },
         3: { cellWidth: 44 }, 4: { cellWidth: 22 },
@@ -2689,8 +2782,15 @@ export const generateEquipmentSchedulePDF = (
   const pageW = doc.internal.pageSize.getWidth();
 
   // ── Cover strip ──────────────────────────────────────────────────────────
-  doc.setFillColor(...C.accent);
-  doc.rect(0, 0, pageW, 42, 'F');
+  if (C.eco) {
+    // Eco: just a bottom separator line, no filled band.
+    doc.setDrawColor(...C.line);
+    doc.setLineWidth(0.5);
+    doc.line(PAGE.left, 42, pageW - PAGE.right, 42);
+  } else {
+    doc.setFillColor(...C.accent);
+    doc.rect(0, 0, pageW, 42, 'F');
+  }
   doc.setFont('helvetica', 'bold');
   doc.setFontSize(20);
   doc.setTextColor(...C.grandFg);
@@ -2783,8 +2883,14 @@ export const generateEngineeringReviewPDF = (
   const pageW = doc.internal.pageSize.getWidth();
 
   // ── Cover strip ──────────────────────────────────────────────────────────
-  doc.setFillColor(...C.accent);
-  doc.rect(0, 0, pageW, 42, 'F');
+  if (C.eco) {
+    doc.setDrawColor(...C.line);
+    doc.setLineWidth(0.5);
+    doc.line(PAGE.left, 42, pageW - PAGE.right, 42);
+  } else {
+    doc.setFillColor(...C.accent);
+    doc.rect(0, 0, pageW, 42, 'F');
+  }
   doc.setFont('helvetica', 'bold');
   doc.setFontSize(20);
   doc.setTextColor(...C.grandFg);

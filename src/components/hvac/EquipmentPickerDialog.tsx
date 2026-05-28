@@ -276,8 +276,10 @@ export default function EquipmentPickerDialog({
             </div>
           </DialogTitle>
 
-          {/* Sizing requirements — chiller AHUs use Coil Duty + Design CFM as two
-              independent properties; packaged / VRF use the 400 CFM/TR governing-TR rule. */}
+          {/* Sizing requirements — Coil Duty (TR) and Design CFM are independent
+              properties. Equipment must satisfy both: rated TR ≥ requiredTR AND
+              rated CFM ≥ designCFM. (2026-05-20: 400 CFM/TR governance dropped;
+              CFM/TR is now a sanity ratio only, not a sizing input.) */}
           {isChillerAHU ? (
             (requiredTR && requiredTR > 0) || (designCFM && designCFM > 0) ? (
               <div className="mt-2 flex flex-wrap items-start gap-3 p-2.5 rounded-lg bg-indigo-50 border border-indigo-200 text-xs">
@@ -287,13 +289,16 @@ export default function EquipmentPickerDialog({
                     {loadTR != null && loadTR > 0 && (
                       <span className="text-slate-700">Coil Duty: <strong className="text-indigo-800">{loadTR.toFixed(2)} TR</strong></span>
                     )}
+                    {loadTR != null && loadTR > 0 && (
+                      <span className="text-slate-700">Required (×1.10): <strong className="text-orange-700">{(loadTR * 1.10).toFixed(2)} TR</strong></span>
+                    )}
                     {designCFM != null && designCFM > 0 && (
                       <span className="text-slate-700">Design CFM: <strong className="text-indigo-800">{Math.round(designCFM).toLocaleString()}</strong></span>
                     )}
                   </div>
                   <span className="text-[10.5px] text-slate-500 italic leading-snug">
                     Chiller AHU — Coil Duty (thermal load) and Design CFM (dehumidified airflow) are independent.
-                    The 400 CFM/TR rule does not apply. OEM builds the coil to the duty.
+                    OEM builds the coil to the duty; selected catalog model should meet the Required value (10% selection margin).
                   </span>
                 </div>
               </div>
@@ -303,10 +308,7 @@ export default function EquipmentPickerDialog({
               {requiredTR && requiredTR > 0 && (
                 <div className="mt-2 flex flex-wrap gap-3 p-2.5 rounded-lg bg-violet-50 border border-violet-200 text-xs">
                   <Info className="w-3.5 h-3.5 text-violet-500 mt-0.5 shrink-0" />
-                  <span className="text-slate-600">Load: <strong>{loadTR?.toFixed(2)} TR</strong></span>
-                  <span className="text-slate-600">CFM: <strong>{cfmTR?.toFixed(2)} TR</strong></span>
-                  <span className="font-bold text-violet-800">Governing: {governingTR?.toFixed(2)} TR</span>
-                  <span className="font-bold text-orange-700">Required (×1.10): {requiredTR.toFixed(2)} TR</span>
+                  <span className="font-bold text-orange-700">Required (with safety): {requiredTR.toFixed(2)} TR</span>
                   <span className="text-slate-400 italic">Fits range: {requiredTR.toFixed(2)}–{(requiredTR * 1.3).toFixed(2)} TR</span>
                 </div>
               )}

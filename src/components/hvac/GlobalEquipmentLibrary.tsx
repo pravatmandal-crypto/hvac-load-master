@@ -40,7 +40,7 @@ type FormState = Partial<EquipmentModel>;
 const EQUIPMENT_TYPES = [
   'VRF-ODU', 'VRF-IDU', 'Chiller', 'ChillerIDU', 'Package',
   'DuctableSplit', 'AHU', 'FCU', 'Humidifier', 'Dehumidifier',
-  'CoolingTower', 'Boiler', 'Split', 'Pump', 'VRF',
+  'CoolingTower', 'Boiler', 'Split', 'Pump', 'VRF', 'DOAS',
 ];
 
 const PAGE_SIZE = 50;
@@ -154,6 +154,14 @@ function EquipmentForm({
   const showPerf  = PERF_TYPES.has(t);
   const subTypeOpts = SUBTYPE_BY_TYPE[t] ?? [];
 
+  // When editing an item whose stored `type` isn't in EQUIPMENT_TYPES — e.g.
+  // legacy data, items from the picker's free-text Type field (`Fan Coil`,
+  // `Cassette`), or anything saved before DOAS was added — prepend the value
+  // as its own button so the existing selection stays visible and highlighted.
+  const displayTypes = (t && !EQUIPMENT_TYPES.includes(t))
+    ? [t, ...EQUIPMENT_TYPES]
+    : EQUIPMENT_TYPES;
+
   function F({ label, required, hint, children }: { label: string; required?: boolean; hint?: string; children: React.ReactNode }) {
     return (
       <div className="flex flex-col gap-1.5">
@@ -188,7 +196,7 @@ function EquipmentForm({
           <span className="text-red-500 text-xs ml-0.5">*</span>
         </div>
         <div className="flex flex-wrap gap-2">
-          {EQUIPMENT_TYPES.map(tp => (
+          {displayTypes.map(tp => (
             <button
               key={tp}
               type="button"

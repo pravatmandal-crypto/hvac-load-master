@@ -202,7 +202,7 @@ export default function Dashboard({ currentUser, onProjectOpen, onPageChange, us
             ].map(s => (
               <div key={s.label} className={`rounded-xl ${s.color} backdrop-blur-sm border border-white/10 px-4 py-2.5 text-center min-w-[90px]`}>
                 <p className="text-xl font-bold text-white">{s.value}</p>
-                <p className="text-[10px] text-slate-300 mt-0.5">{s.label}</p>
+                <p className="text-xs text-slate-300 mt-0.5">{s.label}</p>
               </div>
             ))}
           </div>
@@ -240,7 +240,7 @@ export default function Dashboard({ currentUser, onProjectOpen, onPageChange, us
             {recent.map((project) => (
               <div
                 key={project.id}
-                className="group rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800/60 p-4 hover:shadow-md hover:border-teal-300 dark:hover:border-teal-700 transition-all cursor-pointer"
+                className="group rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800/60 p-4 hover:shadow-md hover:border-teal-300 dark:hover:border-teal-700 transition-all cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal-500 focus-visible:ring-offset-2"
                 onClick={() => onProjectOpen(project)}
               >
                 <div className="flex items-start justify-between gap-2">
@@ -254,11 +254,11 @@ export default function Dashboard({ currentUser, onProjectOpen, onPageChange, us
                       </p>
                     )}
                   </div>
-                  <span className={`text-[10px] font-bold rounded px-1.5 py-0.5 flex-shrink-0 ${systemTypeBadge(project.systemType)}`}>
+                  <span className={`text-xs font-bold rounded px-1.5 py-0.5 flex-shrink-0 ${systemTypeBadge(project.systemType)}`}>
                     {project.systemType}
                   </span>
                 </div>
-                <div className="mt-3 grid grid-cols-2 gap-1.5 text-[10px]">
+                <div className="mt-3 grid grid-cols-2 gap-1.5 text-xs">
                   <div className="rounded bg-orange-50 dark:bg-orange-900/20 border border-orange-100 dark:border-orange-800/40 px-2 py-1">
                     <span className="text-orange-500 font-medium">Summer</span>
                     <span className="text-slate-600 dark:text-slate-300 ml-1">{project.summerDesignTemp}°F / {project.summerDesignHumidity}%</span>
@@ -317,11 +317,11 @@ export default function Dashboard({ currentUser, onProjectOpen, onPageChange, us
               key={tool.page}
               type="button"
               onClick={() => onPageChange?.(tool.page)}
-              className={`rounded-xl border p-4 text-left hover:shadow-md hover:-translate-y-0.5 transition-all group ${tool.color}`}
+              className={`rounded-xl border p-4 text-left hover:shadow-md hover:-translate-y-0.5 transition-all group focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal-500 focus-visible:ring-offset-2 ${tool.color}`}
             >
               <tool.icon className="h-5 w-5 mb-2.5 opacity-80" />
               <p className="font-semibold text-[13px] leading-tight">{tool.label}</p>
-              <p className="text-[11px] mt-1 opacity-65 leading-tight">{tool.desc}</p>
+              <p className="text-xs mt-1 opacity-70 leading-tight">{tool.desc}</p>
             </button>
           ))}
         </div>

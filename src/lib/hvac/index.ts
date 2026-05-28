@@ -16,6 +16,7 @@ export {
   type CoilParameters,
   type VentilationLoadResult,
   type HeatingLoadResult,
+  type TFALoadResult,
   type DuctSizingResult,
   type PipeSizingResult,
   type MoistureResult,
@@ -54,7 +55,7 @@ export {
 export { calculateSolarGain } from './solar';
 
 // Ventilation and heating
-export { calculateVentilationLoad, calculateHeatingLoad } from './ventilation';
+export { calculateVentilationLoad, calculateHeatingLoad, calculateTFALoad } from './ventilation';
 
 // Psychrometric properties and coil parameters
 export { calculatePsychrometrics, calculateCoilParameters } from './psychrometrics';

@@ -235,13 +235,15 @@ function buildEquipmentLines(equipSystems: any[], allRooms: Record<string, any[]
 
     // Chiller units
     for (const o of (sys.chillerUnits ?? [])) {
-      lines.push({ system: sysName, zone: 'Plant', room: '—', role: 'Chiller', brand: safeStr(o.brand), model: safeStr(o.modelId), tr: asNum(o.trCapacity), cfm: 0, qty: asNum(o.quantity, 1), totalTR: asNum(o.trCapacity) * asNum(o.quantity, 1), totalCFM: 0, notes: '' });
+      const roleNote = o.role === 'standby' ? 'Standby' : (o.role === 'working' ? 'Working (Duty)' : '');
+      lines.push({ system: sysName, zone: 'Plant', room: '—', role: 'Chiller', brand: safeStr(o.brand), model: safeStr(o.modelId), tr: asNum(o.trCapacity), cfm: 0, qty: asNum(o.quantity, 1), totalTR: asNum(o.trCapacity) * asNum(o.quantity, 1), totalCFM: 0, notes: roleNote });
     }
 
-    // Cooling tower
-    if (sys.ctSelection) {
-      const o = sys.ctSelection;
-      lines.push({ system: sysName, zone: 'Plant', room: '—', role: 'Cooling Tower', brand: safeStr(o.brand), model: safeStr(o.modelId), tr: asNum(o.trCapacity), cfm: asNum(o.cfmRated), qty: asNum(o.quantity, 1), totalTR: asNum(o.trCapacity) * asNum(o.quantity, 1), totalCFM: asNum(o.cfmRated) * asNum(o.quantity, 1), notes: '' });
+    // Cooling tower — new ctUnits[] array supersedes legacy ctSelection
+    const ctList = ((sys as any).ctUnits?.length ? (sys as any).ctUnits : (sys.ctSelection ? [sys.ctSelection] : []));
+    for (const o of ctList) {
+      const roleNote = o.role === 'standby' ? 'Standby' : (o.role === 'working' ? 'Working (Duty)' : '');
+      lines.push({ system: sysName, zone: 'Plant', room: '—', role: 'Cooling Tower', brand: safeStr(o.brand), model: safeStr(o.modelId), tr: asNum(o.trCapacity), cfm: asNum(o.cfmRated), qty: asNum(o.quantity, 1), totalTR: asNum(o.trCapacity) * asNum(o.quantity, 1), totalCFM: asNum(o.cfmRated) * asNum(o.quantity, 1), notes: roleNote });
     }
 
     // AHU DX condensing units
@@ -440,8 +442,10 @@ function toRoomRecords(
       const mon = project?.includeMonsoon ? calcSeason(project, zos, room, els, 'monsoon') : undefined;
       const win = calcWinter(project, zos, room, els);
 
-      const sumGovTR = Math.max(sum.totalTR, sum.designSupplyCFM / 400);
-      const monGovTR = mon ? Math.max(mon.totalTR, mon.designSupplyCFM / 400) : 0;
+      // Plant TR is load-only — CFM/TR is a sanity ratio, not a sizing input.
+      // (Engine decision: 2026-05-20.)
+      const sumGovTR = sum.totalTR;
+      const monGovTR = mon ? mon.totalTR : 0;
       const govTR    = Math.max(sumGovTR, monGovTR);
 
       records.push({ room, zoneId: groupId, zoneName, systemName, sheetName, elements: els, zoneOrSystem: zos, summer: sum, monsoon: mon, winter: win, governingTR: govTR });
@@ -555,17 +559,20 @@ function buildCoverSheet(project: any, records: RoomRecord[], equipSystems: any[
     totWin     += rec.winter.total;
     totArea    += rec.summer.area;
   }
-  const sumGovTR = Math.max(totSumBTUH / 12000, totSumCFM / 400);
-  const monGovTR = project?.includeMonsoon ? Math.max(totMonBTUH / 12000, totMonCFM / 400) : 0;
+  const sumGovTR = totSumBTUH / 12000;
+  const monGovTR = project?.includeMonsoon ? totMonBTUH / 12000 : 0;
   const govTR    = Math.max(sumGovTR, monGovTR);
+  const govCFM   = Math.max(totSumCFM, totMonCFM);
+  const cfmPerTR = govTR > 0 ? govCFM / govTR : 0;
 
   const loadRows: [string, any, string, string][] = [
     ['Total Conditioned Area',     r0(totArea),              'Sq.Ft',  ''],
     ['Total No. of Spaces / Rooms', records.length,          'Nos.',   ''],
-    ['Summer Sensible Load',        r0(totSumBTUH / 12000),  'TR',     'Load TR = Total BTUh ÷ 12,000'],
+    ['Summer Cooling Load',         r0(totSumBTUH / 12000),  'TR',     'Load TR = Total BTUh ÷ 12,000'],
     ['Summer Design Airflow',       r0(totSumCFM),            'CFM',   ''],
-    ...(project?.includeMonsoon ? [['Monsoon Sensible Load', r0(totMonBTUH / 12000), 'TR', ''] as [string, any, string, string]] : []),
-    ['Governing Cooling Load',      r2(govTR),                'TR',    'MAX (Load TR, Design CFM ÷ 400) — Design Basis'],
+    ...(project?.includeMonsoon ? [['Monsoon Cooling Load', r0(totMonBTUH / 12000), 'TR', ''] as [string, any, string, string]] : []),
+    ['Plant Cooling Capacity',      r2(govTR),                'TR',    'Coil load basis — MAX(Summer, Monsoon)'],
+    ['Design Airflow (Plant)',      r0(govCFM),               'CFM',   `Sanity: ${r0(cfmPerTR)} CFM/TR (typical 350–450)`],
     ['Total Winter Heating Load',   r0(totWin),               'BTU/h', ''],
   ];
   for (const [k, v, u, rem] of loadRows) {
@@ -784,7 +791,7 @@ function buildZoneSummarySheet(project: any, records: RoomRecord[], equipSystems
   putV(ws, row, 1, `ZONE LOAD SUMMARY — ${safeStr(project?.name, 'PROJECT').toUpperCase()}`, S.titleSm);
   row++;
   addMerge(ws, row, 1, row, COLS);
-  putV(ws, row, 1, `Date: ${fmtDate()}  |  Governing TR = MAX (Total BTUh ÷ 12,000 ; Total CFM ÷ 400)`, mkS({ sz: 9, italic: true }, CLR.sectionBg));
+  putV(ws, row, 1, `Date: ${fmtDate()}  |  Plant Cooling Capacity (TR) = Total BTU/h ÷ 12,000  ·  Design Airflow (CFM) is sized independently`, mkS({ sz: 9, italic: true }, CLR.sectionBg));
   row += 2;
 
   // Headers
@@ -1038,7 +1045,7 @@ function buildSummarySheet(project: any, refs: RoomSheetRefs[]): XLSX.WorkSheet 
   putV(ws, row, 1, `HEAT LOAD SUMMARY — ${safeStr(project?.name, 'PROJECT').toUpperCase()}`, S.titleSm);
   row++;
   addMerge(ws, row, 1, row, COLS);
-  putV(ws, row, 1, `Date: ${fmtDate()}  |  Use the System / Zone / Floor filters to group rooms. Governing TR = MAX (Load TR, CFM ÷ 400).`, mkS({ sz: 9, italic: true }, CLR.sectionBg));
+  putV(ws, row, 1, `Date: ${fmtDate()}  |  Use the System / Zone / Floor filters to group rooms. Plant TR = coil load only; design CFM is sized separately.`, mkS({ sz: 9, italic: true }, CLR.sectionBg));
   row += 2;
 
   const hdrRow = row;
@@ -1338,7 +1345,7 @@ function buildRoomSheet(
 
   // Governing TR (key result — typed as value, not formula, to guarantee correctness)
   const govTRcell = rc(row, 2);
-  putV(ws, row, 1, 'Governing TR  [MAX(Load TR, CFM ÷ 400)]', S.label);
+  putV(ws, row, 1, 'Plant Cooling Capacity  [coil load TR]', S.label);
   putV(ws, row, 2, r2(record.governingTR), S.total);
   putV(ws, row, 3, 'TR', S.total);
   addMerge(ws, row, 4, row, COLS);

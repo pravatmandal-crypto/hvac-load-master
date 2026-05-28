@@ -360,12 +360,11 @@ function useRoomCalc(room: any, elements: any[], designConditions: DesignConditi
     // dehumidifiedCFM (max with latent) is kept for diagnostic display only.
     const designCFM = Math.max(coil.minAdpSensibleCFM, totalSupplyCFM);
     const achGovernsAirflow = coil.minAdpSensibleCFM < totalSupplyCFM;
-    // cfmTR enforces the 400 CFM/TR checkpoint: governingTR must cover designCFM at 400 CFM/TR.
-    // designCFM already uses minAdpSensibleCFM (fixed system ADP) as its base — so dividing by 400
-    // ensures both the psychrometric ADP constraint AND the ACPH air-distribution requirement are met.
+    // cfmTR is a SANITY RATIO only (display + warning). It does NOT govern plant
+    // sizing — Plant TR = grand-total coil load only. (Decision: 2026-05-20.)
     const cfmTR = designCFM / 400;
-    const governingTR = Math.max(grandTotalTR, cfmTR);
-    
+    const governingTR = grandTotalTR;
+
     // Apply overall safety factor to final TR
     const overallSafetyFactor = Number(room.overallSafetyPercent ?? 3) / 100;
     const requiredTR = governingTR * (1 + overallSafetyFactor);
@@ -455,7 +454,7 @@ function getMonsoonDesignConditions(project?: any, base?: DesignConditions): Des
 function Field({ label, children }: { label: string; children: React.ReactNode }) {
   return (
     <div>
-      <p className="text-[10px] font-semibold text-gray-500 dark:text-slate-400 uppercase tracking-wide mb-1">{label}</p>
+      <p className="text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wide mb-1">{label}</p>
       {children}
     </div>
   );
@@ -706,9 +705,11 @@ function RoomDetail({
   const cfmGoverningSeason = hasMonsoon && monsoonCalc.cfmTR > c.cfmTR ? 'Monsoon' : 'Summer';
   const loadGoverningTR = hasMonsoon ? Math.max(c.grandTotalTR, monsoonCalc.grandTotalTR) : c.grandTotalTR;
   const cfmGoverningTR = hasMonsoon ? Math.max(c.cfmTR, monsoonCalc.cfmTR) : c.cfmTR;
-  const overallGoverningTR = Math.max(loadGoverningTR, cfmGoverningTR);
-  const governingMetric = overallGoverningTR === cfmGoverningTR ? 'CFM' : 'Load';
-  const governingSeason = governingMetric === 'CFM' ? cfmGoverningSeason : loadGoverningSeason;
+  // Plant TR is load-only (2026-05-20). CFM-governor is retained only as a
+  // sanity check, not as a sizing input.
+  const overallGoverningTR = loadGoverningTR;
+  const governingMetric = 'Load' as const;
+  const governingSeason = loadGoverningSeason;
   const equipmentDesignCFM = hasMonsoon ? Math.max(c.designCFM, monsoonCalc.designCFM) : c.designCFM;
   const equipmentBasis = {
     loadGoverningSeason,
@@ -1065,22 +1066,17 @@ function RoomDetail({
               <TableCell colSpan={4} className="text-[10px] py-1 font-bold text-gray-300 uppercase tracking-widest pl-3">Equipment Sizing</TableCell>
             </TableRow>
             <TableRow>
-              <TableCell className="text-xs py-1 pl-8 text-gray-600">Load TR  (Grand Total ÷ 12,000)</TableCell>
-              <TableCell className="text-xs py-1 text-right text-gray-400" colSpan={2}>—</TableCell>
-              <TableCell className="text-xs py-1 text-right font-mono">{calc.grandTotalTR.toFixed(2)} TR</TableCell>
-            </TableRow>
-            <TableRow className="bg-gray-50 dark:bg-slate-800/50">
-              <TableCell className="text-xs py-1 pl-8 text-gray-600 dark:text-slate-400">CFM TR  ({n(calc.designCFM)} CFM ÷ 400)</TableCell>
-              <TableCell className="text-xs py-1 text-right text-gray-400" colSpan={2}>—</TableCell>
-              <TableCell className="text-xs py-1 text-right font-mono">{calc.cfmTR.toFixed(2)} TR</TableCell>
-            </TableRow>
-            <TableRow>
-              <TableCell className="text-xs py-1.5 pl-8 font-semibold text-indigo-700">
-                Governing TR&nbsp;
-                <span className="font-normal text-gray-500">({calc.cfmTR >= calc.grandTotalTR ? 'CFM governed' : 'Load governed'})</span>
-              </TableCell>
+              <TableCell className="text-xs py-1.5 pl-8 font-semibold text-indigo-700">Plant TR  (Grand Total ÷ 12,000)</TableCell>
               <TableCell className="text-xs py-1.5 text-right text-gray-400" colSpan={2}>—</TableCell>
               <TableCell className="text-xs py-1.5 text-right font-mono font-bold text-indigo-700">{calc.governingTR.toFixed(2)} TR</TableCell>
+            </TableRow>
+            <TableRow className="bg-gray-50 dark:bg-slate-800/50">
+              <TableCell className="text-xs py-1 pl-8 text-gray-500 dark:text-slate-400 italic">
+                CFM/TR Sanity Ratio&nbsp;
+                <span className="font-normal text-gray-400">({n(calc.designCFM)} CFM ÷ {calc.governingTR.toFixed(2)} TR = {calc.governingTR > 0 ? Math.round(calc.designCFM / calc.governingTR) : 0} CFM/TR — typical 350–450)</span>
+              </TableCell>
+              <TableCell className="text-xs py-1 text-right text-gray-400" colSpan={2}>—</TableCell>
+              <TableCell className="text-xs py-1 text-right font-mono text-gray-500 italic">{calc.cfmTR.toFixed(2)} TR equiv.</TableCell>
             </TableRow>
             <TableRow className="bg-yellow-50 dark:bg-yellow-950/30">
               <TableCell className="text-xs py-1 pl-8 text-yellow-800 dark:text-yellow-300">Overall Safety  (+{(calc.overallSafetyFactor * 100).toFixed(0)}%)</TableCell>
@@ -1287,30 +1283,27 @@ function RoomDetail({
           >
             AHU Season: {equipmentBasis.governingSeason}
           </span>
-          <span className="text-[11px] rounded border border-indigo-200 bg-indigo-50 px-2 py-0.5 font-semibold text-indigo-700" title="Final governing metric for AHU sizing">
-            Basis: {equipmentBasis.governingMetric}
+          <span className="text-[11px] rounded border border-indigo-200 bg-indigo-50 px-2 py-0.5 font-semibold text-indigo-700" title="Plant TR is the coil-load basis for equipment sizing">
+            Plant TR basis
           </span>
           {hasMonsoon && (
-            <span className="text-[11px] rounded border border-slate-300 bg-slate-50 px-2 py-0.5 font-semibold text-slate-700" title="Separate seasonal governors for load and airflow">
-              Load: {equipmentBasis.loadGoverningSeason} | CFM: {equipmentBasis.cfmGoverningSeason}
+            <span className="text-[11px] rounded border border-slate-300 bg-slate-50 px-2 py-0.5 font-semibold text-slate-700" title="Seasonal peaks for load and airflow are independent">
+              Peak load: {equipmentBasis.loadGoverningSeason} | Peak CFM: {equipmentBasis.cfmGoverningSeason}
             </span>
           )}
         </div>
         <div className="mt-2 flex flex-wrap items-center gap-2">
-          <span className="text-[11px] rounded border border-blue-200 bg-blue-50 px-2 py-0.5 font-semibold text-blue-700" title="Load-based TR (Grand Total / 12000)">
-            Load TR: {c.grandTotalTR.toFixed(2)}
+          <span className="text-[11px] rounded border border-blue-300 bg-blue-100 px-2 py-0.5 font-semibold text-blue-800" title="Plant TR (Grand Total / 12000) — sized on coil load only">
+            Plant TR: {equipmentBasis.governingTR.toFixed(2)}
           </span>
-          <span className="text-[11px] rounded border border-cyan-200 bg-cyan-50 px-2 py-0.5 font-semibold text-cyan-700" title="CFM-based TR (from Design Supply CFM)">
-            CFM TR: {c.cfmTR.toFixed(2)}
-          </span>
-          <span className={`text-[11px] rounded border px-2 py-0.5 font-semibold ${equipmentBasis.governingMetric === 'CFM' ? 'border-violet-300 bg-violet-50 text-violet-700' : 'border-blue-300 bg-blue-100 text-blue-800'}`} title="Final governing TR = max(load-governor TR, airflow-governor TR)">
-            Governing TR: {equipmentBasis.governingTR.toFixed(2)}
-          </span>
-          <span className="text-[11px] rounded border border-orange-200 bg-orange-50 px-2 py-0.5 font-semibold text-orange-700" title="Required TR with 10% safety factor">
+          <span className="text-[11px] rounded border border-orange-200 bg-orange-50 px-2 py-0.5 font-semibold text-orange-700" title="Required TR with overall safety factor">
             Req TR: {equipmentBasis.requiredTR.toFixed(2)}
           </span>
           <span className="text-[11px] rounded border border-emerald-200 bg-emerald-50 px-2 py-0.5 font-semibold text-emerald-700">
             Design CFM: {Math.round(equipmentBasis.designCFM)}
+          </span>
+          <span className="text-[11px] rounded border border-cyan-200 bg-cyan-50 px-2 py-0.5 font-medium text-cyan-700" title="Sanity ratio — typical 350–450 CFM/TR. Outside that band, verify duct sizing.">
+            {equipmentBasis.governingTR > 0 ? Math.round(equipmentBasis.designCFM / equipmentBasis.governingTR) : 0} CFM/TR
           </span>
           <span className="text-[11px] rounded border border-amber-200 bg-amber-50 px-2 py-0.5 font-semibold text-amber-700">
             {n(c.grandTotal)} BTU/h
@@ -2282,7 +2275,7 @@ function RoomDetail({
           {monsoonExtremeDscfm && (
             <div className="mt-3 flex items-start gap-2 p-2.5 rounded-lg bg-red-50 border border-red-200 text-xs text-red-800">
               <span className="font-bold shrink-0">⚠ Monsoon High Moisture Flag:</span>
-              <span>Monsoon psychrometric DSCFM ({Math.round(monsoonCalc.coil.dehumidifiedCFM)} CFM) is {(monsoonExtremeDscfmRatio).toFixed(2)}x of ACH airflow ({Math.round(monsoonCalc.totalSupplyCFM)} CFM). Consider humidity-control strategy review (DOAS/pre-dehumidification/ADP-RH assumptions).</span>
+              <span>Monsoon psychrometric DSCFM ({Math.round(monsoonCalc.coil.dehumidifiedCFM)} CFM) is {(monsoonExtremeDscfmRatio).toFixed(2)}x of ACH airflow ({Math.round(monsoonCalc.totalSupplyCFM)} CFM). Consider humidity-control strategy review (TFA/DOAS / pre-dehumidification / ADP-RH assumptions).</span>
             </div>
           )}
         </div>

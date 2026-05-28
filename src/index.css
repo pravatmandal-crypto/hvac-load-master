@@ -136,3 +136,153 @@
 }
 /* Dynamic progress bar — width set via --fill-width CSS custom property */
 .bar-fill { width: var(--fill-width, 0%); }
+
+/* Methodology page dark-mode compatibility layer.
+   The component uses many fixed light utility classes; keep overrides scoped. */
+.dark .methodology-theme {
+  color: oklch(0.93 0.006 200);
+}
+
+.dark .methodology-theme .bg-white,
+.dark .methodology-theme .bg-gray-50,
+.dark .methodology-theme .bg-gray-100,
+.dark .methodology-theme .bg-gray-200,
+.dark .methodology-theme .bg-orange-50,
+.dark .methodology-theme .bg-green-50,
+.dark .methodology-theme .bg-blue-50,
+.dark .methodology-theme .bg-blue-100,
+.dark .methodology-theme .bg-sky-50,
+.dark .methodology-theme .bg-violet-50,
+.dark .methodology-theme .bg-indigo-100,
+.dark .methodology-theme .bg-cyan-50,
+.dark .methodology-theme .bg-amber-50,
+.dark .methodology-theme .bg-rose-50,
+.dark .methodology-theme .bg-red-50,
+.dark .methodology-theme .bg-teal-50,
+.dark .methodology-theme .bg-emerald-50,
+.dark .methodology-theme .bg-indigo-50,
+.dark .methodology-theme .bg-slate-50,
+.dark .methodology-theme .bg-yellow-50,
+.dark .methodology-theme .bg-orange-50\/30,
+.dark .methodology-theme .bg-green-50\/20,
+.dark .methodology-theme .bg-orange-50\/40,
+.dark .methodology-theme .bg-teal-50\/30,
+.dark .methodology-theme .bg-slate-100,
+.dark .methodology-theme .bg-orange-100,
+.dark .methodology-theme .bg-orange-200,
+.dark .methodology-theme .bg-green-100,
+.dark .methodology-theme .bg-cyan-100 {
+  background-color: oklch(0.2 0.015 250) !important;
+}
+
+.dark .methodology-theme .border,
+.dark .methodology-theme .border-gray-100,
+.dark .methodology-theme .border-gray-200,
+.dark .methodology-theme .border-gray-300,
+.dark .methodology-theme .border-orange-100,
+.dark .methodology-theme .border-orange-200,
+.dark .methodology-theme .border-blue-100,
+.dark .methodology-theme .border-blue-200,
+.dark .methodology-theme .border-green-100,
+.dark .methodology-theme .border-green-200,
+.dark .methodology-theme .border-sky-100,
+.dark .methodology-theme .border-sky-200,
+.dark .methodology-theme .border-violet-200,
+.dark .methodology-theme .border-cyan-100,
+.dark .methodology-theme .border-cyan-200,
+.dark .methodology-theme .border-amber-100,
+.dark .methodology-theme .border-amber-200,
+.dark .methodology-theme .border-rose-100,
+.dark .methodology-theme .border-rose-200,
+.dark .methodology-theme .border-teal-100,
+.dark .methodology-theme .border-teal-200,
+.dark .methodology-theme .border-emerald-200,
+.dark .methodology-theme .border-emerald-300,
+.dark .methodology-theme .border-indigo-100,
+.dark .methodology-theme .border-indigo-200,
+.dark .methodology-theme .border-indigo-300,
+.dark .methodology-theme .border-slate-200,
+.dark .methodology-theme .border-slate-300,
+.dark .methodology-theme .border-yellow-200 {
+  border-color: oklch(1 0 0 / 0.16) !important;
+}
+
+.dark .methodology-theme .text-gray-900,
+.dark .methodology-theme .text-gray-800,
+.dark .methodology-theme .text-gray-700,
+.dark .methodology-theme .text-gray-600,
+.dark .methodology-theme .text-gray-500,
+.dark .methodology-theme .text-gray-400,
+.dark .methodology-theme .text-slate-700,
+.dark .methodology-theme .text-slate-600,
+.dark .methodology-theme .text-slate-500 {
+  color: oklch(0.9 0.008 200) !important;
+}
+
+.dark .methodology-theme .text-blue-900,
+.dark .methodology-theme .text-blue-800,
+.dark .methodology-theme .text-green-900,
+.dark .methodology-theme .text-green-800,
+.dark .methodology-theme .text-green-700,
+.dark .methodology-theme .text-indigo-900,
+.dark .methodology-theme .text-indigo-800,
+.dark .methodology-theme .text-indigo-700,
+.dark .methodology-theme .text-indigo-600,
+.dark .methodology-theme .text-indigo-500,
+.dark .methodology-theme .text-violet-900,
+.dark .methodology-theme .text-violet-800,
+.dark .methodology-theme .text-sky-900,
+.dark .methodology-theme .text-sky-800,
+.dark .methodology-theme .text-cyan-900,
+.dark .methodology-theme .text-cyan-800,
+.dark .methodology-theme .text-teal-900,
+.dark .methodology-theme .text-teal-800,
+.dark .methodology-theme .text-emerald-900,
+.dark .methodology-theme .text-emerald-800 {
+  color: oklch(0.86 0.055 220) !important;
+}
+
+.dark .methodology-theme .text-orange-900,
+.dark .methodology-theme .text-orange-800,
+.dark .methodology-theme .text-amber-900,
+.dark .methodology-theme .text-amber-800,
+.dark .methodology-theme .text-rose-900,
+.dark .methodology-theme .text-rose-800,
+.dark .methodology-theme .text-red-800,
+.dark .methodology-theme .text-purple-700 {
+  color: oklch(0.88 0.07 65) !important;
+}
+
+.dark .methodology-theme .shadow-sm,
+.dark .methodology-theme .shadow-md {
+  box-shadow: 0 0 0 1px oklch(1 0 0 / 0.08), 0 8px 28px oklch(0.05 0.01 250 / 0.35) !important;
+}
+
+/* Make top ASHRAE reference chips more legible in dark mode */
+.dark .methodology-theme span.bg-indigo-50.text-indigo-700.border-indigo-100 {
+  background-color: oklch(0.26 0.03 255) !important;
+  color: oklch(0.94 0.03 235) !important;
+  border-color: oklch(0.62 0.08 245 / 0.45) !important;
+}
+
+/* PDF capture must remain print-friendly regardless of current UI theme. */
+.pdf-export.pdf-export [class*="bg-"] {
+  background-image: none !important;
+  background-color: #ffffff !important;
+}
+
+.pdf-export.pdf-export [class*="text-"] {
+  color: #111827 !important;
+}
+
+.pdf-export.pdf-export [class*="border-"] {
+  border-color: #d1d5db !important;
+}
+
+.pdf-export.pdf-export [class*="shadow"] {
+  box-shadow: none !important;
+}
+
+.pdf-export.pdf-export svg {
+  color: #111827 !important;
+}

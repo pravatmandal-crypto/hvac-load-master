@@ -1,4 +1,5 @@
 export interface AHUData {
+  quantity?: number;
   supplyAirCFM: number;
   outsideAirPct: number;
   outsideAirCFM: number;
@@ -54,6 +55,7 @@ export interface AHUData {
 }
 
 export interface ChillerData {
+  quantity?: number;
   coolingCapTR: number;
   coolingCapKW: number;
   copRated: number;
@@ -73,6 +75,7 @@ export interface ChillerData {
 }
 
 export interface CTData {
+  quantity?: number;
   dutyTR: number;
   dutyKW: number;
   hotWaterTempC: number;

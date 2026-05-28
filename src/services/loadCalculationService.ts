@@ -20,6 +20,7 @@ import {
   calculateCoilParameters,
   calculateRoomVolume,
   calculateReheat,
+  calculateTFALoad,
   getRecommendedAch,
   getMinAdp,
   type RoomDetails,
@@ -44,6 +45,12 @@ export interface RoomCalcDesignConditions {
   includeWinter?: boolean;
   monsoonOutdoorTemp?: number;
   monsoonOutdoorHumidity?: number;
+  // TFA / DOAS — undefined or 'primary' = current behavior (bit-identical).
+  ventilationStrategy?: 'primary' | 'tfa-cold';
+  tfaSupplyTemp?: number;
+  tfaSupplyHumidity?: number;
+  ervSensibleEffectiveness?: number;
+  ervLatentEffectiveness?: number;
 }
 
 export interface RoomCalcResult {
@@ -68,6 +75,14 @@ export interface RoomCalcResult {
   _calcOverallGoverningTR: number;
   _calcOverallRequiredTR: number;
   _calcOverallDesignCFM: number;
+  // TFA / DOAS — populated only when ventilationStrategy === 'tfa-cold'.
+  // Primary numbers above reflect the post-offset primary load. These fields
+  // are sized off the separate TFA/DOAS coil.
+  _calcTfaCoilBTUH?: number;
+  _calcTfaCoilTR?: number;
+  _calcTfaCfm?: number;
+  _calcMonsoonTfaCoilBTUH?: number;
+  _calcMonsoonTfaCoilTR?: number;
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -111,7 +126,7 @@ export async function calculateAndPersistRoom(
     othersKW: Number(room.othersKW) || 0,
     isGroundFloor: !!room.isGroundFloor,
     slabPerimeter: Number(room.slabPerimeter) || 0,
-    slabFFactor: Number(room.slabFFactor) || undefined,
+    ...(Number(room.slabFFactor) > 0 ? { slabFFactor: Number(room.slabFFactor) } : {}),
   };
 
   const bf = 0.15;
@@ -122,10 +137,17 @@ export async function calculateAndPersistRoom(
   const overallSafetyPct = Number(room.overallSafetyPercent ?? room.grandTotalSafetyFactor ?? 3);
   const minAdp = getMinAdp(systemType);
 
+  // ── Strategy: primary (default, current behavior) vs tfa-cold ────────────
+  // When TFA/DOAS is active, OA is conditioned by a separate unit. The
+  // primary coil sees no raw OA; instead the cold dry supply offsets a
+  // portion of the room load.
+  const isTFA = dc.ventilationStrategy === 'tfa-cold';
+
   // ── Summer calc ───────────────────────────────────────────────────────────
   const envelope = calculateEnvelopeGain(elements, dc);
   const internal = calculateInternalGains(rd);
   const vent = calculateVentilationLoad(rd, dc);
+  const tfa = isTFA ? calculateTFALoad(rd, dc) : null;
   const heating = dc.includeWinter ? calculateHeatingLoad(rd, elements, dc) : null;
   // Apply same overall safety factor that cooling pipeline uses, so heating output
   // mirrors the cooling-side margin. Stored alongside the raw value for transparency.
@@ -133,8 +155,12 @@ export async function calculateAndPersistRoom(
     ? heating.totalHeatingLoad * (1 + overallSafetyPct / 100)
     : 0;
 
-  const erSensible = envelope.sensible + internal.sensible + vent.sensible * bf;
-  const erLatent = internal.latent + vent.latent * bf;
+  // Bypass-OA model only applies when OA enters the primary coil.
+  // TFA mode: OA bypasses the primary entirely → zero ventilation in ER and OA legs.
+  const erVentSensible = isTFA ? 0 : vent.sensible * bf;
+  const erVentLatent = isTFA ? 0 : vent.latent * bf;
+  const erSensible = envelope.sensible + internal.sensible + erVentSensible;
+  const erLatent = internal.latent + erVentLatent;
   const parasitic = calculateParasiticGains(erSensible, erSensible, ductPct, fanPct);
 
   const ershRaw = erSensible + parasitic.ductGain + parasitic.fanGain;
@@ -142,12 +168,19 @@ export async function calculateAndPersistRoom(
   const ersh = ershRaw * (1 + sensibleSafetyPct / 100);
   const erlh = erlhRaw * (1 + latentSafetyPct / 100);
   const erh = ersh + erlh;
-  const oaSensible = vent.sensible * (1 - bf);
-  const oaLatent = vent.latent * (1 - bf);
+  const oaSensible = isTFA ? 0 : vent.sensible * (1 - bf);
+  const oaLatent = isTFA ? 0 : vent.latent * (1 - bf);
   const oaTotal = oaSensible + oaLatent;
-  const coilSensible = ersh + oaSensible;
-  const coilLatent = erlh + oaLatent;
-  const grandTotal = erh + oaTotal;
+  // Cold-DOAS credit (engineering-correct, per locked decision 5).
+  const tfaOffsetSensible = tfa ? tfa.spaceSensibleOffset : 0;
+  const tfaOffsetLatent = tfa ? tfa.spaceLatentOffset : 0;
+  const coilSensible = isTFA
+    ? Math.max(0, ersh - tfaOffsetSensible)
+    : ersh + oaSensible;
+  const coilLatent = isTFA
+    ? Math.max(0, erlh - tfaOffsetLatent)
+    : erlh + oaLatent;
+  const grandTotal = isTFA ? coilSensible + coilLatent : erh + oaTotal;
   const grandTotalTR = grandTotal / 12000;
   const rshf = coilSensible > 0 ? coilSensible / Math.max(1, coilSensible + coilLatent) : 1;
 
@@ -162,9 +195,13 @@ export async function calculateAndPersistRoom(
   const totalSupplyCFM = (calculateRoomVolume(rd) * totalSupplyACH) / 60;
   // Methodology: DSCFM = CSH / (1.08 × ΔT_supply) — sensible-only per Carrier Manual.
   const designSupplyCFM = Math.max(coil.minAdpSensibleCFM, totalSupplyCFM);
+  // cfmTR is a SANITY RATIO only — kept for display/warning. It does NOT
+  // govern plant sizing. The 400 CFM/TR rule is rule-of-thumb air-system
+  // sizing; OEM unit ratings already enforce the TR↔CFM coupling, and
+  // chiller plants are sized by coil load only. (Decision: 2026-05-20.)
   const cfmTR = designSupplyCFM / 400;
-  const governingTR = Math.max(grandTotalTR, cfmTR);
-  const requiredTR = governingTR * (1 + overallSafetyPct / 100);
+  const governingTR = grandTotalTR;
+  const requiredTR = grandTotalTR * (1 + overallSafetyPct / 100);
 
   // ── Monsoon calc ─────────────────────────────────────────────────────────
   const hasMonsoon = !!(dc.monsoonOutdoorTemp && dc.monsoonOutdoorHumidity);
@@ -175,12 +212,25 @@ export async function calculateAndPersistRoom(
   };
   const monsoonEnvelope = calculateEnvelopeGain(elements, monsoonDc);
   const monsoonVent = calculateVentilationLoad(rd, monsoonDc);
-  const monsoonErSensible = monsoonEnvelope.sensible + internal.sensible + monsoonVent.sensible * bf;
-  const monsoonErLatent = internal.latent + monsoonVent.latent * bf;
+  const monsoonTfa = isTFA ? calculateTFALoad(rd, monsoonDc) : null;
+  const monsoonErVentSensible = isTFA ? 0 : monsoonVent.sensible * bf;
+  const monsoonErVentLatent = isTFA ? 0 : monsoonVent.latent * bf;
+  const monsoonErSensible = monsoonEnvelope.sensible + internal.sensible + monsoonErVentSensible;
+  const monsoonErLatent = internal.latent + monsoonErVentLatent;
   const monsoonParasitic = calculateParasiticGains(monsoonErSensible, monsoonErSensible, ductPct, fanPct);
   const monsoonErshRaw = monsoonErSensible + monsoonParasitic.ductGain + monsoonParasitic.fanGain;
-  const monsoonCoilSen = monsoonErshRaw * (1 + sensibleSafetyPct / 100) + monsoonVent.sensible * (1 - bf);
-  const monsoonCoilLat = monsoonErLatent * (1 + latentSafetyPct / 100) + monsoonVent.latent * (1 - bf);
+  const monsoonErsh = monsoonErshRaw * (1 + sensibleSafetyPct / 100);
+  const monsoonErlh = monsoonErLatent * (1 + latentSafetyPct / 100);
+  const monsoonOaSensible = isTFA ? 0 : monsoonVent.sensible * (1 - bf);
+  const monsoonOaLatent = isTFA ? 0 : monsoonVent.latent * (1 - bf);
+  const monsoonTfaOffsetSen = monsoonTfa ? monsoonTfa.spaceSensibleOffset : 0;
+  const monsoonTfaOffsetLat = monsoonTfa ? monsoonTfa.spaceLatentOffset : 0;
+  const monsoonCoilSen = isTFA
+    ? Math.max(0, monsoonErsh - monsoonTfaOffsetSen)
+    : monsoonErsh + monsoonOaSensible;
+  const monsoonCoilLat = isTFA
+    ? Math.max(0, monsoonErlh - monsoonTfaOffsetLat)
+    : monsoonErlh + monsoonOaLatent;
   const monsoonGrandTotal = monsoonCoilSen + monsoonCoilLat;
   const monsoonGrandTotalTR = monsoonGrandTotal / 12000;
   const monsoonCoilParams = calculateCoilParameters(
@@ -190,8 +240,8 @@ export async function calculateAndPersistRoom(
   );
   const monsoonDesignCFM = Math.max(monsoonCoilParams.minAdpSensibleCFM, totalSupplyCFM);
   const monsoonCfmTR = monsoonDesignCFM / 400;
-  const monsoonGoverningTR = Math.max(monsoonGrandTotalTR, monsoonCfmTR);
-  const monsoonRequiredTR = monsoonGoverningTR * (1 + overallSafetyPct / 100);
+  const monsoonGoverningTR = monsoonGrandTotalTR;
+  const monsoonRequiredTR = monsoonGrandTotalTR * (1 + overallSafetyPct / 100);
 
   const overallGoverningTR = hasMonsoon ? Math.max(governingTR, monsoonGoverningTR) : governingTR;
   const overallRequiredTR = hasMonsoon ? Math.max(requiredTR, monsoonRequiredTR) : requiredTR;
@@ -228,6 +278,24 @@ export async function calculateAndPersistRoom(
         }
       : null,
     psychrometrics: { outdoor: outdoorPsych, indoor: indoorPsych },
+    // TFA / DOAS block — null when strategy is 'primary' / undefined.
+    // Holds the separate DOAS coil load (summer + monsoon) and the space
+    // offsets credited to the primary system.
+    tfa: isTFA && tfa
+      ? {
+          strategy: 'tfa-cold' as const,
+          summer: tfa,
+          monsoon: monsoonTfa,
+          // Governing TFA load for DOAS sizing — max of summer/monsoon.
+          governingCoilBTUH: Math.max(
+            tfa.coilSensible + tfa.coilLatent,
+            monsoonTfa ? monsoonTfa.coilSensible + monsoonTfa.coilLatent : 0,
+          ),
+          governs: (monsoonTfa && monsoonTfa.coilSensible + monsoonTfa.coilLatent > tfa.coilSensible + tfa.coilLatent
+            ? 'monsoon'
+            : 'summer') as 'summer' | 'monsoon',
+        }
+      : null,
     coil,
     // Moisture analysis at the cooling coil. For climates with a separate monsoon
     // design condition, monsoon latent typically exceeds summer (high outdoor W) —
@@ -274,6 +342,23 @@ export async function calculateAndPersistRoom(
     _calcOverallGoverningTR: parseFloat(overallGoverningTR.toFixed(3)),
     _calcOverallRequiredTR: parseFloat(overallRequiredTR.toFixed(3)),
     _calcOverallDesignCFM: parseFloat(overallDesignCFM.toFixed(0)),
+    ...(isTFA && tfa
+      ? {
+          _calcTfaCoilBTUH: parseFloat((tfa.coilSensible + tfa.coilLatent).toFixed(0)),
+          _calcTfaCoilTR: parseFloat(((tfa.coilSensible + tfa.coilLatent) / 12000).toFixed(3)),
+          _calcTfaCfm: parseFloat(tfa.cfm.toFixed(0)),
+          ...(monsoonTfa
+            ? {
+                _calcMonsoonTfaCoilBTUH: parseFloat(
+                  (monsoonTfa.coilSensible + monsoonTfa.coilLatent).toFixed(0),
+                ),
+                _calcMonsoonTfaCoilTR: parseFloat(
+                  ((monsoonTfa.coilSensible + monsoonTfa.coilLatent) / 12000).toFixed(3),
+                ),
+              }
+            : {}),
+        }
+      : {}),
   };
 
   // ── Persist to Firestore ─────────────────────────────────────────────────

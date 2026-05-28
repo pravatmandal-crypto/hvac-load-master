@@ -24,6 +24,8 @@ import {
   checkCoordination,
   ApplicationType,
 } from "../../lib/electrical";
+// Note: 415 V is passed through to the sizing engine unchanged. The engine
+// normalises to 400 V only for MCB table lookup; VD and VD% use the actual voltage.
 
 // Cable type suggestions per placement (IS 732 / IS 1554 / IS 7098)
 type ProcurementApplicationType =
@@ -59,6 +61,12 @@ type SavedSelection = {
   safetyMargin: number;
   isCompliant: boolean;
   createdAt?: any;
+  insulationType?: 'PVC' | 'XLPE';
+  diversityFactor?: number;
+  powerFactor?: number;
+  prospectiveFaultKA?: number;
+  earthConductorMm2?: number;
+  icuCheckPassed?: boolean;
 };
 
 const PLACEMENT_CABLE_TYPES: Record<string, { label: string; type: string; standard: string; note: string }> = {
@@ -100,12 +108,44 @@ const PLACEMENT_CABLE_TYPES: Record<string, { label: string; type: string; stand
   },
 };
 
+/**
+ * Pick the cable core configuration for the application.
+ *   3-phase balanced motor load (pump / fan / chiller)  → 3-core (R,Y,B) + earth via armour/PE
+ *   3-phase load needing a neutral (lighting / heater in star / general 1P+3P mix) → 3.5-core or 4-core
+ *   1-phase                                              → 2-core (L,N) + earth
+ */
+function get3PhaseCoreConfig(application: ProcurementApplicationType): {
+  cores: string;
+  neutralNote: string;
+} {
+  const noNeutral: ProcurementApplicationType[] = ['pump_fan_dol', 'pump_fan_soft_starter', 'chiller'];
+  if (noNeutral.includes(application)) {
+    return {
+      cores: '3-core',
+      neutralNote: 'Balanced 3-phase motor load — no neutral needed. Earth via armour (SWA/AWA) or separate Cu PE conductor.',
+    };
+  }
+  if (application === 'lighting_load' || application === 'general_purpose') {
+    return {
+      cores: '3.5-core (reduced N) or 4-core (full N)',
+      neutralNote: 'Mixed 1P+3P loads — neutral required for unbalance. 3.5-core if 1P load < ~50% of 3P; 4-core if heavier.',
+    };
+  }
+  // electric_heater: typically delta-connected (no N), but star variants exist
+  return {
+    cores: '3-core (delta) or 3.5-core (star with neutral)',
+    neutralNote: 'Electric heater banks — choose 3-core for delta, 3.5-core if star-connected with neutral.',
+  };
+}
+
 function getPhaseAwareCableType(
   placement: string,
   isThreePhase: boolean,
-  material: "copper" | "aluminum"
+  material: "copper" | "aluminum",
+  application: ProcurementApplicationType
 ): string {
   const conductorNote = material === 'aluminum' ? 'Aluminium conductor' : 'Copper conductor';
+
   if (!isThreePhase) {
     switch (placement) {
       case 'conduit':
@@ -125,21 +165,24 @@ function getPhaseAwareCableType(
     }
   }
 
+  const { cores, neutralNote } = get3PhaseCoreConfig(application);
+  const ins = material === 'aluminum' ? 'Al' : 'Cu';
+
   switch (placement) {
     case 'conduit':
-      return `PVC insulated 3-core / 3.5-core stranded ${material === 'aluminum' ? 'Al' : 'Cu'} cable (IS 694 / IS 1554)`;
+      return `PVC insulated ${cores} stranded ${ins} cable (IS 694 / IS 1554). ${neutralNote}`;
     case 'tray':
-      return `Armoured 3-core / 3.5-core PVC/XLPE cable (IS 1554 / IS 7098) - ${conductorNote}`;
+      return `Armoured ${cores} PVC/XLPE cable (IS 1554 / IS 7098) - ${conductorNote}. ${neutralNote}`;
     case 'underground':
-      return `Armoured 3-core / 3.5-core XLPE or PVC cable (IS 7098 / IS 1554) - ${conductorNote}`;
+      return `Armoured ${cores} XLPE or PVC cable (IS 7098 / IS 1554) - ${conductorNote}. ${neutralNote}`;
     case 'exposed':
-      return `UV-resistant armoured 3-core / 3.5-core XLPE cable (IS 7098) - ${conductorNote}`;
+      return `UV-resistant armoured ${cores} XLPE cable (IS 7098) - ${conductorNote}. ${neutralNote}`;
     case 'panel':
-      return `Flexible 3-core control/power cable (IS 8130) - ${conductorNote}`;
+      return `Flexible ${cores} control/power cable (IS 8130) - ${conductorNote}. ${neutralNote}`;
     case 'buried_duct':
-      return `3-core / 3.5-core XLPE armoured cable in HDPE duct (IS 7098 + IS 14333) - ${conductorNote}`;
+      return `${cores} XLPE armoured cable in HDPE duct (IS 7098 + IS 14333) - ${conductorNote}. ${neutralNote}`;
     default:
-      return `${PLACEMENT_CABLE_TYPES[placement]?.type ?? 'As per IS standard'} - ${conductorNote}`;
+      return `${PLACEMENT_CABLE_TYPES[placement]?.type ?? 'As per IS standard'} - ${conductorNote}. ${neutralNote}`;
   }
 }
 
@@ -221,11 +264,6 @@ function computeKWFromCurrent(I: number, voltage: number, powerFactor: number): 
   return (I * voltage * powerFactor) / 1000;
 }
 
-function normalizeVoltageForCalc(voltage: number): number {
-  if (voltage === 415) return 400;
-  return voltage;
-}
-
 export function CableMCBSelectorV2() {
   // Project / circuit identification
   const [nameOfWork, setNameOfWork] = useState('');
@@ -247,14 +285,19 @@ export function CableMCBSelectorV2() {
   const [voltageDropLimit, setVoltageDropLimit] = useState<number>(3.0); // %
   const [cablePlacement, setCablePlacement] = useState<string>('conduit');
   const [vfdStarterEnabled, setVfdStarterEnabled] = useState<boolean>(false);
+  const [insulationType, setInsulationType] = useState<'PVC' | 'XLPE'>('PVC');
+  const [diversityFactor, setDiversityFactor] = useState<number>(1.0);
+  const [prospectiveFaultKA, setProspectiveFaultKA] = useState<number>(10);
+  // null = use application default PF; number = user override
+  const [powerFactorOverride, setPowerFactorOverride] = useState<number | null>(null);
 
   const selectedApplication = APPLICATION_OPTIONS[applicationType];
-  const powerFactor = getPowerFactor(applicationType);
+  const powerFactor = powerFactorOverride ?? getPowerFactor(applicationType);
   const calcApplicationType = selectedApplication.calcType;
   const useStartingProtection = selectedApplication.startingProtection || vfdStarterEnabled;
   const appProfile = getApplicationProfile(calcApplicationType);
   const placementInfo = PLACEMENT_CABLE_TYPES[cablePlacement];
-  const phaseAwareCableType = getPhaseAwareCableType(cablePlacement, isThreePhaseVoltage(systemVoltage), cableMaterial);
+  const phaseAwareCableType = getPhaseAwareCableType(cablePlacement, isThreePhaseVoltage(systemVoltage), cableMaterial, applicationType);
 
   const localSelectionsKey = (uid?: string) => `cableSelections:${uid || 'guest'}`;
 
@@ -325,20 +368,23 @@ export function CableMCBSelectorV2() {
     setPowerKW(parseFloat(computeKWFromCurrent(loadCurrent, nextVoltage, powerFactor).toFixed(2)));
   };
 
-  // Calculate sizing
+  // Calculate sizing — pass actual system voltage (e.g. 415 V).
+  // The engine internally normalises to 400 V only for MCB table lookup.
   const result = useMemo(() => {
-    const calcVoltage = normalizeVoltageForCalc(systemVoltage);
     return sizeCableAndMCBWithApplication(
       loadCurrent,
       calcApplicationType,
-      calcVoltage,
+      systemVoltage,
       cableLength,
       ambientTemp,
       bundledCables,
       voltageDropLimit,
       cableMaterial,
       useStartingProtection,
-      undefined
+      undefined,
+      insulationType,
+      diversityFactor,
+      prospectiveFaultKA
     );
   }, [
     loadCurrent,
@@ -350,11 +396,14 @@ export function CableMCBSelectorV2() {
     voltageDropLimit,
     cableMaterial,
     useStartingProtection,
+    insulationType,
+    diversityFactor,
+    prospectiveFaultKA,
   ]);
 
   const coordinationCheck = useMemo(() => {
     if (!result) return null;
-    return checkCoordination(result.selectedCable, result.selectedMCB, normalizeVoltageForCalc(systemVoltage));
+    return checkCoordination(result.selectedCable, result.selectedMCB, systemVoltage, result.deratedAmpacity);
   }, [result, systemVoltage]);
 
   const inrushCurrent = useMemo(() => {
@@ -448,10 +497,16 @@ export function CableMCBSelectorV2() {
         ambientTemp,
         cableMaterial,
         vfdStarterEnabled,
-        voltageDropPercent: parseFloat(((result.voltageDrop / normalizeVoltageForCalc(systemVoltage)) * 100).toFixed(2)),
+        voltageDropPercent: parseFloat(((result.voltageDrop / systemVoltage) * 100).toFixed(2)),
         safetyMargin: result.safetyMargin,
         isCompliant: result.isCompliant,
         createdAt: new Date().toISOString(),
+        insulationType,
+        diversityFactor,
+        powerFactor,
+        prospectiveFaultKA,
+        earthConductorMm2: result.earthConductorMm2,
+        icuCheckPassed: result.icuCheckPassed,
       };
 
       const existing = loadLocalSelections(currentUserId);
@@ -501,39 +556,45 @@ export function CableMCBSelectorV2() {
       startY: 96,
       head: [[
         'S.No',
-        'Application Type',
-        'VFD Starter',
+        'Application',
+        'Starter',
         'Cable Type',
-        'Cable Size',
-        'MCB',
-        'Voltage',
-        'Load (A)',
-        'Power (kW)',
-        'Length (m)',
-        'Ambient (°C)',
-        'Material',
-        'V.Drop %',
-        'Safety %',
-        'Compliance',
+        'Phase',
+        'Earth (mm²)',
+        'MCB / MCCB',
+        'Icu',
+        'V',
+        'Load A',
+        'kW',
+        'L m',
+        'Amb °C',
+        'Mat/Ins',
+        'PF',
+        'DF',
+        'VD %',
+        'Comp.',
       ]],
       body: rowsForWork.map((row, idx) => [
         idx + 1,
         row.applicationLabel,
-        row.vfdStarterEnabled ? 'Yes' : 'No',
+        row.vfdStarterEnabled ? 'VFD' : '—',
         row.cableType,
         row.cableSize,
+        row.earthConductorMm2 ?? '—',
         row.mcb,
+        row.icuCheckPassed === true ? '✓' : (row.icuCheckPassed === false ? '✗' : '—'),
         `${row.voltage}V ${row.phase}`,
         row.loadCurrent.toFixed(1),
         row.powerKW.toFixed(2),
         row.cableLength.toFixed(0),
         row.ambientTemp.toFixed(0),
-        row.cableMaterial,
+        `${row.cableMaterial}/${row.insulationType ?? 'PVC'}`,
+        (row.powerFactor ?? 0.85).toFixed(2),
+        (row.diversityFactor ?? 1.0).toFixed(2),
         row.voltageDropPercent.toFixed(2),
-        row.safetyMargin.toFixed(1),
-        row.isCompliant ? 'Compliant' : 'Check',
+        row.isCompliant ? 'OK' : 'Check',
       ]),
-      styles: { fontSize: 8, cellPadding: 4 },
+      styles: { fontSize: 7, cellPadding: 3 },
     });
 
     const fileName = `Cable-MCB-Procurement-${nameOfWork.trim().replace(/\s+/g, '-')}-${circuitRef.trim().replace(/\s+/g, '-')}.pdf`;
@@ -720,22 +781,79 @@ export function CableMCBSelectorV2() {
                   <SelectTrigger className="text-sm"><SelectValue /></SelectTrigger>
                   <SelectContent>
                     <SelectItem value="copper">Copper (IS 8130 — preferred)</SelectItem>
-                    <SelectItem value="aluminum">Aluminum (above 16 mm²)</SelectItem>
+                    <SelectItem value="aluminum">Aluminum (min 16 mm² fixed wiring — IS 732)</SelectItem>
                   </SelectContent>
                 </Select>
+              </div>
+
+              {/* Insulation Type */}
+              <div className="space-y-1">
+                <Label className="text-xs font-medium">Insulation</Label>
+                <Select value={insulationType} onValueChange={(v) => setInsulationType(v as any)}>
+                  <SelectTrigger className="text-sm"><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="PVC">PVC 70°C (IS 1554 / IS 3961 Pt.2)</SelectItem>
+                    <SelectItem value="XLPE">XLPE 90°C (IS 7098 Pt.1 — ~25% higher ampacity)</SelectItem>
+                  </SelectContent>
+                </Select>
+                <p className="text-[10px] text-slate-500">XLPE for higher temperature, motor mains, outdoor.</p>
+              </div>
+
+              {/* Power Factor Override */}
+              <div className="space-y-1">
+                <Label className="text-xs font-medium">Power Factor</Label>
+                <div className="flex items-center gap-2">
+                  <NumericInput
+                    min={0.5} max={1.0}
+                    value={powerFactor}
+                    onChange={(n) => setPowerFactorOverride(n ?? null)}
+                    placeholder="0.85"
+                    className="text-sm font-mono flex-1"
+                  />
+                  {powerFactorOverride !== null && (
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      className="h-7 px-2 text-[10px]"
+                      onClick={() => setPowerFactorOverride(null)}
+                    >
+                      Reset
+                    </Button>
+                  )}
+                </div>
+                <p className="text-[10px] text-slate-500">
+                  {powerFactorOverride !== null
+                    ? `User override (default for ${selectedApplication.label}: ${getPowerFactor(applicationType).toFixed(2)})`
+                    : `Default for ${selectedApplication.label} — enter nameplate PF to override.`}
+                </p>
               </div>
 
               {/* Bundled Cables */}
               <div className="space-y-1">
                 <Label className="text-xs font-medium">Cables in Conduit / Tray</Label>
                 <NumericInput
-                  integer min={1} max={10}
+                  integer min={1} max={20}
                   value={bundledCables}
                   onChange={(n) => setBundledCables(Math.max(1, n ?? 1))}
                   placeholder="1"
                   className="text-sm font-mono"
                 />
-                <p className="text-[10px] text-slate-500">Grouping derate per IS 3961 / IEC 60364-5-52</p>
+                <p className="text-[10px] text-slate-500">Grouping derate per IS 3961 Pt.2 Table 5</p>
+              </div>
+
+              {/* Diversity Factor */}
+              <div className="space-y-1">
+                <Label className="text-xs font-medium">Diversity Factor (feeder)</Label>
+                <NumericInput
+                  min={0.1} max={1.0}
+                  value={diversityFactor}
+                  onChange={(n) => setDiversityFactor(Math.max(0.1, Math.min(1.0, n ?? 1.0)))}
+                  placeholder="1.00"
+                  className="text-sm font-mono"
+                />
+                <p className="text-[10px] text-slate-500">
+                  IS 732 Sec. 8. Use 1.0 for single-load circuits; 0.7–0.9 for feeders with non-coincident loads.
+                </p>
               </div>
 
               {/* Voltage Drop Limit */}
@@ -749,6 +867,21 @@ export function CableMCBSelectorV2() {
                   className="text-sm font-mono"
                 />
                 <p className="text-[10px] text-slate-500">IS 732: ≤ 3% for final sub-circuits; ≤ 5% overall</p>
+              </div>
+
+              {/* Prospective Short-Circuit Current */}
+              <div className="space-y-1">
+                <Label className="text-xs font-medium">Prospective Fault Current — Isc (kA)</Label>
+                <NumericInput
+                  min={1} max={100}
+                  value={prospectiveFaultKA}
+                  onChange={(n) => setProspectiveFaultKA(Math.max(1, n ?? 10))}
+                  placeholder="10 kA"
+                  className="text-sm font-mono"
+                />
+                <p className="text-[10px] text-slate-500">
+                  Typical: 6 kA residential · 10 kA small commercial · 25–50 kA industrial. Engine checks breaker Icu against this (IS 13947-2).
+                </p>
               </div>
 
               {/* Starting method note */}
@@ -860,8 +993,13 @@ export function CableMCBSelectorV2() {
                         </tr>
                         <tr className="border-b border-gray-100 dark:border-slate-700">
                           <td className="py-2 pr-4 text-xs text-gray-500 dark:text-slate-400">Conductor</td>
-                          <td className="py-2 font-medium capitalize dark:text-slate-200">{cableMaterial}</td>
-                          <td className="py-2 text-xs text-gray-500 dark:text-slate-400">IS 8130</td>
+                          <td className="py-2 font-medium capitalize dark:text-slate-200">{cableMaterial} / {insulationType}</td>
+                          <td className="py-2 text-xs text-gray-500 dark:text-slate-400">IS 8130 · {insulationType === 'XLPE' ? 'IS 7098' : 'IS 1554'}</td>
+                        </tr>
+                        <tr className="border-b border-gray-100 dark:border-slate-700 bg-emerald-50 dark:bg-emerald-950/30">
+                          <td className="py-2 pr-4 text-xs text-gray-500 dark:text-slate-400">Earth (PE) Conductor</td>
+                          <td className="py-2 font-bold text-emerald-700 dark:text-emerald-400">{result.earthConductorMm2 ?? '—'} mm² Cu</td>
+                          <td className="py-2 text-xs text-gray-500 dark:text-slate-400">IS 3043 (≤16: same · ≤35: 16 · &gt;35: phase/2)</td>
                         </tr>
                         <tr className="border-b border-gray-100 dark:border-slate-700">
                           <td className="py-2 pr-4 text-xs text-gray-500 dark:text-slate-400">Base Ampacity</td>
@@ -876,7 +1014,7 @@ export function CableMCBSelectorV2() {
                         <tr className="border-b border-gray-100 dark:border-slate-700">
                           <td className="py-2 pr-4 text-xs text-gray-500 dark:text-slate-400">Voltage Drop</td>
                           <td className={`py-2 font-bold ${((result.voltageDrop / systemVoltage) * 100) <= voltageDropLimit ? 'text-green-600 dark:text-green-400' : 'text-red-600 dark:text-red-400'}`}>
-                            {((result.voltageDrop / normalizeVoltageForCalc(systemVoltage)) * 100).toFixed(2)}%
+                            {((result.voltageDrop / systemVoltage) * 100).toFixed(2)}%
                           </td>
                           <td className="py-2 text-xs text-gray-500 dark:text-slate-400">Limit: {voltageDropLimit}% (IS 732)</td>
                         </tr>
@@ -890,6 +1028,24 @@ export function CableMCBSelectorV2() {
                           <td className="py-2 font-medium dark:text-slate-200">{appProfile.recommendedProtection}</td>
                           <td className="py-2 text-xs text-gray-500 dark:text-slate-400">IS 13947 / IEC 60898</td>
                         </tr>
+                        <tr className="border-b border-gray-100 dark:border-slate-700">
+                          <td className="py-2 pr-4 text-xs text-gray-500 dark:text-slate-400">Breaking Capacity (Icu)</td>
+                          <td className={`py-2 font-bold ${result.icuCheckPassed === false ? 'text-red-700 dark:text-red-400' : (result.icuCheckPassed === true ? 'text-green-700 dark:text-green-400' : 'dark:text-slate-200')}`}>
+                            {result.selectedMCB.breakingCapacityKA != null
+                              ? `${result.selectedMCB.breakingCapacityKA} kA${result.icuCheckPassed === false ? ' ✗' : ' ✓'}`
+                              : 'Confirm from datasheet'}
+                          </td>
+                          <td className="py-2 text-xs text-gray-500 dark:text-slate-400">
+                            Required ≥ {prospectiveFaultKA} kA (IS 13947-2)
+                          </td>
+                        </tr>
+                        {diversityFactor < 1.0 && (
+                          <tr className="border-b border-gray-100 dark:border-slate-700">
+                            <td className="py-2 pr-4 text-xs text-gray-500 dark:text-slate-400">Diversity Factor</td>
+                            <td className="py-2 font-medium dark:text-slate-200">{diversityFactor.toFixed(2)} → design current {(loadCurrent * diversityFactor).toFixed(1)} A</td>
+                            <td className="py-2 text-xs text-gray-500 dark:text-slate-400">IS 732 Sec. 8</td>
+                          </tr>
+                        )}
                         <tr>
                           <td className="py-2 pr-4 text-xs text-gray-500 dark:text-slate-400">Installation</td>
                           <td className="py-2 font-medium dark:text-slate-200">{placementInfo?.label ?? cablePlacement}</td>

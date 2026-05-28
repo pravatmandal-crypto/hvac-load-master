@@ -26,17 +26,20 @@ export interface AmpacityRating {
 export interface MCBRating {
   id: string;
   capacity: number; // Amps (10, 16, 20, 25, 32, 40, 50, 63, 80, 100, etc.)
-  type: string; // Type B, C, D (trip characteristics)
-  voltage: number; // 230V, 400V, etc.
+  type: string; // "Type B" | "Type C" | "Type D" | "MCCB"
+  voltage: number; // 230V, 400V, etc. (catalogued at IEC nominal; Indian 415V maps to 400V)
   poles: number; // 1P, 2P, 3P
   description: string;
+  category?: 'MCB' | 'MCCB'; // MCB ≤ ~125A (IS/IEC 60898); MCCB up to ~1600A (IS 13947-2)
+  breakingCapacityKA?: number; // Icu — prospective short-circuit breaking capacity (kA)
 }
 
 export interface CableSizingResult {
   selectedCable: CableSize;
   selectedAmpacity: AmpacityRating;
+  deratedAmpacity: number; // A — I_z at site conditions (after temp + bundling + material derating)
   selectedMCB: MCBRating;
-  voltageDrop: number; // %
+  voltageDrop: number; // V
   safetyMargin: number; // %
   isCompliant: boolean;
   warnings: string[];
@@ -44,6 +47,12 @@ export interface CableSizingResult {
   inrushCurrent?: number; // A
   startingMethod?: string;
   applicationType?: string;
+  earthConductorMm2?: number; // PE conductor size per IS 3043
+  insulationType?: 'PVC' | 'XLPE';
+  diversityFactorApplied?: number;
+  powerFactorAssumed?: number;
+  icuRequiredKA?: number; // Prospective short-circuit current the breaker must clear
+  icuCheckPassed?: boolean; // breaker.breakingCapacityKA >= icuRequiredKA
 }
 
 export type ApplicationType = 'motor' | 'heater' | 'chiller' | 'pump' | 'lighting' | 'general' | 'other';
@@ -102,6 +111,10 @@ export const CABLE_SIZES: CableSize[] = [
   { id: "95mm2", awg: null as any, metric: 95.0, diameter: 11.00, description: "95.0 mm² (IEC)" },
   { id: "120mm2", awg: null as any, metric: 120.0, diameter: 12.38, description: "120 mm² (IEC)" },
   { id: "150mm2", awg: null as any, metric: 150.0, diameter: 13.82, description: "150 mm² (IEC)" },
+  { id: "185mm2", awg: null as any, metric: 185.0, diameter: 15.34, description: "185 mm² (IEC)" },
+  { id: "240mm2", awg: null as any, metric: 240.0, diameter: 17.48, description: "240 mm² (IEC)" },
+  { id: "300mm2", awg: null as any, metric: 300.0, diameter: 19.54, description: "300 mm² (IEC)" },
+  { id: "400mm2", awg: null as any, metric: 400.0, diameter: 22.57, description: "400 mm² (IEC)" },
 ];
 
 // Wire Ampacity Table (60°C insulation, copper, in air)
@@ -168,19 +181,27 @@ export const AMPACITY_TABLE: AmpacityRating[] = [
   { cableId: "4_0awg", temperature: 75, insulation: "XHHW (75°C)", installationMethod: "In conduit (3+ wires)", ampacity: 230 },
   { cableId: "4_0awg", temperature: 90, insulation: "XHHW-2 (90°C)", installationMethod: "In conduit (3+ wires)", ampacity: 260 },
 
-  // IEC Metric Sizes (based on BS 7909 and IEC 60364)
-  { cableId: "1mm2", temperature: 70, insulation: "PVC (70°C)", installationMethod: "In conduit", ampacity: 11 },
-  { cableId: "1.5mm2", temperature: 70, insulation: "PVC (70°C)", installationMethod: "In conduit", ampacity: 15 },
-  { cableId: "2.5mm2", temperature: 70, insulation: "PVC (70°C)", installationMethod: "In conduit", ampacity: 21 },
-  { cableId: "4mm2", temperature: 70, insulation: "PVC (70°C)", installationMethod: "In conduit", ampacity: 28 },
-  { cableId: "6mm2", temperature: 70, insulation: "PVC (70°C)", installationMethod: "In conduit", ampacity: 36 },
-  { cableId: "10mm2", temperature: 70, insulation: "PVC (70°C)", installationMethod: "In conduit", ampacity: 48 },
-  { cableId: "16mm2", temperature: 70, insulation: "PVC (70°C)", installationMethod: "In conduit", ampacity: 63 },
-  { cableId: "25mm2", temperature: 70, insulation: "PVC (70°C)", installationMethod: "In conduit", ampacity: 85 },
-  { cableId: "35mm2", temperature: 70, insulation: "PVC (70°C)", installationMethod: "In conduit", ampacity: 108 },
-  { cableId: "50mm2", temperature: 70, insulation: "PVC (70°C)", installationMethod: "In conduit", ampacity: 132 },
-  { cableId: "70mm2", temperature: 70, insulation: "PVC (70°C)", installationMethod: "In conduit", ampacity: 170 },
-  { cableId: "95mm2", temperature: 70, insulation: "PVC (70°C)", installationMethod: "In conduit", ampacity: 210 },
+  // IS 3961 Pt.2 — Cu, PVC-insulated, 3-core cable in conduit / duct.
+  // Reference ambient: 40°C (Indian convention). Derate further above 40°C via applyDeratingFactors.
+  // Source: IS 3961 (Part 2) Table 2 — matches Polycab / Havells / KEI / RR Kabel datasheets.
+  { cableId: "1mm2", temperature: 70, insulation: "PVC (70°C) — IS 3961 Pt.2", installationMethod: "In conduit @ 40°C ambient", ampacity: 10 },
+  { cableId: "1.5mm2", temperature: 70, insulation: "PVC (70°C) — IS 3961 Pt.2", installationMethod: "In conduit @ 40°C ambient", ampacity: 14 },
+  { cableId: "2.5mm2", temperature: 70, insulation: "PVC (70°C) — IS 3961 Pt.2", installationMethod: "In conduit @ 40°C ambient", ampacity: 19 },
+  { cableId: "4mm2", temperature: 70, insulation: "PVC (70°C) — IS 3961 Pt.2", installationMethod: "In conduit @ 40°C ambient", ampacity: 26 },
+  { cableId: "6mm2", temperature: 70, insulation: "PVC (70°C) — IS 3961 Pt.2", installationMethod: "In conduit @ 40°C ambient", ampacity: 33 },
+  { cableId: "10mm2", temperature: 70, insulation: "PVC (70°C) — IS 3961 Pt.2", installationMethod: "In conduit @ 40°C ambient", ampacity: 45 },
+  { cableId: "16mm2", temperature: 70, insulation: "PVC (70°C) — IS 3961 Pt.2", installationMethod: "In conduit @ 40°C ambient", ampacity: 60 },
+  { cableId: "25mm2", temperature: 70, insulation: "PVC (70°C) — IS 3961 Pt.2", installationMethod: "In conduit @ 40°C ambient", ampacity: 79 },
+  { cableId: "35mm2", temperature: 70, insulation: "PVC (70°C) — IS 3961 Pt.2", installationMethod: "In conduit @ 40°C ambient", ampacity: 97 },
+  { cableId: "50mm2", temperature: 70, insulation: "PVC (70°C) — IS 3961 Pt.2", installationMethod: "In conduit @ 40°C ambient", ampacity: 117 },
+  { cableId: "70mm2", temperature: 70, insulation: "PVC (70°C) — IS 3961 Pt.2", installationMethod: "In conduit @ 40°C ambient", ampacity: 149 },
+  { cableId: "95mm2", temperature: 70, insulation: "PVC (70°C) — IS 3961 Pt.2", installationMethod: "In conduit @ 40°C ambient", ampacity: 180 },
+  { cableId: "120mm2", temperature: 70, insulation: "PVC (70°C) — IS 3961 Pt.2", installationMethod: "In conduit @ 40°C ambient", ampacity: 208 },
+  { cableId: "150mm2", temperature: 70, insulation: "PVC (70°C) — IS 3961 Pt.2", installationMethod: "In conduit @ 40°C ambient", ampacity: 239 },
+  { cableId: "185mm2", temperature: 70, insulation: "PVC (70°C) — IS 3961 Pt.2", installationMethod: "In conduit @ 40°C ambient", ampacity: 273 },
+  { cableId: "240mm2", temperature: 70, insulation: "PVC (70°C) — IS 3961 Pt.2", installationMethod: "In conduit @ 40°C ambient", ampacity: 320 },
+  { cableId: "300mm2", temperature: 70, insulation: "PVC (70°C) — IS 3961 Pt.2", installationMethod: "In conduit @ 40°C ambient", ampacity: 366 },
+  { cableId: "400mm2", temperature: 70, insulation: "PVC (70°C) — IS 3961 Pt.2", installationMethod: "In conduit @ 40°C ambient", ampacity: 426 },
 ];
 
 // Standard MCB/MCCB Ratings (IEC 60898 / NEC)
@@ -213,17 +234,44 @@ export const MCB_RATINGS: MCBRating[] = [
   { id: "d50", capacity: 50, type: "Type D", voltage: 230, poles: 1, description: "50A Type D (1P, 230V)" },
   { id: "d63", capacity: 63, type: "Type D", voltage: 230, poles: 1, description: "63A Type D (1P, 230V)" },
 
-  // Three-phase MCBs (400V)
-  { id: "3p_c20", capacity: 20, type: "Type C", voltage: 400, poles: 3, description: "20A Type C (3P, 400V)" },
-  { id: "3p_c25", capacity: 25, type: "Type C", voltage: 400, poles: 3, description: "25A Type C (3P, 400V)" },
-  { id: "3p_c32", capacity: 32, type: "Type C", voltage: 400, poles: 3, description: "32A Type C (3P, 400V)" },
-  { id: "3p_c40", capacity: 40, type: "Type C", voltage: 400, poles: 3, description: "40A Type C (3P, 400V)" },
-  { id: "3p_c50", capacity: 50, type: "Type C", voltage: 400, poles: 3, description: "50A Type C (3P, 400V)" },
-  { id: "3p_c63", capacity: 63, type: "Type C", voltage: 400, poles: 3, description: "63A Type C (3P, 400V)" },
-  { id: "3p_c80", capacity: 80, type: "Type C", voltage: 400, poles: 3, description: "80A Type C (3P, 400V)" },
-  { id: "3p_c100", capacity: 100, type: "Type C", voltage: 400, poles: 3, description: "100A Type C (3P, 400V)" },
-  { id: "3p_c125", capacity: 125, type: "Type C", voltage: 400, poles: 3, description: "125A Type C (3P, 400V)" },
-  { id: "3p_c160", capacity: 160, type: "Type C", voltage: 400, poles: 3, description: "160A Type C (3P, 400V)" },
+  // Three-phase MCBs Type C (400V) — IS/IEC 60898
+  { id: "3p_c6", capacity: 6, type: "Type C", voltage: 400, poles: 3, description: "6A Type C (3P, 415V)", category: 'MCB' },
+  { id: "3p_c10", capacity: 10, type: "Type C", voltage: 400, poles: 3, description: "10A Type C (3P, 415V)", category: 'MCB' },
+  { id: "3p_c16", capacity: 16, type: "Type C", voltage: 400, poles: 3, description: "16A Type C (3P, 415V)", category: 'MCB' },
+  { id: "3p_c20", capacity: 20, type: "Type C", voltage: 400, poles: 3, description: "20A Type C (3P, 415V)", category: 'MCB' },
+  { id: "3p_c25", capacity: 25, type: "Type C", voltage: 400, poles: 3, description: "25A Type C (3P, 415V)", category: 'MCB' },
+  { id: "3p_c32", capacity: 32, type: "Type C", voltage: 400, poles: 3, description: "32A Type C (3P, 415V)", category: 'MCB' },
+  { id: "3p_c40", capacity: 40, type: "Type C", voltage: 400, poles: 3, description: "40A Type C (3P, 415V)", category: 'MCB' },
+  { id: "3p_c50", capacity: 50, type: "Type C", voltage: 400, poles: 3, description: "50A Type C (3P, 415V)", category: 'MCB' },
+  { id: "3p_c63", capacity: 63, type: "Type C", voltage: 400, poles: 3, description: "63A Type C (3P, 415V)", category: 'MCB' },
+  { id: "3p_c80", capacity: 80, type: "Type C", voltage: 400, poles: 3, description: "80A Type C (3P, 415V)", category: 'MCB' },
+  { id: "3p_c100", capacity: 100, type: "Type C", voltage: 400, poles: 3, description: "100A Type C (3P, 415V)", category: 'MCB' },
+  { id: "3p_c125", capacity: 125, type: "Type C", voltage: 400, poles: 3, description: "125A Type C (3P, 415V)", category: 'MCB' },
+  { id: "3p_c160", capacity: 160, type: "Type C", voltage: 400, poles: 3, description: "160A Type C (3P, 415V)", category: 'MCB' },
+
+  // Three-phase MCBs Type D (400V) — motor / chiller branches, IS/IEC 60898
+  { id: "3p_d10", capacity: 10, type: "Type D", voltage: 400, poles: 3, description: "10A Type D (3P, 415V)", category: 'MCB' },
+  { id: "3p_d16", capacity: 16, type: "Type D", voltage: 400, poles: 3, description: "16A Type D (3P, 415V)", category: 'MCB' },
+  { id: "3p_d20", capacity: 20, type: "Type D", voltage: 400, poles: 3, description: "20A Type D (3P, 415V)", category: 'MCB' },
+  { id: "3p_d25", capacity: 25, type: "Type D", voltage: 400, poles: 3, description: "25A Type D (3P, 415V)", category: 'MCB' },
+  { id: "3p_d32", capacity: 32, type: "Type D", voltage: 400, poles: 3, description: "32A Type D (3P, 415V)", category: 'MCB' },
+  { id: "3p_d40", capacity: 40, type: "Type D", voltage: 400, poles: 3, description: "40A Type D (3P, 415V)", category: 'MCB' },
+  { id: "3p_d50", capacity: 50, type: "Type D", voltage: 400, poles: 3, description: "50A Type D (3P, 415V)", category: 'MCB' },
+  { id: "3p_d63", capacity: 63, type: "Type D", voltage: 400, poles: 3, description: "63A Type D (3P, 415V)", category: 'MCB' },
+
+  // MCCB tier — 3P 400V (IS 13947-2)
+  // Im (magnetic trip) is adjustable 5–10× In on most TM-type frames; set per application.
+  // Icu values shown are typical commercial frames (Schneider Easypact / L&T DTR / ABB SACE / Havells Power One).
+  { id: "mccb_100", capacity: 100, type: "MCCB", voltage: 400, poles: 3, description: "100A MCCB (3P, 415V, Icu 25kA, IS 13947-2)", category: 'MCCB', breakingCapacityKA: 25 },
+  { id: "mccb_125", capacity: 125, type: "MCCB", voltage: 400, poles: 3, description: "125A MCCB (3P, 415V, Icu 25kA, IS 13947-2)", category: 'MCCB', breakingCapacityKA: 25 },
+  { id: "mccb_160", capacity: 160, type: "MCCB", voltage: 400, poles: 3, description: "160A MCCB (3P, 415V, Icu 25kA, IS 13947-2)", category: 'MCCB', breakingCapacityKA: 25 },
+  { id: "mccb_200", capacity: 200, type: "MCCB", voltage: 400, poles: 3, description: "200A MCCB (3P, 415V, Icu 36kA, IS 13947-2)", category: 'MCCB', breakingCapacityKA: 36 },
+  { id: "mccb_250", capacity: 250, type: "MCCB", voltage: 400, poles: 3, description: "250A MCCB (3P, 415V, Icu 36kA, IS 13947-2)", category: 'MCCB', breakingCapacityKA: 36 },
+  { id: "mccb_315", capacity: 315, type: "MCCB", voltage: 400, poles: 3, description: "315A MCCB (3P, 415V, Icu 36kA, IS 13947-2)", category: 'MCCB', breakingCapacityKA: 36 },
+  { id: "mccb_400", capacity: 400, type: "MCCB", voltage: 400, poles: 3, description: "400A MCCB (3P, 415V, Icu 50kA, IS 13947-2)", category: 'MCCB', breakingCapacityKA: 50 },
+  { id: "mccb_500", capacity: 500, type: "MCCB", voltage: 400, poles: 3, description: "500A MCCB (3P, 415V, Icu 50kA, IS 13947-2)", category: 'MCCB', breakingCapacityKA: 50 },
+  { id: "mccb_630", capacity: 630, type: "MCCB", voltage: 400, poles: 3, description: "630A MCCB (3P, 415V, Icu 50kA, IS 13947-2)", category: 'MCCB', breakingCapacityKA: 50 },
+  { id: "mccb_800", capacity: 800, type: "MCCB", voltage: 400, poles: 3, description: "800A MCCB (3P, 415V, Icu 65kA, IS 13947-2)", category: 'MCCB', breakingCapacityKA: 65 },
 ];
 
 // Electrical constants for calculations

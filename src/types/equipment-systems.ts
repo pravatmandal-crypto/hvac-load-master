@@ -136,12 +136,35 @@ export interface EquipmentSystem {
  * Extends EquipmentSystem with DOAS linking and migration markers.
  */
 export interface HvacSystemDoc extends EquipmentSystem {
-  // DOAS systems link to primary system IDs they serve (no rooms assigned directly)
+  // TFA/DOAS systems link to primary system IDs (LEGACY — coarse, all zones in system are TFA-served).
+  // Kept for backward compatibility; the engine treats a system-link as "every zone in that system".
   doasLinkedSystemIds?: string[];
+  // TFA/DOAS systems link to ZONE IDs (PREFERRED — matches real-world deployment where TFA serves
+  // selected zones, not whole systems). When both are populated, the union is used.
+  doasLinkedZoneIds?: string[];
+  // TFA supply conditions and ERV effectiveness — only meaningful on TFA/DOAS systems.
+  // Engine defaults to 55 °F / 90 % RH and zero ERV when these are unset.
+  tfaSupplyTemp?: number;            // °F
+  tfaSupplyHumidity?: number;        // % RH at supply temp
+  ervSensibleEffectiveness?: number; // 0..1
+  ervLatentEffectiveness?: number;   // 0..1
   // Migration bookkeeping
   migratedFromEquipmentSystem?: boolean;
   migratedAt?: any;
 }
+
+/**
+ * Per-room TFA mode override. Stored on the room document at
+ * /projects/{id}/rooms/{roomId}.tfaMode. Default is 'inherit' (follow zone).
+ *
+ * - 'no-tfa'      Room sees full OA on primary even if zone is TFA-linked
+ *                 (e.g. hi-wall split that can't take ducted TFA supply)
+ * - 'tfa-served'  Cold/neutral TFA handles OA; primary handles space sensible
+ * - 'tfa-only'    Corridor case — TFA is sole conditioning; primary contribution = 0.
+ *                 Engine must validate 1.08 × CFM_tfa × (T_room − T_supply) ≥ room_sensible
+ * - 'inherit'     Follow the zone's tfaDefaultMode (default = tfa-served when zone TFA-linked)
+ */
+export type RoomTfaMode = 'inherit' | 'tfa-served' | 'tfa-only' | 'no-tfa';
 
 /**
  * HvacZoneDoc lives at /projects/{id}/hvacSystems/{systemId}/zones/{zoneId}.
@@ -157,6 +180,10 @@ export interface HvacZoneDoc extends EquipmentZone {
   outdoorHumidity?: number;
   winterIndoorTemp?: number;
   winterIndoorHumidity?: number;
+  // Default TFA mode for rooms in this zone (when zone is TFA-linked). Lets a
+  // whole corridor zone be marked tfa-only without per-room edits. Default is
+  // 'tfa-served' for zones with a TFA link, and ignored otherwise.
+  tfaDefaultMode?: 'tfa-served' | 'tfa-only';
   createdAt?: any;
   updatedAt?: any;
 }

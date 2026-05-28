@@ -10,7 +10,7 @@ import {
   closestCorners,
 } from '@dnd-kit/core';
 import { sortableKeyboardCoordinates } from '@dnd-kit/sortable';
-import { Plus, Download, Building, BookOpen, Pencil, Loader2, BarChart3, Thermometer, Droplets, MapPin } from 'lucide-react';
+import { Plus, Download, Building, BookOpen, Pencil, Loader2, BarChart3, Thermometer, Droplets, MapPin, Settings, AlertTriangle } from 'lucide-react';
 import { MetDataImporterDialog } from './MetDataImporterDialog';
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogFooter } from '../ui/dialog';
 import { Input } from '../ui/input';
@@ -30,6 +30,7 @@ import {
   calculateVentilationLoad,
   calculateParasiticGains,
   calculateHeatingLoad,
+  calculateTFALoad,
   calculatePsychrometrics,
   calculateCoilParameters,
   calculateRoomVolume,
@@ -38,7 +39,7 @@ import {
   getMinAdp,
   type RoomDetails,
 } from '../../lib/hvac';
-import { EnvelopeElement } from '../../lib/hvac/constants';
+import { EnvelopeElement, ACTIVITY_TYPES, ACTIVITY_ACH_RECOMMENDATIONS } from '../../lib/hvac/constants';
 
 
 interface Room {
@@ -458,7 +459,49 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
 
     setRoomSaveStates(prev => ({ ...prev, [roomId]: 'saving' }));
 
-    const dc = getDesignConditionsForZone(zoneId, systemId);
+    try {
+    // ── TFA / DOAS detection ──
+    // A room is TFA-served if EITHER its primary system is in some DOAS's
+    // doasLinkedSystemIds (legacy) OR its zone is in some DOAS's
+    // doasLinkedZoneIds (Phase B+, zone-granularity). Otherwise behave exactly
+    // as before (backward-compat: projects without a DOAS see identical numbers).
+    // Phase C: room.tfaMode='no-tfa' opts out even if the zone is linked.
+    const doasCandidate = (systemId || zoneId)
+      ? equipSystems.find((s: any) => {
+          if (s?.type !== 'DOAS') return false;
+          const sysIds = (s?.doasLinkedSystemIds ?? []) as string[];
+          const zoneIds = (s?.doasLinkedZoneIds ?? []) as string[];
+          if (systemId && sysIds.includes(systemId)) return true;
+          if (zoneId && zoneIds.includes(zoneId)) return true;
+          if (systemId && zoneIds.includes(systemId)) return true;
+          return false;
+        })
+      : null;
+    // Resolve effective TFA mode: explicit room override → zone default → 'tfa-served'.
+    const rawRoomMode = (roomSource as any)?.tfaMode as string | undefined;
+    const zoneDocForRoom = zones.find((z: any) => z.id === zoneId);
+    const zoneDefaultMode = (zoneDocForRoom as any)?.tfaDefaultMode as string | undefined;
+    const effectiveTfaMode: 'no-tfa' | 'tfa-served' | 'tfa-only' = !doasCandidate
+      ? 'no-tfa'
+      : (rawRoomMode === 'no-tfa' || rawRoomMode === 'tfa-served' || rawRoomMode === 'tfa-only')
+        ? rawRoomMode
+        : (zoneDefaultMode === 'tfa-only' || zoneDefaultMode === 'tfa-served')
+          ? zoneDefaultMode
+          : 'tfa-served';
+    const roomTfaMode = effectiveTfaMode; // alias used below
+    const doasForThis = effectiveTfaMode === 'no-tfa' ? null : doasCandidate;
+    const isTFA = !!doasForThis;
+    const baseDc = getDesignConditionsForZone(zoneId, systemId);
+    const dc: any = isTFA
+      ? {
+          ...baseDc,
+          ventilationStrategy: 'tfa-cold',
+          tfaSupplyTemp: (doasForThis as any).tfaSupplyTemp,
+          tfaSupplyHumidity: (doasForThis as any).tfaSupplyHumidity,
+          ervSensibleEffectiveness: (doasForThis as any).ervSensibleEffectiveness,
+          ervLatentEffectiveness: (doasForThis as any).ervLatentEffectiveness,
+        }
+      : baseDc;
     const rd: RoomDetails = {
       id: roomSource.id,
       name: roomSource.name ?? '',
@@ -476,18 +519,25 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
       othersKW: Number(roomSource.othersKW) || 0,
       isGroundFloor: !!roomSource.isGroundFloor,
       slabPerimeter: Number(roomSource.slabPerimeter) || 0,
-      slabFFactor: Number(roomSource.slabFFactor) || undefined,
+      // Omit slabFFactor when not set so it doesn't serialize as `undefined` to Firestore;
+      // calculateHeatingLoad uses `?? 0.73` as the uninsulated-slab default.
+      ...(Number(roomSource.slabFFactor) > 0 ? { slabFFactor: Number(roomSource.slabFFactor) } : {}),
     };
 
     const elements = (elementsOverride ?? envelopeElements[roomId] ?? []) as EnvelopeElement[];
     const envelope = calculateEnvelopeGain(elements, dc);
     const internal = calculateInternalGains(rd);
     const vent = calculateVentilationLoad(rd, dc);
+    const tfa = isTFA ? calculateTFALoad(rd, dc) : null;
     const heating = calculateHeatingLoad(rd, elements, dc);
 
     const bf = 0.15;
-    const erSensible = envelope.sensible + internal.sensible + vent.sensible * bf;
-    const erLatent = internal.latent + vent.latent * bf;
+    // OA bypass-factor model only applies when OA enters the primary coil.
+    // In TFA mode, OA is conditioned by DOAS — primary sees no raw OA.
+    const erVentSensible = isTFA ? 0 : vent.sensible * bf;
+    const erVentLatent = isTFA ? 0 : vent.latent * bf;
+    const erSensible = envelope.sensible + internal.sensible + erVentSensible;
+    const erLatent = internal.latent + erVentLatent;
     const ductPct = Number(roomSource.ductGainPct) || 2;
     const fanPct = Number(roomSource.fanGainPct) || 3;
     const sensibleSafetyPct = Number(roomSource.sensibleSafetyPercent ?? roomSource.sensibleSafetyFactor ?? 10);
@@ -500,12 +550,21 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
     const ersh = ershRaw * (1 + sensibleSafetyPct / 100);
     const erlh = erlhRaw * (1 + latentSafetyPct / 100);
     const erh = ersh + erlh;
-    const oaSensible = vent.sensible * (1 - bf);
-    const oaLatent = vent.latent * (1 - bf);
+    const oaSensible = isTFA ? 0 : vent.sensible * (1 - bf);
+    const oaLatent = isTFA ? 0 : vent.latent * (1 - bf);
     const oaTotal = oaSensible + oaLatent;
-    const coilSensible = ersh + oaSensible;
-    const coilLatent = erlh + oaLatent;
-    const grandTotal = erh + oaTotal;
+    // Cold-DOAS credit (engineering-correct, per locked decision 5).
+    const tfaOffsetSensible = tfa ? tfa.spaceSensibleOffset : 0;
+    const tfaOffsetLatent = tfa ? tfa.spaceLatentOffset : 0;
+    // Phase D: tfa-only rooms contribute zero to primary; room sensible is
+    // carried by the TFA supply air's reserve (1.08 × CFM × ΔT). Engine warns
+    // if carrying < ersh; designer decides whether to bump CFM or supply temp.
+    const isTfaOnly = isTFA && roomTfaMode === 'tfa-only';
+    const tfaCarryingBTUH = tfa ? 1.08 * tfa.cfm * (dc.indoorTemp - tfa.supplyTemp) : 0;
+    const tfaCarryingDeficit = isTfaOnly ? Math.max(0, ersh - tfaCarryingBTUH) : 0;
+    const coilSensible = isTfaOnly ? 0 : (isTFA ? Math.max(0, ersh - tfaOffsetSensible) : ersh + oaSensible);
+    const coilLatent = isTfaOnly ? 0 : (isTFA ? Math.max(0, erlh - tfaOffsetLatent) : erlh + oaLatent);
+    const grandTotal = isTfaOnly ? 0 : (isTFA ? coilSensible + coilLatent : erh + oaTotal);
     const grandTotalTR = grandTotal / 12000;
     const rshf = coilSensible > 0 ? coilSensible / Math.max(1, (coilSensible + coilLatent)) : 1;
 
@@ -524,20 +583,34 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
     const totalSupplyACH = Math.max(presetTotalACH, rd.facph);
     const totalSupplyCFM = (calculateRoomVolume(rd) * totalSupplyACH) / 60;
     const designSupplyCFM = Math.max(coil.minAdpSensibleCFM, totalSupplyCFM);
+    // Plant TR is load-only (2026-05-20). cfmTR retained as sanity ratio.
     const cfmTR = designSupplyCFM / 400;
-    const governingTR = Math.max(grandTotalTR, cfmTR);
+    const governingTR = grandTotalTR;
     const requiredTR = governingTR * (1 + overallSafetyPct / 100);
 
     // Monsoon snapshot — always computed so EquipmentSelection can compare seasons
-    const monsoonDc = { ...dc, outdoorTemp: monsoonDesignTemp, outdoorHumidity: monsoonDesignHumidity };
+    const monsoonDc: any = { ...dc, outdoorTemp: monsoonDesignTemp, outdoorHumidity: monsoonDesignHumidity };
     const monsoonEnvelope = calculateEnvelopeGain(elements, monsoonDc);
     const monsoonVent = calculateVentilationLoad(rd, monsoonDc);
-    const monsoonErSensible = monsoonEnvelope.sensible + internal.sensible + monsoonVent.sensible * bf;
-    const monsoonErLatent = internal.latent + monsoonVent.latent * bf;
+    const monsoonTfa = isTFA ? calculateTFALoad(rd, monsoonDc) : null;
+    const monsoonErVentSen = isTFA ? 0 : monsoonVent.sensible * bf;
+    const monsoonErVentLat = isTFA ? 0 : monsoonVent.latent * bf;
+    const monsoonErSensible = monsoonEnvelope.sensible + internal.sensible + monsoonErVentSen;
+    const monsoonErLatent = internal.latent + monsoonErVentLat;
     const monsoonParasitic = calculateParasiticGains(monsoonErSensible, monsoonErSensible, ductPct, fanPct);
     const monsoonErshRaw = monsoonErSensible + monsoonParasitic.ductGain + monsoonParasitic.fanGain;
-    const monsoonCoilSen = monsoonErshRaw * (1 + sensibleSafetyPct / 100) + monsoonVent.sensible * (1 - bf);
-    const monsoonCoilLat = monsoonErLatent * (1 + latentSafetyPct / 100) + monsoonVent.latent * (1 - bf);
+    const monsoonErsh = monsoonErshRaw * (1 + sensibleSafetyPct / 100);
+    const monsoonErlh = monsoonErLatent * (1 + latentSafetyPct / 100);
+    const monsoonOaSen = isTFA ? 0 : monsoonVent.sensible * (1 - bf);
+    const monsoonOaLat = isTFA ? 0 : monsoonVent.latent * (1 - bf);
+    const monsoonTfaOffsetSen = monsoonTfa ? monsoonTfa.spaceSensibleOffset : 0;
+    const monsoonTfaOffsetLat = monsoonTfa ? monsoonTfa.spaceLatentOffset : 0;
+    const monsoonCoilSen = isTfaOnly
+      ? 0
+      : (isTFA ? Math.max(0, monsoonErsh - monsoonTfaOffsetSen) : monsoonErsh + monsoonOaSen);
+    const monsoonCoilLat = isTfaOnly
+      ? 0
+      : (isTFA ? Math.max(0, monsoonErlh - monsoonTfaOffsetLat) : monsoonErlh + monsoonOaLat);
     const monsoonGrandTotal = monsoonCoilSen + monsoonCoilLat;
     const monsoonGrandTotalTR = monsoonGrandTotal / 12000;
     const monsoonCoilParams = calculateCoilParameters(
@@ -547,7 +620,7 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
     );
     const monsoonDesignCFM = Math.max(monsoonCoilParams.minAdpSensibleCFM, totalSupplyCFM);
     const monsoonCfmTR = monsoonDesignCFM / 400;
-    const monsoonGoverningTR = Math.max(monsoonGrandTotalTR, monsoonCfmTR);
+    const monsoonGoverningTR = monsoonGrandTotalTR;
     const monsoonRequiredTR = monsoonGoverningTR * (1 + overallSafetyPct / 100);
     const overallGoverningTR = includeMonsoon ? Math.max(governingTR, monsoonGoverningTR) : governingTR;
     const overallRequiredTR  = includeMonsoon ? Math.max(requiredTR, monsoonRequiredTR) : requiredTR;
@@ -595,6 +668,23 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
         outdoor: outdoorPsych,
         indoor: indoorPsych,
       },
+      // TFA / DOAS block — null when this room isn't DOAS-served. Mirrors what
+      // loadCalculationService.calculateAndPersistRoom writes for SD-saved rooms
+      // so all readers (reports, exports, badges) can rely on a single shape.
+      tfa: isTFA && tfa
+        ? {
+            strategy: 'tfa-cold' as const,
+            summer: tfa,
+            monsoon: monsoonTfa,
+            governingCoilBTUH: Math.max(
+              tfa.coilSensible + tfa.coilLatent,
+              monsoonTfa ? monsoonTfa.coilSensible + monsoonTfa.coilLatent : 0,
+            ),
+            governs: (monsoonTfa && monsoonTfa.coilSensible + monsoonTfa.coilLatent > tfa.coilSensible + tfa.coilLatent
+              ? 'monsoon'
+              : 'summer') as 'summer' | 'monsoon',
+          }
+        : null,
       coil,
       moisture,
       reheat,
@@ -635,11 +725,33 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
       _calcOverallGoverningTR: parseFloat(overallGoverningTR.toFixed(3)),
       _calcOverallRequiredTR: parseFloat(overallRequiredTR.toFixed(3)),
       _calcOverallDesignCFM: parseFloat(overallDesignCFM.toFixed(0)),
+      // Phase D: tfa-only flag + carrying capacity diagnostics. Always written
+      // (true/false + numeric values) so badges + warnings don't go stale.
+      _calcTfaOnly: !!isTfaOnly,
+      _calcTfaCarryingBTUH: parseFloat((tfaCarryingBTUH || 0).toFixed(0)),
+      _calcTfaCarryingDeficit: parseFloat((tfaCarryingDeficit || 0).toFixed(0)),
       // Winter heating BTU/h — flat field so ES, LC row badges, and PDF can read it
       // without parsing the nested analysis.heating object. Always written (even when winter
       // isn't enabled in project settings) so toggling the season doesn't require a re-save.
       // Safety factor (overallSafetyPct) is applied to mirror the cooling-side margin.
       _calcWinterHeatingBTUH: parseFloat(((heating.totalHeatingLoad || 0) * (1 + overallSafetyPct / 100)).toFixed(0)),
+      // TFA / DOAS flat fields — populated only when this room's primary is DOAS-served.
+      // Mirrors what loadCalculationService writes so SD's getRoomReqs stored-fallback
+      // path can read them after LC persists. Use deleteField so toggling DOAS off
+      // doesn't leave stale TR numbers behind.
+      _calcTfaCoilBTUH: isTFA && tfa
+        ? parseFloat((tfa.coilSensible + tfa.coilLatent).toFixed(0))
+        : deleteField(),
+      _calcTfaCoilTR: isTFA && tfa
+        ? parseFloat(((tfa.coilSensible + tfa.coilLatent) / 12000).toFixed(3))
+        : deleteField(),
+      _calcTfaCfm: isTFA && tfa ? parseFloat(tfa.cfm.toFixed(0)) : deleteField(),
+      _calcMonsoonTfaCoilBTUH: isTFA && monsoonTfa
+        ? parseFloat((monsoonTfa.coilSensible + monsoonTfa.coilLatent).toFixed(0))
+        : deleteField(),
+      _calcMonsoonTfaCoilTR: isTFA && monsoonTfa
+        ? parseFloat(((monsoonTfa.coilSensible + monsoonTfa.coilLatent) / 12000).toFixed(3))
+        : deleteField(),
       updatedAt: new Date(),
     });
 
@@ -683,6 +795,11 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
       if (next[roomId] === 'saved') next[roomId] = 'idle';
       return next;
     }), 2500);
+    } catch (error) {
+      console.error('[LoadCalculator] Failed to persist room analysis snapshot:', { roomId, error });
+      toast.error('Failed to save room analysis: ' + (error instanceof Error ? error.message : 'Unknown error'));
+      setRoomSaveStates(prev => ({ ...prev, [roomId]: 'idle' }));
+    }
   };
 
   // ── Project-level totals (computed from all rooms) ───────────────────────────
@@ -696,8 +813,30 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
     let monsoonCooling = 0;
     let monsoonDesignCfm = 0;
     let monsoonCoilDehumCfm = 0;
+    // Phase D aggregations — TFA-side numbers split out from plant totals.
+    let tfaCoilBTUH = 0;          // Σ TFA-served room OA conditioning (summer)
+    let tfaMonsoonCoilBTUH = 0;   // Σ TFA-served room OA conditioning (monsoon)
+    let tfaTotalCFM = 0;          // Σ TFA CFM across all TFA-served + tfa-only rooms
+    let tfaServedRoomCount = 0;
+    let tfaOnlyRoomCount = 0;
+    let tfaOnlyRoomLoadBTUH = 0;  // Σ room sensible+latent on tfa-only rooms (for reference)
+    let tfaCarryingDeficitTotal = 0;
+    const tfaUndersizedRoomIds: string[] = [];
 
-    const calculateCoolingSnapshot = (room: any, elements: EnvelopeElement[], zoneDc: typeof defaultDesignConditions) => {
+    // ── Build (systemId|zoneId) → DOAS lookup (one DOAS can serve many primaries) ──
+    // Project totals must apply the same TFA branch as persistRoomAnalysisSnapshot
+    // and EquipmentSelection.computeRoomReqs — otherwise the Project-Level Summary
+    // shows pre-DOAS numbers even after rooms are persisted in TFA mode.
+    // Includes both legacy system-links and Phase B+ zone-links.
+    const doasForPrimary = new Map<string, any>();
+    for (const s of equipSystems as any[]) {
+      if (s?.type === 'DOAS') {
+        for (const pid of ((s.doasLinkedSystemIds ?? []) as string[])) doasForPrimary.set(pid, s);
+        for (const zid of ((s.doasLinkedZoneIds ?? []) as string[])) doasForPrimary.set(zid, s);
+      }
+    }
+
+    const calculateCoolingSnapshot = (room: any, elements: EnvelopeElement[], zoneDc: typeof defaultDesignConditions, doas: any | null, zoneDefaultMode?: string) => {
       const rd: RoomDetails = {
         id: room.id,
         name: room.name ?? '',
@@ -715,15 +854,45 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
         othersKW: Number(room.othersKW) || 0,
         isGroundFloor: !!room.isGroundFloor,
         slabPerimeter: Number(room.slabPerimeter) || 0,
-        slabFFactor: Number(room.slabFFactor) || undefined,
+        ...(Number(room.slabFFactor) > 0 ? { slabFFactor: Number(room.slabFFactor) } : {}),
       };
 
-      const envelope = calculateEnvelopeGain(elements, zoneDc);
-      const internal = calculateInternalGains(rd);
-      const vent = calculateVentilationLoad(rd, zoneDc);
+      // TFA-aware design conditions — when DOAS-served, attach strategy + supply
+      // params so vent / TFA load functions use the same branch as the persist path.
+      const isTFA = !!doas;
+      const dcEff: any = isTFA
+        ? {
+            ...zoneDc,
+            ventilationStrategy: 'tfa-cold',
+            tfaSupplyTemp: doas.tfaSupplyTemp,
+            tfaSupplyHumidity: doas.tfaSupplyHumidity,
+            ervSensibleEffectiveness: doas.ervSensibleEffectiveness,
+            ervLatentEffectiveness: doas.ervLatentEffectiveness,
+          }
+        : zoneDc;
 
-      const erSensible = envelope.sensible + internal.sensible + vent.sensible * BF_LOCAL;
-      const erLatent = internal.latent + vent.latent * BF_LOCAL;
+      const envelope = calculateEnvelopeGain(elements, dcEff);
+      const internal = calculateInternalGains(rd);
+      const vent = calculateVentilationLoad(rd, dcEff);
+      const tfa = isTFA ? calculateTFALoad(rd, dcEff) : null;
+      // Phase D: tfa-only rooms route ALL load through TFA supply carrying.
+      // Phase E: respect zone.tfaDefaultMode when room.tfaMode is 'inherit'/unset.
+      const rawRoomModeSnap = (room as any)?.tfaMode as string | undefined;
+      const zoneDefaultSnap = zoneDefaultMode;
+      const effectiveModeSnap: 'no-tfa' | 'tfa-served' | 'tfa-only' = !isTFA
+        ? 'no-tfa'
+        : (rawRoomModeSnap === 'no-tfa' || rawRoomModeSnap === 'tfa-served' || rawRoomModeSnap === 'tfa-only')
+          ? rawRoomModeSnap
+          : (zoneDefaultSnap === 'tfa-only' || zoneDefaultSnap === 'tfa-served')
+            ? zoneDefaultSnap
+            : 'tfa-served';
+      const isTfaOnly = effectiveModeSnap === 'tfa-only';
+
+      // Bypass-OA terms zero out when TFA is active — OA goes to the DOAS unit.
+      const erVentSensible = isTFA ? 0 : vent.sensible * BF_LOCAL;
+      const erVentLatent = isTFA ? 0 : vent.latent * BF_LOCAL;
+      const erSensible = envelope.sensible + internal.sensible + erVentSensible;
+      const erLatent = internal.latent + erVentLatent;
       const ductPct = Number(room.ductGainPct) || 2;
       const fanPct = Number(room.fanGainPct) || 3;
       const sensibleSafetyPct = Number(room.sensibleSafetyPercent ?? room.sensibleSafetyFactor ?? 10);
@@ -733,18 +902,20 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
 
       const ersh = (erSensible + parasitic.ductGain + parasitic.fanGain) * (1 + sensibleSafetyPct / 100);
       const erlh = erLatent * (1 + latentSafetyPct / 100);
-      const oaSensible = vent.sensible * (1 - BF_LOCAL);
-      const oaLatent = vent.latent * (1 - BF_LOCAL);
-      const coilSensible = ersh + oaSensible;
-      const coilLatent = erlh + oaLatent;
+      const oaSensible = isTFA ? 0 : vent.sensible * (1 - BF_LOCAL);
+      const oaLatent = isTFA ? 0 : vent.latent * (1 - BF_LOCAL);
+      const tfaOffSen = tfa ? tfa.spaceSensibleOffset : 0;
+      const tfaOffLat = tfa ? tfa.spaceLatentOffset : 0;
+      const coilSensible = isTfaOnly ? 0 : (isTFA ? Math.max(0, ersh - tfaOffSen) : ersh + oaSensible);
+      const coilLatent = isTfaOnly ? 0 : (isTFA ? Math.max(0, erlh - tfaOffLat) : erlh + oaLatent);
       const grandTotal = coilSensible + coilLatent;
 
       const coilLocal = calculateCoilParameters(
         coilSensible,
         coilLatent,
-        zoneDc.indoorTemp,
-        zoneDc.indoorHumidity,
-        zoneDc.altitude || 0,
+        dcEff.indoorTemp,
+        dcEff.indoorHumidity,
+        dcEff.altitude || 0,
         BF_LOCAL,
         35,
         65,
@@ -755,12 +926,25 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
       const totalSupplyCFM = (calculateRoomVolume(rd) * totalSupplyACH) / 60;
       const designSupplyCFM = Math.max(coilLocal.minAdpSensibleCFM, totalSupplyCFM);
 
+      // Phase D: carrying capacity used by tfa-only rooms (and reported for
+      // all TFA-served rooms as a sanity check). Deficit > 0 = undersized.
+      const tfaCarryingBTUH = tfa ? 1.08 * tfa.cfm * (dcEff.indoorTemp - tfa.supplyTemp) : 0;
+      const tfaCarryingDeficit = isTfaOnly ? Math.max(0, ersh - tfaCarryingBTUH) : 0;
       return {
         grandTotal,
         designSupplyCFM,
         coilDehumCFM: designSupplyCFM,
-        heating: calculateHeatingLoad(rd, elements, zoneDc),
+        heating: calculateHeatingLoad(rd, elements, dcEff),
         area: rd.length * rd.width,
+        // Per-room TFA coil load — aggregated by the caller into project TFA totals.
+        tfaCoilBTUH: tfa ? tfa.coilSensible + tfa.coilLatent : 0,
+        tfaCfm: tfa ? tfa.cfm : 0,
+        isTfaOnly,
+        tfaCarryingBTUH,
+        tfaCarryingDeficit,
+        // tfa-only rooms remove their full envelope+internal load via TFA carrying;
+        // the caller uses this to size the TFA aggregate vs the chiller plant.
+        tfaOnlyRoomLoad: isTfaOnly ? (ersh + erlh) : 0,
       };
     };
 
@@ -784,10 +968,14 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
         indoorHumidity: zoneRecord?.winterIndoorHumidity ?? defaultDesignConditions.winterIndoorHumidity ?? insideWinterHumidity,
       };
 
+      const zoneDefaultModeForLoop = (zoneRecord as any)?.tfaDefaultMode as string | undefined;
       for (const room of (zoneRooms as any[])) {
         const elements = (liveEnvelopeElements[room.id] || []) as EnvelopeElement[];
-        const summerSnapshot = calculateCoolingSnapshot(room, elements, zoneSummerDc);
-        const heatingSnapshot = calculateCoolingSnapshot(room, elements, zoneHeatingDc);
+        // Phase C: room.tfaMode='no-tfa' opts out of TFA even if zone is linked.
+        const candidate = doasForPrimary.get(room.systemId) ?? doasForPrimary.get(room.zoneId) ?? null;
+        const doas = (room as any)?.tfaMode === 'no-tfa' ? null : candidate;
+        const summerSnapshot = calculateCoolingSnapshot(room, elements, zoneSummerDc, doas, zoneDefaultModeForLoop);
+        const heatingSnapshot = calculateCoolingSnapshot(room, elements, zoneHeatingDc, doas, zoneDefaultModeForLoop);
 
         summerCooling += summerSnapshot.grandTotal;
         summerDesignCfm += summerSnapshot.designSupplyCFM;
@@ -797,12 +985,26 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
           totalHeating += heatingSnapshot.heating.totalHeatingLoad * (1 + heatingSF / 100);
         }
         totalArea += summerSnapshot.area;
+        // Phase D — split TFA-side numbers out.
+        if (doas) {
+          tfaCoilBTUH += summerSnapshot.tfaCoilBTUH;
+          tfaTotalCFM += summerSnapshot.tfaCfm;
+          if (summerSnapshot.isTfaOnly) {
+            tfaOnlyRoomCount += 1;
+            tfaOnlyRoomLoadBTUH += summerSnapshot.tfaOnlyRoomLoad;
+            tfaCarryingDeficitTotal += summerSnapshot.tfaCarryingDeficit;
+            if (summerSnapshot.tfaCarryingDeficit > 0) tfaUndersizedRoomIds.push(room.id);
+          } else {
+            tfaServedRoomCount += 1;
+          }
+        }
 
         if (includeMonsoon) {
-          const monsoonSnapshot = calculateCoolingSnapshot(room, elements, zoneMonsoonDc);
+          const monsoonSnapshot = calculateCoolingSnapshot(room, elements, zoneMonsoonDc, doas, zoneDefaultModeForLoop);
           monsoonCooling += monsoonSnapshot.grandTotal;
           monsoonDesignCfm += monsoonSnapshot.designSupplyCFM;
           monsoonCoilDehumCfm += monsoonSnapshot.coilDehumCFM;
+          if (doas) tfaMonsoonCoilBTUH += monsoonSnapshot.tfaCoilBTUH;
         }
       }
     }
@@ -810,18 +1012,23 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
     const roomCount = Object.values(liveRooms).reduce((sum, r) => sum + (r as any[]).length, 0);
     const monsoonTR = monsoonCooling / 12000;
     const summerTR = summerCooling / 12000;
+    // cfmTR is a SANITY RATIO only — kept for display/warning. It does NOT
+    // govern plant sizing. (Engine decision: 2026-05-20.)
     const summerCfmTR = summerCoilDehumCfm > 0 ? summerCoilDehumCfm / 400 : 0;
     const monsoonCfmTR = monsoonCoilDehumCfm > 0 ? monsoonCoilDehumCfm / 400 : 0;
-    const summerGoverningTR = Math.max(summerTR, summerCfmTR);
-    const monsoonGoverningTR = Math.max(monsoonTR, monsoonCfmTR);
+    const summerGoverningTR = summerTR;
+    const monsoonGoverningTR = monsoonTR;
     const governingLoadSeason = includeMonsoon && monsoonTR > summerTR ? 'Monsoon' : 'Summer';
     const governingAirflowSeason = includeMonsoon && monsoonCfmTR > summerCfmTR ? 'Monsoon' : 'Summer';
     const governingLoadTR = includeMonsoon ? Math.max(summerTR, monsoonTR) : summerTR;
     const governingCfmTR = includeMonsoon ? Math.max(summerCfmTR, monsoonCfmTR) : summerCfmTR;
-    const totalTR = Math.max(governingLoadTR, governingCfmTR);
-    const peakSeason = totalTR === governingCfmTR ? governingAirflowSeason : governingLoadSeason;
+    const totalTR = governingLoadTR;
+    const peakSeason = governingLoadSeason;
     const totalCooling = governingLoadSeason === 'Monsoon' ? monsoonCooling : summerCooling;
     const totalDesignCfm = includeMonsoon ? Math.max(summerDesignCfm, monsoonDesignCfm) : summerDesignCfm;
+    // CFM/TR ratio for sanity warning (typical 350-450 CFM/TR for comfort cooling).
+    const cfmPerTRRatio = totalTR > 0 ? totalDesignCfm / totalTR : 0;
+    const cfmRatioOutOfRange = cfmPerTRRatio > 0 && (cfmPerTRRatio < 350 || cfmPerTRRatio > 450);
 
     return {
       totalCooling,
@@ -836,6 +1043,8 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
       governingAirflowSeason,
       governingLoadTR,
       governingCfmTR,
+      cfmPerTRRatio,
+      cfmRatioOutOfRange,
       summer: {
         totalCooling: summerCooling,
         totalTR: summerTR,
@@ -849,6 +1058,18 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
         cfmTR: monsoonCfmTR,
         governingTR: monsoonGoverningTR,
         totalDesignCfm: monsoonDesignCfm,
+      },
+      // Phase D — TFA-side split numbers.
+      tfa: {
+        coilBTUHSummer: tfaCoilBTUH,
+        coilBTUHMonsoon: tfaMonsoonCoilBTUH,
+        coilTR: Math.max(tfaCoilBTUH, tfaMonsoonCoilBTUH) / 12000,
+        totalCFM: tfaTotalCFM,
+        servedRoomCount: tfaServedRoomCount,
+        onlyRoomCount: tfaOnlyRoomCount,
+        onlyRoomLoadBTUH: tfaOnlyRoomLoadBTUH,
+        carryingDeficitTotal: tfaCarryingDeficitTotal,
+        undersizedRoomIds: tfaUndersizedRoomIds,
       },
     };
   }, [
@@ -864,7 +1085,96 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
     insideMonsoonHumidity,
     insideWinterTemp,
     insideWinterHumidity,
+    equipSystems,
   ]);
+
+  // ── DOAS / TFA staleness detection ──────────────────────────────────────
+  // A room is "stale" when its persisted _calcTfa* fields disagree with the
+  // current DOAS configuration in equipSystems. Two cases:
+  //   1. Room's primary is now DOAS-served but room has no _calcTfaCoilBTUH
+  //      → loads still include OA, primary is oversized.
+  //   2. Room's primary is no longer DOAS-served but room still has _calcTfaCoilBTUH
+  //      → loads have an obsolete TFA credit, primary is undersized.
+  // The banner in the project summary surfaces a single "Recalculate" action.
+  const tfaStaleRoomIds = useMemo(() => {
+    const stale: string[] = [];
+    const doasSystems = equipSystems.filter((s: any) => s?.type === 'DOAS');
+    if (doasSystems.length === 0) return stale;
+    // Union of system-links and Phase B+ zone-links.
+    const doasLinkedSet = new Set<string>();
+    for (const d of doasSystems) {
+      for (const id of (d.doasLinkedSystemIds ?? []) as string[]) doasLinkedSet.add(id);
+      for (const id of (d.doasLinkedZoneIds ?? []) as string[]) doasLinkedSet.add(id);
+    }
+    for (const zoneRooms of Object.values(rooms)) {
+      for (const r of zoneRooms as any[]) {
+        const sysId = r.systemId as string | undefined;
+        const zoneId = r.zoneId as string | undefined;
+        const shouldBeTFA = (!!sysId && doasLinkedSet.has(sysId)) || (!!zoneId && doasLinkedSet.has(zoneId));
+        const hasTFAFields = Number(r._calcTfaCoilBTUH) > 0;
+        if (shouldBeTFA !== hasTFAFields) stale.push(r.id);
+      }
+    }
+    return stale;
+  }, [equipSystems, rooms]);
+
+  const recalcAllRooms = useCallback(async () => {
+    const ids = tfaStaleRoomIds;
+    if (ids.length === 0) return;
+    toast.info(`Recalculating ${ids.length} room${ids.length === 1 ? '' : 's'}…`);
+    let ok = 0;
+    for (const zoneId of Object.keys(rooms)) {
+      const zoneRooms = rooms[zoneId] ?? [];
+      for (const r of zoneRooms as any[]) {
+        if (!ids.includes(r.id)) continue;
+        try {
+          await persistRoomAnalysisSnapshot(zoneId, r.id, r.systemId ?? zoneId, r, envelopeElements[r.id] ?? []);
+          ok += 1;
+        } catch (err) {
+          console.error('[LC] TFA recalc failed for room', r.id, err);
+        }
+      }
+    }
+    toast.success(`Recalculated ${ok} room${ok === 1 ? '' : 's'} in TFA mode`);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tfaStaleRoomIds, rooms, envelopeElements]);
+
+  // ── CFM-governance staleness detection ─────────────────────────────────
+  // Engine change 2026-05-20: cfmTR no longer inflates _calcRequiredTR.
+  // Any room with persisted _calcCfmTR > _calcLoadTR was sized under the OLD
+  // governance and its _calcRequiredTR is now too high. Recalc rewrites it.
+  const cfmGovernanceStaleRoomIds = useMemo(() => {
+    const stale: string[] = [];
+    for (const zoneRooms of Object.values(rooms)) {
+      for (const r of zoneRooms as any[]) {
+        const loadTR = Number(r._calcLoadTR) || 0;
+        const cfmTR = Number(r._calcCfmTR) || 0;
+        if (loadTR > 0 && cfmTR > loadTR + 0.01) stale.push(r.id);
+      }
+    }
+    return stale;
+  }, [rooms]);
+
+  const recalcCfmGovernanceRooms = useCallback(async () => {
+    const ids = cfmGovernanceStaleRoomIds;
+    if (ids.length === 0) return;
+    toast.info(`Recalculating ${ids.length} room${ids.length === 1 ? '' : 's'} under load-only governance…`);
+    let ok = 0;
+    for (const zoneId of Object.keys(rooms)) {
+      const zoneRooms = rooms[zoneId] ?? [];
+      for (const r of zoneRooms as any[]) {
+        if (!ids.includes(r.id)) continue;
+        try {
+          await persistRoomAnalysisSnapshot(zoneId, r.id, r.systemId ?? zoneId, r, envelopeElements[r.id] ?? []);
+          ok += 1;
+        } catch (err) {
+          console.error('[LC] CFM-governance recalc failed for room', r.id, err);
+        }
+      }
+    }
+    toast.success(`Recalculated ${ok} room${ok === 1 ? '' : 's'} — plant TR now load-only`);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cfmGovernanceStaleRoomIds, rooms, envelopeElements]);
 
   // Firestore zone + system documents — authoritative for names, design-condition overrides, and empty zones.
   // /zones    — LC zones created by the user
@@ -1054,24 +1364,46 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
           }
         }
 
-        // Load envelope elements only for rooms not yet fetched this mount.
-        // Check the module-level cache first — avoids re-reading Firestore on tab switches.
-        const missingIds = rList.map(r => r.id).filter(id => !loadedEnvelopeRoomsRef.current.has(id));
-        if (missingIds.length > 0) {
-          const newElements: Record<string, EnvelopeElement[]> = {};
-          for (const roomId of missingIds) {
-            loadedEnvelopeRoomsRef.current.add(roomId);
-            const cached = envelopeCache.get(project.id, roomId);
-            if (cached) {
-              newElements[roomId] = cached;
-              continue;
-            }
-            const elSnap = await getDocs(collection(db, 'projects', project.id, 'rooms', roomId, 'envelopeElements'));
-            const elements = elSnap.docs.map(d => ({ id: d.id, ...d.data() })) as EnvelopeElement[];
-            envelopeCache.set(project.id, roomId, elements);
-            newElements[roomId] = elements;
+        // Apply cached envelope elements synchronously (no network) so anything
+        // already in memory is available immediately.
+        const cachedNow: Record<string, EnvelopeElement[]> = {};
+        const networkFetchIds: string[] = [];
+        for (const r of rList) {
+          if (loadedEnvelopeRoomsRef.current.has(r.id)) continue;
+          const cached = envelopeCache.get(project.id, r.id);
+          if (cached) {
+            cachedNow[r.id] = cached;
+            loadedEnvelopeRoomsRef.current.add(r.id);
+          } else {
+            networkFetchIds.push(r.id);
           }
-          setEnvelopeElements(prev => ({ ...prev, ...newElements }));
+        }
+        if (Object.keys(cachedNow).length > 0) {
+          setEnvelopeElements(prev => ({ ...prev, ...cachedNow }));
+        }
+
+        // Fetch missing envelope subcollections IN PARALLEL in the background.
+        // The structure UI doesn't need envelope data to render — only per-room
+        // detail does — so we drop the spinner first and let envelopes stream in.
+        if (networkFetchIds.length > 0) {
+          networkFetchIds.forEach(id => loadedEnvelopeRoomsRef.current.add(id));
+          void Promise.all(
+            networkFetchIds.map(async (roomId) => {
+              try {
+                const elSnap = await getDocs(collection(db, 'projects', project.id, 'rooms', roomId, 'envelopeElements'));
+                const elements = elSnap.docs.map(d => ({ id: d.id, ...d.data() })) as EnvelopeElement[];
+                envelopeCache.set(project.id, roomId, elements);
+                return [roomId, elements] as const;
+              } catch (err) {
+                console.error(`[LoadCalculator] envelope load failed for room ${roomId}:`, err);
+                return [roomId, [] as EnvelopeElement[]] as const;
+              }
+            }),
+          ).then((results) => {
+            const merged: Record<string, EnvelopeElement[]> = {};
+            for (const [id, els] of results) merged[id] = els;
+            setEnvelopeElements(prev => ({ ...prev, ...merged }));
+          });
         }
 
         // Keep the live-rooms ref in sync so rebuildFsZonesRef can use actual room data.
@@ -1348,6 +1680,98 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
       toast.success('System added');
     } catch (error) {
       toast.error('Failed to add system');
+    }
+  };
+
+  // ── Global Room Defaults (bulk-apply common inputs to every room) ──────────
+  // Engineer ticks the fields they want to push, picks the values, clicks Apply.
+  // We only write the ticked fields, so unticked properties on each room stay intact.
+  // Manual edits made after Apply are preserved until the engineer clicks Apply again.
+  const [globalSettingsOpen, setGlobalSettingsOpen] = useState(false);
+  const [globalDefaults, setGlobalDefaults] = useState({
+    applyFalseCeiling: false,
+    hasFalseCeiling:   false,
+    falseCeilingHeight: 10,
+    applyActivity:     false,
+    activityType:      'office',
+    applyAch:          false,
+    achProfile:        'office',
+    applyLights:       false,
+    lightsWattsPerSqft: 1.2,
+    applyFacph:        false,
+    facph:             0.5,
+  });
+
+  const totalRoomCount = useMemo(
+    () => Object.values(rooms).reduce((s, list) => s + (list?.length ?? 0), 0),
+    [rooms],
+  );
+
+  const applyGlobalDefaults = async () => {
+    if (totalRoomCount === 0) {
+      toast.error('No rooms to update');
+      return;
+    }
+    const g = globalDefaults;
+    const fields: Record<string, any> = {};
+    if (g.applyFalseCeiling) {
+      fields.hasFalseCeiling = !!g.hasFalseCeiling;
+      fields.falseCeilingHeight = Math.max(0, Number(g.falseCeilingHeight) || 0);
+    }
+    if (g.applyActivity) fields.activityType = g.activityType;
+    if (g.applyAch)      fields.achProfile   = g.achProfile;
+    if (g.applyLights)   fields.lightsWattsPerSqft = Math.max(0, Number(g.lightsWattsPerSqft) || 0);
+    if (g.applyFacph) {
+      // OA fresh-air ACH must be ≤ total supply ACH — outside air is part of the supply,
+      // not added on top of it. If ACH Preset is also being applied, validate against the
+      // new preset; otherwise validate against the currently-selected preset as a guard rail.
+      const achId = g.applyAch ? g.achProfile : g.achProfile;
+      const maxAch = Number(ACTIVITY_ACH_RECOMMENDATIONS.find(a => a.id === achId)?.ach) || 0;
+      if (maxAch > 0 && g.facph > maxAch) {
+        toast.error(`OA FACPH (${g.facph}) cannot exceed ACH Preset (${maxAch})`);
+        return;
+      }
+      fields.facph = Math.max(0, Number(g.facph) || 0);
+    }
+
+    if (Object.keys(fields).length === 0) {
+      toast.error('Tick at least one field to apply');
+      return;
+    }
+
+    try {
+      // Firestore batch limit is 500 ops. We're nowhere near that for typical projects
+      // (~12 rooms) but split into batches of 400 to stay safe on large projects.
+      const allRooms: Array<{ id: string; zoneId: string }> = [];
+      for (const [zoneId, list] of Object.entries(rooms)) {
+        for (const r of list || []) allRooms.push({ id: r.id, zoneId });
+      }
+
+      let written = 0;
+      for (let i = 0; i < allRooms.length; i += 400) {
+        const slice = allRooms.slice(i, i + 400);
+        const batch = writeBatch(db);
+        for (const { id } of slice) {
+          batch.update(doc(db, 'projects', project.id, 'rooms', id), { ...fields, updatedAt: serverTimestamp() });
+          written++;
+        }
+        await batch.commit();
+      }
+
+      // Sync local state so UI reflects without waiting for onSnapshot.
+      setRooms(prev => {
+        const next: Record<string, Room[]> = {};
+        for (const [zid, list] of Object.entries(prev)) {
+          next[zid] = (list || []).map(r => ({ ...r, ...fields }));
+        }
+        return next;
+      });
+
+      toast.success(`Applied to ${written} room${written === 1 ? '' : 's'}`);
+      setGlobalSettingsOpen(false);
+    } catch (error) {
+      console.error('[LoadCalculator] Global apply failed:', error);
+      toast.error('Failed to apply global settings: ' + (error instanceof Error ? error.message : 'Unknown error'));
     }
   };
 
@@ -1709,7 +2133,9 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
         await persistRoomAnalysisSnapshot(zoneId, roomId, systemId, mergedRoom, envelopeElements[roomId] || []);
       }
     } catch (error) {
-      toast.error('Update failed');
+        console.error('[LoadCalculator] Failed to update room:', { roomId, error });
+        toast.error('Update failed: ' + (error instanceof Error ? error.message : 'Unknown error'));
+        setRoomSaveStates(prev => ({ ...prev, [roomId]: 'idle' }));
     }
   };
 
@@ -2370,6 +2796,76 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
           </div>
         </div>
 
+        {/* ── DOAS / TFA staleness banner ───────────────────────────────────
+            Shown when one or more rooms have stored loads that don't match the
+            current DOAS configuration (e.g. you just created/linked/unlinked a
+            DOAS in Equipment Selection). Until the user clicks Recalculate,
+            LC's room loads still include OA the DOAS is supposed to handle. */}
+        {tfaStaleRoomIds.length > 0 && (
+          <div className="rounded-xl border border-amber-300 dark:border-amber-700 bg-amber-50 dark:bg-amber-950/30 px-4 py-3 flex items-center justify-between gap-3">
+            <div className="flex items-start gap-2.5">
+              <AlertTriangle className="w-4 h-4 text-amber-600 dark:text-amber-400 shrink-0 mt-0.5" />
+              <div>
+                <p className="text-sm font-semibold text-amber-800 dark:text-amber-300">
+                  TFA/DOAS configuration changed — {tfaStaleRoomIds.length} room{tfaStaleRoomIds.length === 1 ? '' : 's'} need recalculation
+                </p>
+                <p className="text-xs text-amber-700 dark:text-amber-400 mt-0.5">
+                  Stored loads still reflect the previous primary-only sizing. Click Recalculate to refresh in TFA mode.
+                </p>
+              </div>
+            </div>
+            <Button size="sm" className="h-8 text-xs gap-1.5 bg-amber-600 hover:bg-amber-700 shrink-0"
+              onClick={() => void recalcAllRooms()}>
+              Recalculate {tfaStaleRoomIds.length} Room{tfaStaleRoomIds.length === 1 ? '' : 's'}
+            </Button>
+          </div>
+        )}
+
+        {/* ── TFA-only carrying-capacity warning (Phase D) ──────────────────
+            Shown when one or more tfa-only rooms have a sensible load that
+            exceeds the TFA supply's carrying capacity at the designed CFM and
+            supply temperature. Engineering action: bump CFM, lower supply temp,
+            or accept the deficit (add a small DX). Engine does not auto-correct. */}
+        {projectTotals.tfa.undersizedRoomIds.length > 0 && (
+          <div className="rounded-xl border border-rose-300 dark:border-rose-700 bg-rose-50 dark:bg-rose-950/30 px-4 py-3 flex items-start justify-between gap-3">
+            <div className="flex items-start gap-2.5">
+              <AlertTriangle className="w-4 h-4 text-rose-600 dark:text-rose-400 shrink-0 mt-0.5" />
+              <div>
+                <p className="text-sm font-semibold text-rose-800 dark:text-rose-300">
+                  TFA undersized — {projectTotals.tfa.undersizedRoomIds.length} TFA-only room{projectTotals.tfa.undersizedRoomIds.length === 1 ? '' : 's'} exceed{projectTotals.tfa.undersizedRoomIds.length === 1 ? 's' : ''} carrying capacity
+                </p>
+                <p className="text-xs text-rose-700 dark:text-rose-400 mt-0.5">
+                  Deficit total: <strong>{Math.round(projectTotals.tfa.carryingDeficitTotal).toLocaleString()} BTU/h</strong>. TFA supply can't absorb the room sensible at the designed CFM and supply temp. Increase CFM (raise <code>facph</code>), lower TFA supply temp, or add a small DX assist.
+                </p>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* ── CFM-governance staleness banner ───────────────────────────────
+            Shown when stored loads were sized under the old governance rule
+            (max of load-TR and CFM/400). Engine now uses load-TR only;
+            stored _calcRequiredTR is inflated until the user recalculates. */}
+        {cfmGovernanceStaleRoomIds.length > 0 && (
+          <div className="rounded-xl border border-blue-300 dark:border-blue-700 bg-blue-50 dark:bg-blue-950/30 px-4 py-3 flex items-center justify-between gap-3">
+            <div className="flex items-start gap-2.5">
+              <AlertTriangle className="w-4 h-4 text-blue-600 dark:text-blue-400 shrink-0 mt-0.5" />
+              <div>
+                <p className="text-sm font-semibold text-blue-800 dark:text-blue-300">
+                  Engine updated — {cfmGovernanceStaleRoomIds.length} room{cfmGovernanceStaleRoomIds.length === 1 ? '' : 's'} sized under old CFM/TR governance
+                </p>
+                <p className="text-xs text-blue-700 dark:text-blue-400 mt-0.5">
+                  Plant TR is now load-only (CFM/TR no longer inflates capacity). Recalculate to refresh stored TR values.
+                </p>
+              </div>
+            </div>
+            <Button size="sm" className="h-8 text-xs gap-1.5 bg-blue-600 hover:bg-blue-700 shrink-0"
+              onClick={() => void recalcCfmGovernanceRooms()}>
+              Recalculate {cfmGovernanceStaleRoomIds.length} Room{cfmGovernanceStaleRoomIds.length === 1 ? '' : 's'}
+            </Button>
+          </div>
+        )}
+
         {/* ── Project summary strip ─────────────────────────────────────── */}
         {projectTotals.roomCount > 0 && (
           <div className="rounded-2xl border border-slate-200 dark:border-slate-700 bg-gradient-to-br from-white dark:from-slate-800 via-orange-50/40 dark:via-orange-950/10 to-amber-50/70 dark:to-amber-950/10 shadow-sm overflow-hidden">
@@ -2381,14 +2877,19 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
                   <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">Live aggregate of all room loads, airflow, and conditioned area.</p>
                 </div>
                 <div className="rounded-xl border border-orange-200 dark:border-orange-800 bg-orange-100/70 dark:bg-orange-950/30 px-4 py-2 min-w-[220px]">
-                  <p className="text-[10px] font-bold uppercase tracking-[0.16em] text-orange-700 dark:text-orange-400">AHU Governing Basis</p>
+                  <p className="text-[10px] font-bold uppercase tracking-[0.16em] text-orange-700 dark:text-orange-400">Plant Cooling Capacity</p>
                   <div className="mt-1 flex items-center gap-2">
-                    <span className="text-sm font-semibold text-orange-800 dark:text-orange-300">{projectTotals.peakSeason}</span>
+                    <span className="text-sm font-semibold text-orange-800 dark:text-orange-300">{projectTotals.peakSeason} peak</span>
                     <span className="rounded-full border border-orange-300 dark:border-orange-700 bg-white/70 dark:bg-slate-800/70 px-2 py-0.5 text-[10px] font-semibold text-orange-700 dark:text-orange-400">
-                      {projectTotals.totalTR === projectTotals.governingCfmTR ? 'CFM Gov' : 'Load Gov'}
+                      Load basis
                     </span>
                   </div>
                   <p className="mt-1 font-mono text-2xl font-bold text-orange-900 dark:text-orange-300">{projectTotals.totalTR.toFixed(2)} <span className="text-sm font-semibold text-orange-600 dark:text-orange-400">TR</span></p>
+                  {projectTotals.tfa.onlyRoomCount > 0 && (
+                    <p className="mt-1 text-[10px] text-orange-600 dark:text-orange-400">
+                      Excludes {projectTotals.tfa.onlyRoomCount} TFA-only room{projectTotals.tfa.onlyRoomCount === 1 ? '' : 's'} (no primary load)
+                    </p>
+                  )}
                 </div>
               </div>
             </div>
@@ -2406,7 +2907,7 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
                   </div>
                   <span className="rounded-full bg-white/80 dark:bg-slate-800/80 px-2 py-0.5 text-[10px] font-semibold text-orange-700 dark:text-orange-400">{Math.round(projectTotals.summer.totalCooling).toLocaleString()} BTU/h</span>
                 </div>
-                <p className="mt-2 text-xs text-orange-600 dark:text-orange-400">Gov = max(Load {projectTotals.summer.totalTR.toFixed(2)} TR, CFM {projectTotals.summer.cfmTR.toFixed(2)} TR)</p>
+                <p className="mt-2 text-xs text-orange-600 dark:text-orange-400">Coil load · airflow ratio {projectTotals.summer.totalTR > 0 ? Math.round(projectTotals.summer.totalDesignCfm / projectTotals.summer.totalTR) : 0} CFM/TR</p>
               </div>
               {/* Monsoon — only when enabled */}
               {includeMonsoon && (
@@ -2418,7 +2919,7 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
                     </div>
                     <span className="rounded-full bg-white/80 dark:bg-slate-800/80 px-2 py-0.5 text-[10px] font-semibold text-teal-700 dark:text-teal-400">{Math.round(projectTotals.monsoon.totalCooling).toLocaleString()} BTU/h</span>
                   </div>
-                  <p className="mt-2 text-xs text-teal-600 dark:text-teal-400">Gov = max(Load {projectTotals.monsoon.totalTR.toFixed(2)} TR, CFM {projectTotals.monsoon.cfmTR.toFixed(2)} TR)</p>
+                  <p className="mt-2 text-xs text-teal-600 dark:text-teal-400">Coil load · airflow ratio {projectTotals.monsoon.totalTR > 0 ? Math.round(projectTotals.monsoon.totalDesignCfm / projectTotals.monsoon.totalTR) : 0} CFM/TR</p>
                 </div>
               )}
               {/* Heating — only when winter is enabled */}
@@ -2457,6 +2958,16 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
                 <p className="mt-2 font-mono text-xl font-bold text-emerald-900 dark:text-emerald-300">{Math.round(projectTotals.totalDesignCfm).toLocaleString()}</p>
                 <p className="mt-1 text-xs text-emerald-600 dark:text-emerald-400">CFM governed by {projectTotals.governingAirflowSeason.toLowerCase()} season</p>
               </div>
+              {/* TFA Coil Capacity — only when project has TFA-served rooms */}
+              {(projectTotals.tfa.servedRoomCount + projectTotals.tfa.onlyRoomCount) > 0 && (
+                <div className="rounded-xl border border-teal-200 dark:border-teal-800 bg-teal-50 dark:bg-teal-950/20 px-4 py-3">
+                  <p className="text-[10px] font-bold uppercase tracking-[0.14em] text-teal-700 dark:text-teal-400">TFA Coil Capacity</p>
+                  <p className="mt-2 font-mono text-xl font-bold text-teal-900 dark:text-teal-300">{projectTotals.tfa.coilTR.toFixed(2)} <span className="text-[11px] font-semibold text-teal-600 dark:text-teal-400">TR</span></p>
+                  <p className="mt-1 text-[11px] text-teal-600 dark:text-teal-400">
+                    {projectTotals.tfa.servedRoomCount} TFA-served · {projectTotals.tfa.onlyRoomCount} TFA-only · {Math.round(projectTotals.tfa.totalCFM).toLocaleString()} CFM
+                  </p>
+                </div>
+              )}
               {/* Conditioned Area — always shown */}
               <div className="rounded-xl border border-violet-200 dark:border-violet-800 bg-violet-50 dark:bg-violet-950/20 px-4 py-3">
                 <p className="text-[10px] font-bold uppercase tracking-[0.14em] text-violet-700 dark:text-violet-400">Conditioned Area</p>
@@ -2483,17 +2994,22 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
                         <p className="mt-1 font-mono text-sm font-bold text-slate-800 dark:text-slate-200">{Math.abs(projectTotals.monsoon.governingTR - projectTotals.summer.governingTR).toFixed(2)} TR</p>
                       </div>
                       <div className="rounded-lg border border-blue-200 dark:border-blue-800 bg-blue-50 dark:bg-blue-950/20 px-3 py-2">
-                        <p className="text-[10px] uppercase tracking-wider font-semibold text-blue-600 dark:text-blue-400">Load Governor</p>
+                        <p className="text-[10px] uppercase tracking-wider font-semibold text-blue-600 dark:text-blue-400">Peak Cooling Season</p>
                         <p className="mt-1 text-sm font-semibold text-blue-800 dark:text-blue-300">{projectTotals.governingLoadSeason} <span className="font-mono">{projectTotals.governingLoadTR.toFixed(2)} TR</span></p>
                       </div>
                       <div className="rounded-lg border border-emerald-200 dark:border-emerald-800 bg-emerald-50 dark:bg-emerald-950/20 px-3 py-2">
-                        <p className="text-[10px] uppercase tracking-wider font-semibold text-emerald-600 dark:text-emerald-400">Airflow Governor</p>
-                        <p className="mt-1 text-sm font-semibold text-emerald-800 dark:text-emerald-300">{projectTotals.governingAirflowSeason} <span className="font-mono">{projectTotals.governingCfmTR.toFixed(2)} TR</span></p>
+                        <p className="text-[10px] uppercase tracking-wider font-semibold text-emerald-600 dark:text-emerald-400">Peak Airflow Season</p>
+                        <p className="mt-1 text-sm font-semibold text-emerald-800 dark:text-emerald-300">{projectTotals.governingAirflowSeason} <span className="font-mono">{Math.round(projectTotals.totalDesignCfm).toLocaleString()} CFM</span></p>
                       </div>
                     </div>
                   ) : (
                     <p className="text-xs text-slate-500 dark:text-slate-400">
                       Summer governs cooling. Enable Monsoon or Winter in Project Settings to add seasonal comparison.
+                    </p>
+                  )}
+                  {projectTotals.cfmRatioOutOfRange && (
+                    <p className="mt-2 text-[11px] text-amber-700 dark:text-amber-400">
+                      ⚠ Project CFM/TR ratio is {Math.round(projectTotals.cfmPerTRRatio)} — outside typical 350–450 band. Verify duct/fan sizing; AHU/IDU selection should satisfy CFM independently of plant TR.
                     </p>
                   )}
                 </div>
@@ -2627,13 +3143,205 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
               </p>
             </div>
             {canEdit && (
-              <div className="flex gap-2">
+              <div className="flex gap-2 items-center">
+                <button
+                  type="button"
+                  onClick={() => setGlobalSettingsOpen(o => !o)}
+                  title="Apply common defaults (false ceiling, occupancy, ACH, lights, OA) to all rooms in one click"
+                  className={
+                    'inline-flex items-center gap-1 text-xs h-8 px-2.5 rounded-md border transition-colors ' +
+                    (globalSettingsOpen
+                      ? 'bg-slate-700 border-slate-700 text-white'
+                      : 'bg-white dark:bg-slate-800 border-slate-300 dark:border-slate-600 text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-700')
+                  }
+                >
+                  <Settings className="w-3.5 h-3.5" />
+                  Global
+                </button>
                 <Button size="sm" onClick={() => addZone()} disabled={addingZone} className="gap-1 bg-orange-600 hover:bg-orange-700 text-xs h-8">
                   {addingZone ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Plus className="w-3.5 h-3.5" />} Add Zone
                 </Button>
               </div>
             )}
           </div>
+
+          {canEdit && globalSettingsOpen && (
+            <div className="px-4 py-3 bg-slate-50 dark:bg-slate-800/50 border-b border-slate-200 dark:border-slate-700 space-y-2">
+              <div className="text-xs text-slate-600 dark:text-slate-400">
+                Tick the fields to push to <span className="font-semibold">all {totalRoomCount} rooms</span>. Unticked fields are left as-is. Manual edits after Apply are preserved until you Apply again.
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-x-4 gap-y-2 text-xs">
+                {/* False Ceiling */}
+                <label className="flex items-center gap-2 col-span-1">
+                  <input
+                    type="checkbox"
+                    checked={globalDefaults.applyFalseCeiling}
+                    onChange={e => setGlobalDefaults(g => ({ ...g, applyFalseCeiling: e.target.checked }))}
+                    className="accent-orange-600"
+                  />
+                  <span className="font-medium text-slate-700 dark:text-slate-300 w-24">False Ceiling</span>
+                  <label className="inline-flex items-center gap-1 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={globalDefaults.hasFalseCeiling}
+                      disabled={!globalDefaults.applyFalseCeiling}
+                      onChange={e => setGlobalDefaults(g => ({ ...g, hasFalseCeiling: e.target.checked }))}
+                      className="accent-orange-600"
+                    />
+                    <span>Yes</span>
+                  </label>
+                  <input
+                    type="number"
+                    min={0}
+                    step={0.1}
+                    value={globalDefaults.falseCeilingHeight}
+                    disabled={!globalDefaults.applyFalseCeiling || !globalDefaults.hasFalseCeiling}
+                    onChange={e => setGlobalDefaults(g => ({ ...g, falseCeilingHeight: Number(e.target.value) || 0 }))}
+                    className="h-7 w-16 text-xs rounded border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 px-1.5 text-right disabled:opacity-50"
+                  />
+                  <span className="text-slate-500 dark:text-slate-400">ft</span>
+                </label>
+
+                {/* Occupancy Type */}
+                <label className="flex items-center gap-2">
+                  <input
+                    type="checkbox"
+                    checked={globalDefaults.applyActivity}
+                    onChange={e => setGlobalDefaults(g => ({ ...g, applyActivity: e.target.checked }))}
+                    className="accent-orange-600"
+                  />
+                  <span className="font-medium text-slate-700 dark:text-slate-300 w-24">Occupancy</span>
+                  <select
+                    value={globalDefaults.activityType}
+                    disabled={!globalDefaults.applyActivity}
+                    onChange={e => setGlobalDefaults(g => ({ ...g, activityType: e.target.value }))}
+                    className="h-7 text-xs rounded border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 px-1.5 disabled:opacity-50 flex-1 min-w-0"
+                  >
+                    {ACTIVITY_TYPES.map(a => (
+                      <option key={a.id} value={a.id}>{a.label}</option>
+                    ))}
+                  </select>
+                </label>
+
+                {/* ACH Preset */}
+                <label className="flex items-center gap-2">
+                  <input
+                    type="checkbox"
+                    checked={globalDefaults.applyAch}
+                    onChange={e => setGlobalDefaults(g => ({ ...g, applyAch: e.target.checked }))}
+                    className="accent-orange-600"
+                  />
+                  <span className="font-medium text-slate-700 dark:text-slate-300 w-24">ACH Preset</span>
+                  <select
+                    value={globalDefaults.achProfile}
+                    disabled={!globalDefaults.applyAch}
+                    onChange={e => {
+                      const id = e.target.value;
+                      const ach = Number(ACTIVITY_ACH_RECOMMENDATIONS.find(a => a.id === id)?.ach) || 0;
+                      setGlobalDefaults(g => ({
+                        ...g,
+                        achProfile: id,
+                        facph: ach > 0 ? Math.min(g.facph, ach) : g.facph,
+                      }));
+                    }}
+                    className="h-7 text-xs rounded border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 px-1.5 disabled:opacity-50 flex-1 min-w-0"
+                  >
+                    {ACTIVITY_ACH_RECOMMENDATIONS.map(a => (
+                      <option key={a.id} value={a.id}>{a.label} ({a.ach} ACH)</option>
+                    ))}
+                  </select>
+                </label>
+
+                {/* Lights */}
+                <label className="flex items-center gap-2">
+                  <input
+                    type="checkbox"
+                    checked={globalDefaults.applyLights}
+                    onChange={e => setGlobalDefaults(g => ({ ...g, applyLights: e.target.checked }))}
+                    className="accent-orange-600"
+                  />
+                  <span className="font-medium text-slate-700 dark:text-slate-300 w-24">Lights</span>
+                  <input
+                    type="number"
+                    min={0}
+                    step={0.1}
+                    value={globalDefaults.lightsWattsPerSqft}
+                    disabled={!globalDefaults.applyLights}
+                    onChange={e => setGlobalDefaults(g => ({ ...g, lightsWattsPerSqft: Number(e.target.value) || 0 }))}
+                    className="h-7 w-20 text-xs rounded border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 px-1.5 text-right disabled:opacity-50"
+                  />
+                  <span className="text-slate-500 dark:text-slate-400">W/ft²</span>
+                </label>
+
+                {/* FACPH — must be ≤ selected ACH Preset (OA is a subset of total air changes) */}
+                {(() => {
+                  const ach = ACTIVITY_ACH_RECOMMENDATIONS.find(a => a.id === globalDefaults.achProfile);
+                  const maxAch = Number(ach?.ach) || 0;
+                  const overLimit = globalDefaults.applyFacph && maxAch > 0 && globalDefaults.facph > maxAch;
+                  return (
+                    <div className="col-span-1">
+                      <label className="flex items-center gap-2">
+                        <input
+                          type="checkbox"
+                          checked={globalDefaults.applyFacph}
+                          onChange={e => setGlobalDefaults(g => ({ ...g, applyFacph: e.target.checked }))}
+                          className="accent-orange-600"
+                        />
+                        <span className="font-medium text-slate-700 dark:text-slate-300 w-24">OA FACPH</span>
+                        <input
+                          type="number"
+                          min={0}
+                          step={0.1}
+                          max={maxAch > 0 ? maxAch : undefined}
+                          value={globalDefaults.facph}
+                          disabled={!globalDefaults.applyFacph}
+                          onChange={e => {
+                            const v = Number(e.target.value) || 0;
+                            const capped = maxAch > 0 ? Math.min(v, maxAch) : v;
+                            setGlobalDefaults(g => ({ ...g, facph: capped }));
+                          }}
+                          className={
+                            'h-7 w-20 text-xs rounded border bg-white dark:bg-slate-800 px-1.5 text-right disabled:opacity-50 ' +
+                            (overLimit ? 'border-rose-500 dark:border-rose-500 text-rose-700 dark:text-rose-300' : 'border-slate-300 dark:border-slate-600')
+                          }
+                        />
+                        <span className="text-slate-500 dark:text-slate-400">ACH</span>
+                        {maxAch > 0 && (
+                          <span className={'text-[11px] ' + (overLimit ? 'text-rose-600 dark:text-rose-400 font-semibold' : 'text-slate-400 dark:text-slate-500')}>
+                            ≤ {maxAch} ACH (total)
+                          </span>
+                        )}
+                      </label>
+                      {overLimit && (
+                        <div className="text-[11px] text-rose-600 dark:text-rose-400 ml-32 mt-0.5">
+                          OA cannot exceed total ACH — fresh air is part of the supply, not added on top.
+                        </div>
+                      )}
+                    </div>
+                  );
+                })()}
+              </div>
+
+              <div className="flex items-center gap-2 pt-1">
+                <Button
+                  size="sm"
+                  onClick={applyGlobalDefaults}
+                  disabled={totalRoomCount === 0}
+                  className="h-7 px-3 text-xs bg-orange-600 hover:bg-orange-700"
+                >
+                  Apply to All {totalRoomCount} Room{totalRoomCount === 1 ? '' : 's'}
+                </Button>
+                <button
+                  type="button"
+                  onClick={() => setGlobalSettingsOpen(false)}
+                  className="h-7 px-3 text-xs rounded-md border border-slate-300 dark:border-slate-600 text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-700"
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          )}
 
           {/* Zone / System list */}
           <div className="divide-y divide-gray-100 dark:divide-slate-700">

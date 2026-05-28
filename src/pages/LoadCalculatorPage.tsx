@@ -577,10 +577,10 @@ export default function LoadCalculatorPage({ currentUser, initialProjectId, user
             <ArrowLeft className="h-4 w-4" />
             Projects
           </Button>
-          <div className="flex items-center gap-2 text-sm text-gray-500 dark:text-slate-400">
+          <div className="flex items-center gap-2 text-sm text-slate-500 dark:text-slate-400">
             <span>Load Calculator</span>
             <ChevronRight className="h-4 w-4" />
-            <span className="font-semibold text-gray-900 dark:text-slate-100">{activeProject.name}</span>
+            <span className="font-semibold text-slate-900 dark:text-slate-100">{activeProject.name}</span>
           </div>
           {userRole === 'Super' && activeProject.userId && (
             <Badge variant="outline" className="border-amber-200 bg-amber-50 text-amber-800 dark:border-amber-700 dark:bg-amber-950/20 dark:text-amber-300">
@@ -653,29 +653,29 @@ export default function LoadCalculatorPage({ currentUser, initialProjectId, user
           <h1 className="text-2xl font-bold text-gray-900 dark:text-slate-100">Load Calculator</h1>
           <p className="text-sm text-gray-500 dark:text-slate-400">Select a project or create a new one to begin</p>
         </div>
-        <Button onClick={openCreateDialog} className="gap-2 bg-blue-600 hover:bg-blue-700">
+        <Button onClick={openCreateDialog} className="gap-2 bg-teal-600 hover:bg-teal-700 text-white">
           <Plus className="h-4 w-4" />
           New Project
         </Button>
       </div>
 
       <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-        <Card className="border-blue-100 bg-blue-50 dark:border-blue-900 dark:bg-blue-950/20">
+        <Card className="border-teal-100 bg-teal-50 dark:border-teal-900 dark:bg-teal-950/20">
           <CardContent className="pt-5">
-            <p className="text-xs font-semibold uppercase tracking-wide text-blue-600 dark:text-blue-400">Total Projects</p>
-            <p className="mt-1 text-2xl font-bold text-blue-900 dark:text-blue-200">{projectStats.total}</p>
+            <p className="text-xs font-semibold uppercase tracking-wide text-teal-600 dark:text-teal-400">Total Projects</p>
+            <p className="mt-1 text-2xl font-bold text-teal-900 dark:text-teal-200">{projectStats.total}</p>
           </CardContent>
         </Card>
-        <Card className="border-indigo-100 bg-indigo-50 dark:border-indigo-900 dark:bg-indigo-950/20">
+        <Card className="border-slate-100 bg-slate-50 dark:border-slate-800 dark:bg-slate-800/40">
           <CardContent className="pt-5">
-            <p className="text-xs font-semibold uppercase tracking-wide text-indigo-600 dark:text-indigo-400">Primary System</p>
-            <p className="mt-1 text-2xl font-bold text-indigo-900 dark:text-indigo-200">{projectStats.dominantSystem}</p>
+            <p className="text-xs font-semibold uppercase tracking-wide text-slate-600 dark:text-slate-400">Primary System</p>
+            <p className="mt-1 text-2xl font-bold text-slate-900 dark:text-slate-100">{projectStats.dominantSystem}</p>
           </CardContent>
         </Card>
-        <Card className="border-emerald-100 bg-emerald-50 dark:border-emerald-900 dark:bg-emerald-950/20">
+        <Card className="border-orange-100 bg-orange-50 dark:border-orange-900 dark:bg-orange-950/20">
           <CardContent className="pt-5">
-            <p className="text-xs font-semibold uppercase tracking-wide text-emerald-600 dark:text-emerald-400">Avg Summer Temp</p>
-            <p className="mt-1 text-2xl font-bold text-emerald-900 dark:text-emerald-200">{projectStats.averageSummerTemp}°F</p>
+            <p className="text-xs font-semibold uppercase tracking-wide text-orange-600 dark:text-orange-400">Avg Summer Temp</p>
+            <p className="mt-1 text-2xl font-bold text-orange-900 dark:text-orange-200">{projectStats.averageSummerTemp}°F</p>
           </CardContent>
         </Card>
       </div>
@@ -712,11 +712,11 @@ export default function LoadCalculatorPage({ currentUser, initialProjectId, user
 
       {/* Project grid */}
       {projects.length === 0 ? (
-        <div className="flex flex-col items-center justify-center rounded-2xl border-2 border-dashed border-gray-200 dark:border-slate-700 py-24 text-center dark:bg-slate-900">
-          <Thermometer className="mx-auto mb-4 h-12 w-12 text-gray-300 dark:text-slate-600" />
-          <h3 className="font-semibold text-gray-700 dark:text-slate-300">No projects yet</h3>
-          <p className="mt-1 text-sm text-gray-500 dark:text-slate-400">Create your first project to start a load calculation</p>
-          <Button onClick={openCreateDialog} className="mt-4 gap-2">
+        <div className="flex flex-col items-center justify-center rounded-2xl border-2 border-dashed border-slate-200 dark:border-slate-700 py-24 text-center dark:bg-slate-900/50">
+          <Thermometer className="mx-auto mb-4 h-12 w-12 text-slate-300 dark:text-slate-600" />
+          <h3 className="font-semibold text-slate-700 dark:text-slate-300">No projects yet</h3>
+          <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">Create your first project to start a load calculation</p>
+          <Button onClick={openCreateDialog} className="mt-4 gap-2 bg-teal-600 hover:bg-teal-700 text-white">
             <Plus className="h-4 w-4" />
             New Project
           </Button>
@@ -774,7 +774,7 @@ function ProjectCard({
           <div className="min-w-0">
             <CardTitle className="truncate text-base">{project.name}</CardTitle>
             {project.location && (
-              <p className="mt-1 flex items-center gap-1 truncate text-xs text-gray-500">
+              <p className="mt-1 flex items-center gap-1 truncate text-xs text-slate-500 dark:text-slate-400">
                 <MapPin className="h-3 w-3 shrink-0" />
                 {project.location}
               </p>
@@ -843,13 +843,13 @@ function ProjectCard({
         </div>
 
         {(project.latitude || project.longitude) && (
-          <p className="text-xs text-gray-400">
+          <p className="text-xs text-slate-400 dark:text-slate-500">
             {project.latitude?.toFixed(4)}°, {project.longitude?.toFixed(4)}°
             {project.altitude ? ` · ${project.altitude} ft` : ''}
           </p>
         )}
 
-        <p className="text-xs text-gray-400">
+        <p className="text-xs text-slate-400 dark:text-slate-500">
           Updated {new Date(project.updatedAt).toLocaleDateString()}
         </p>
 
@@ -863,7 +863,7 @@ function ProjectCard({
 
         {/* Actions */}
         <div className="flex gap-2 pt-1">
-          <Button onClick={onOpen} size="sm" className="flex-1 gap-1 bg-blue-600 hover:bg-blue-700">
+          <Button onClick={onOpen} size="sm" className="flex-1 gap-1 bg-teal-600 hover:bg-teal-700 text-white">
             Open <ChevronRight className="h-3 w-3" />
           </Button>
           <Button onClick={onEdit} variant="outline" size="sm">
@@ -903,7 +903,7 @@ function ConditionBox({
   };
   return (
     <div className={`rounded border p-2 ${bg[color]}`}>
-      <p className="mb-0.5 text-[10px] font-semibold uppercase tracking-wide text-gray-500 dark:text-slate-400">{label}</p>
+      <p className="mb-0.5 text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">{label}</p>
       <p className={`font-bold ${text[color]}`}>{temp}°F / {rh}% RH</p>
       {enthalpy != null && (
         <p className="text-[10px] text-gray-500 dark:text-slate-400">
@@ -1244,7 +1244,7 @@ function UnsavedChangesDialog({
         <DialogHeader>
           <DialogTitle>Unsaved Changes</DialogTitle>
         </DialogHeader>
-        <p className="text-sm text-gray-600 dark:text-slate-300">
+        <p className="text-sm text-slate-600 dark:text-slate-300">
           You have unsaved room or envelope changes. Save them to the database before leaving, or discard them.
         </p>
         <DialogFooter className="flex-col gap-2 sm:flex-row">
@@ -1262,7 +1262,7 @@ function UnsavedChangesDialog({
           <Button
             onClick={onSaveAndLeave}
             disabled={isSaving}
-            className="bg-blue-600 hover:bg-blue-700"
+            className="bg-teal-600 hover:bg-teal-700 text-white"
           >
             {isSaving ? <><Loader2 className="mr-2 h-4 w-4 animate-spin" />Saving...</> : 'Save & Leave'}
           </Button>

@@ -206,7 +206,7 @@ export default function Methodology({ userRole }: { userRole?: string | null }) 
 
   return (
     <PdfCtx.Provider value={pdfMode}>
-    <div className="max-w-5xl mx-auto space-y-8 pb-12">
+    <div className="methodology-theme max-w-5xl mx-auto space-y-8 pb-12">
       <div className="flex flex-col gap-2">
         <div className="flex items-start justify-between gap-4">
           <h2 className="text-3xl font-bold text-gray-900">Engineering Methodology</h2>
@@ -235,7 +235,7 @@ export default function Methodology({ userRole }: { userRole?: string | null }) 
           ))}
         </div>
       </div>
-      <div ref={contentRef}>
+      <div ref={contentRef} className={pdfMode ? 'pdf-export' : undefined}>
 
       {/* ── STEP 1 ── Psychrometrics ─────────────────────────────────────── */}
       <Card className="border-none shadow-sm overflow-hidden">
@@ -579,7 +579,7 @@ Q_vl × BF          ─┘
             <p><strong>Engineering Guideline:</strong> Typical ADP range for air conditioning = 42–58°F.
             ADP below 42°F means the coil would need to operate near freezing — impractical without anti-frost control.
             ADP above 58°F with high latent load indicates the room humidity cannot be adequately controlled —
-            a dedicated dehumidifier or DOAS (Dedicated Outdoor Air System) should be considered.
+            a dedicated dehumidifier or TFA/DOAS (Treated Fresh Air / Dedicated Outdoor Air System) should be considered.
             Supply air temperature &lt;55°F can cause condensation on supply grilles or draught complaints.</p>
             <p><strong>Minimum ADP by system type</strong> — physical floor enforced by the refrigerant / medium:</p>
             <table className="w-full text-[10.5px] border border-cyan-200 rounded overflow-hidden mt-1">
@@ -620,40 +620,36 @@ Q_vl × BF          ─┘
             <Shield className="w-6 h-6" />
             <div>
               <CardTitle>Step 7 — Equipment Sizing (TR & CFM)</CardTitle>
-              <CardDescription className="text-amber-100">Load TR vs CFM TR — governing criterion — configurable safety factors</CardDescription>
+              <CardDescription className="text-amber-100">Plant capacity from coil load; airflow sized independently</CardDescription>
             </div>
           </div>
         </CardHeader>
         <CardContent className="pt-5 space-y-4 text-sm">
           <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-            <FBlock label="Load TR (from Grand Total Heat)" color="text-amber-600"
-              code={'loadTR = GTH / 12 000  [tons refrigeration]\n1 TR = 12 000 BTU/h  (latent heat of 1 ton ice/24h)'} />
-            <FBlock label="CFM TR (from dehumidified airflow)" color="text-amber-600"
-              code={'cfmTR = DSCFM / 400  [TR]\n— OR algebraically equivalent —\ncfmTR = CSH / (12 000 × (1 − BF))\n\nDerivation: DSCFM = CSH/(1.08×(1−BF)×ΔT)\n            TR = DSCFM × 1.08 × ΔT / 12000\n              → TR = CSH / (12000×(1−BF))'} />
-            <FBlock label="Governing TR" color="text-amber-600"
-              code={'govTR = max(loadTR, cfmTR)\n\nIf loadTR > cfmTR → heat load controls\nIf cfmTR > loadTR → airflow/dehumidification\n                     controls (humid climates)'} />
+            <FBlock label="Plant Cooling Capacity (from Grand Total Heat)" color="text-amber-600"
+              code={'plantTR = GTH / 12 000  [tons refrigeration]\n1 TR = 12 000 BTU/h\n\nThe chiller / DX plant is sized on COIL LOAD only.\nAirflow is a separate exercise (see Design CFM).'} />
+            <FBlock label="Design Airflow (from dehumidified CFM)" color="text-amber-600"
+              code={'DSCFM = max(CSH / (1.08 × (1−BF) × ΔT), ACH·CFM)\n  ΔT is supply ΔT at fixed system ADP.\n\nDrives: AHU fan, duct sizing, diffuser count.\nDoes NOT inflate plant TR.'} />
+            <FBlock label="CFM/TR — sanity ratio (display only)" color="text-amber-600"
+              code={'cfmPerTR = DSCFM / plantTR  [CFM per TR]\n\nTypical comfort cooling: 350 – 450 CFM/TR\nHigh-sensible spaces (IT, storage): 500 – 1000\nLow-SHF (kitchens, pool): 250 – 350\n\nNo longer used as a governing input — it is a\nCROSS-CHECK to verify duct sizing is consistent.'} />
             <FBlock label="Required TR with overall safety factor" color="text-amber-600"
-              code={'requiredTR = govTR × (1 + s_o%)   default s_o = 3%\n\nNote — safety is applied in two stages:\n  Stage 1 (Step 5): s_s% on ERSH, s_l% on ERLH\n                    captures uncertainty in room loads\n  Stage 2 (Step 7): s_o% on govTR\n                    captures equipment tolerance\nDo NOT add both as a single lump — that double-counts.\n\nPractice: always select next standard unit size.\nCommon sizes: 1.5, 2, 2.5, 3, 4, 5, 7.5, 10 TR'} />
-            <FBlock label="CFM estimate for equipment catalog" color="text-amber-600"
-              code={'CFM_unit ≈ capacityTR × 400  [rule of thumb]\nUsed for duct sizing and AHU selection.\nVRF/DOAS: this rule may not apply — check\nmanufacturer selection data.'} />
+              code={'requiredTR = plantTR × (1 + s_o%)   default s_o = 3%\n\nSafety is applied in two stages:\n  Stage 1 (Step 5): s_s% on ERSH, s_l% on ERLH\n                    captures uncertainty in room loads\n  Stage 2 (Step 7): s_o% on plantTR\n                    captures equipment tolerance\n\nPractice: select next standard unit size.\nCommon sizes: 1.5, 2, 2.5, 3, 4, 5, 7.5, 10 TR'} />
           </div>
-          <div className="p-3 bg-amber-50 border border-amber-100 rounded-lg text-[11px] text-amber-900">
-            <strong>Engineering Guideline:</strong> In Indian humid climate zones (Koppen Aw, Am, Cwa),
-            cfmTR often exceeds loadTR for high-occupancy or high-OA rooms because the latent load is disproportionately
-            large. Never skip the cfmTR check — undersizing supply airflow degrades dehumidification and causes
-            occupant discomfort even if the sensible cooling capacity appears adequate.
+          <div className="p-3 bg-emerald-50 border border-emerald-200 rounded-lg text-[11px] text-emerald-900">
+            <strong>Why we dropped the 400 CFM/TR governance rule (2026-05-20):</strong> the Carrier 400 CFM/TR
+            heuristic is a <em>downstream sizing check</em> for the air system, not a sizing input for the cooling
+            plant. OEM catalogs for VRF / Package / Ductable / Split units already publish coupled TR and CFM
+            ratings — picking <code>unit.ratedTR ≥ requiredTR</code> AND <code>unit.ratedCFM ≥ DSCFM</code> against
+            the catalog enforces the relationship at the unit level without inflating room-level coil load.
+            For chiller plants, the plant is sized strictly on summed coil duty; AHU/FCU airflow is sized
+            independently against the dehumidified-CFM target. Forcing a 400 CFM/TR fit on AHU coils oversizes
+            them (low SHR, hunting, freeze risk).
           </div>
 
           <div className="p-3 bg-sky-50 border border-sky-200 rounded-lg text-[11px] text-sky-900 space-y-1.5">
-            <p><strong>Chiller AHU — Coil Duty vs Unit Size, and why 400 CFM/TR doesn't apply:</strong></p>
+            <p><strong>Chiller AHU — Coil Duty vs Unit Size:</strong></p>
             <p>
-              The <code>governingTR = max(loadTR, cfmTR)</code> rule (where <code>cfmTR = DSCFM / 400</code>) is correct for
-              <em> room-level equipment selection</em> — it ensures whichever unit you pick is big enough to push the dehumidified
-              airflow. It is a <em>Carrier rule of thumb</em> for packaged DX equipment at AHRI conditions (SHR ≈ 0.78).
-            </p>
-            <p>
-              For a <strong>chiller-fed custom AHU</strong>, the 400 CFM/TR rule does <strong>not</strong> apply. Two independent
-              numbers drive the design:
+              For a <strong>chiller-fed custom AHU</strong>, two independent numbers drive the design:
             </p>
             <ul className="list-disc list-inside pl-1 space-y-0.5">
               <li>
@@ -766,18 +762,18 @@ Q_vl × BF          ─┘
         <CardContent className="pt-5 space-y-4 text-sm">
           <p className="text-gray-600 text-xs leading-relaxed">
             When Monsoon or Winter seasons are enabled in Project Settings, the engine repeats the full calculation
-            pipeline (Steps 1–8) under the alternate-season outdoor design conditions. Each room then carries
-            up to three governing TR candidates — the highest wins.
+            pipeline (Steps 1–8) under the alternate-season outdoor design conditions. Each room carries a
+            plant-cooling-capacity number per season — the highest season wins.
           </p>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
             <FBlock label="Monsoon outdoor conditions" color="text-teal-600"
               code={'T_out_monsoon = monsoon dry-bulb  [°F]\nRH_monsoon    = monsoon relative humidity  [%]\nΔT_monsoon    = T_out_monsoon − T_indoor\nΔW_monsoon    = W_out_monsoon − W_indoor  [gr/lb]\n\nTypically: lower DB, sharply higher RH vs summer\n→ sensible load falls, latent load rises'} />
             <FBlock label="Winter heating load" color="text-teal-600"
               code={'T_out_winter = heating design dry-bulb  [°F]\n\nQ_heat,wall  = U × A × (T_indoor − T_out_winter)\nQ_heat,glass = U × A × (T_indoor − T_out_winter)\nNo solar gain assumed in heating mode.\nReported as Q_heat [BTU/h] — NOT added to\ncooling TR (sizes heating coil / heat-pump\nheating mode, not refrigeration circuit).'} />
-            <FBlock label="Three-season governing TR" color="text-teal-600"
-              code={'govTR_summer  = max(loadTR_s,  cfmTR_s)\ngovTR_monsoon = max(loadTR_m, cfmTR_m)\n\nfinalGovTR = max(govTR_summer, govTR_monsoon)\n\nOverall safety applied after:\n  requiredTR = finalGovTR × (1 + s_o%)'} />
+            <FBlock label="Three-season plant capacity" color="text-teal-600"
+              code={'plantTR_summer  = loadTR_s\nplantTR_monsoon = loadTR_m\n\nfinalPlantTR = max(plantTR_summer, plantTR_monsoon)\n\nOverall safety applied after:\n  requiredTR = finalPlantTR × (1 + s_o%)\n\nCFM is governed independently:\n  DSCFM = max(DSCFM_summer, DSCFM_monsoon)'} />
             <FBlock label="When monsoon governs (typical triggers)" color="text-teal-600"
-              code={'• High OA ACH in humid climates\n  (Kolkata, Mumbai, Chennai, Kochi)\n• High-occupancy rooms\n  (gyms, auditoria, canteens)\n• Low-sensible / high-latent spaces\n\nGSHF_monsoon < 0.65 → humidity control\n  critical → check coil BF, consider DOAS'} />
+              code={'• High OA ACH in humid climates\n  (Kolkata, Mumbai, Chennai, Kochi)\n• High-occupancy rooms\n  (gyms, auditoria, canteens)\n• Low-sensible / high-latent spaces\n\nGSHF_monsoon < 0.65 → humidity control\n  critical → check coil BF, consider TFA/DOAS'} />
           </div>
           <div className="overflow-x-auto">
             <div className="bg-teal-50 border border-teal-200 rounded-xl p-4">
@@ -787,15 +783,15 @@ Q_vl × BF          ─┘
                   <tr className="bg-teal-700 text-white">
                     <th className="px-3 py-1.5 text-left font-bold">Seasons Enabled</th>
                     <th className="px-3 py-1.5 text-left font-bold">Engine action</th>
-                    <th className="px-3 py-1.5 text-left font-bold">Final govTR</th>
+                    <th className="px-3 py-1.5 text-left font-bold">Plant TR</th>
                     <th className="px-3 py-1.5 text-left font-bold">Heating output</th>
                   </tr>
                 </thead>
                 <tbody>
                   {[
-                    ['Summer only', 'Steps 1–8 at summer OA conditions', 'govTR_summer', '—'],
+                    ['Summer only', 'Steps 1–8 at summer OA conditions', 'plantTR_summer', '—'],
                     ['Summer + Monsoon', 'Full pipeline repeated at monsoon OA; latent recalculated from W_out_monsoon', 'max(summer, monsoon)', '—'],
-                    ['Summer + Winter', 'Heating load (U×A×ΔT reverse) computed; no separate cooling run at winter OA', 'govTR_summer', 'Q_heat [BTU/h]'],
+                    ['Summer + Winter', 'Heating load (U×A×ΔT reverse) computed; no separate cooling run at winter OA', 'plantTR_summer', 'Q_heat [BTU/h]'],
                     ['All three', 'Both alternate-season pipelines computed', 'max(summer, monsoon)', 'Q_heat [BTU/h]'],
                   ].map(([seasons, action, govtr, heat], i) => (
                     <tr key={i} className={i % 2 === 0 ? 'bg-white' : 'bg-teal-50/30'}>
@@ -1162,7 +1158,7 @@ Q_vl × BF          ─┘
             <div className="p-3 bg-rose-50 border border-rose-100 rounded-lg text-[11px] text-rose-900 space-y-1">
               <p><strong>Reheat assessment:</strong> coilSHR = 0.697 is slightly below the 0.75 comfort target.
               In Kolkata's humid climate this is normal — the very high outdoor humidity (W = 176 gr/lb) creates
-              a large latent load. Reheat or DOAS is worth considering for year-round humidity control,
+              a large latent load. Reheat or TFA/DOAS is worth considering for year-round humidity control,
               but for a conference room with intermittent occupancy, the DX unit with 3 TR is adequate.</p>
               <p><strong>Condensate drain:</strong> 3.98 L/hr — size drain line for ≥ 25 mm bore, slope ≥ 1:80.</p>
             </div>
@@ -1662,7 +1658,7 @@ Q_vl × BF          ─┘
               increasing the CLTD multiplier (k_alt ≈ 1.10), the net envelope sensible load still drops from 10,204 to 5,817 BTU/h. Grand Total Heat falls
               from 30,394 to 21,850 BTU/h, so selected capacity moves from 3.0 TR to 2.0 TR. Latent performance remains important in both cases, but Gangtok
               shows lower moisture removal demand (6.36 vs 8.76 lb/hr). Practical design takeaway: in Gangtok-like hill climates, prioritize right-sized capacity
-              and airflow stability over oversizing for extreme heat; in Kolkata-like hot-humid climates, latent robustness and reheat/DOAS strategy become more critical.
+              and airflow stability over oversizing for extreme heat; in Kolkata-like hot-humid climates, latent robustness and reheat/TFA strategy become more critical.
             </p>
           </div>
 
@@ -1803,25 +1799,16 @@ condensate rate that was 30–50% too low for occupied rooms.
 Fixed: ṁ_water = CLH / 1050 — uses total coil latent, capturing all sources.`,
               },
               {
-                name: 'Reheat sized against ROOM SHF (ERSH/ERLH)',
-                era: 'Reverted to room-based after coil-based proved unrealistic',
-                status: '🔧 Fixed — uses ROOM loads (ERSH/ERLH)',
+                name: 'Reheat using Room Loads (ERSH/ERLH)',
+                era: 'Earlier versions of this engine',
+                status: '🔧 Fixed — now uses coil loads (CSH/CLH)',
                 statusColor: 'text-blue-700 bg-blue-50',
-                why: `Reheat exists to prevent room overcooling: the room receives supply air at a
-temperature that absorbs Q_room_sensible. If the coil over-cools (to handle latent), reheat brings
-supply temperature back up. The amount needed is a function of ROOM SHR, not coil/grand SHR.
-
-A previous "fix" switched to calculateReheat(coilSensible, coilLatent) — including all OA latent
-in the ratio. For over-ventilated rooms this inflates reheat 10-15x: a 50 TR cooling system was
-being sized for ~75 TR of reheat (e.g. IGLOO Jorhat: 902k BTU/h reheat vs realistic ~62k). No
-real installation has reheat exceeding the cooling load.
-
-Current: calculateReheat(ersh, erlh) — sizes against ROOM sensible/latent with safety factors,
-matching standard Carrier methodology and what comfort systems are actually built with.
-
-For genuine high-OA cases (DOAS, hospitals, labs) where OA dominates, the proper answer is
-desiccant dehumidification or precondition the OA separately — not 75 TR of reheat downstream
-of a 50 TR coil.`,
+                why: `Prior code: calculateReheat(ersh, erlh)
+The room SHR = ERSH/ERTH does not include the OA coil portion. In high-OA applications 
+(hospitals, labs, humid climates), the outdoor air latent pushes the actual coil SHR much lower.
+Using room loads alone can falsely show "no reheat" when the coil SHR including OA requires it.
+Fixed: calculateReheat(coilSensible, coilLatent) — uses GSHF (Grand SHF) which is the true 
+supply-air SHR including all outdoor air contributions.`,
               },
               {
                 name: 'Fixed People Load CLF (Cooling Load Factor for People)',
@@ -1894,7 +1881,7 @@ convective, making CLF < 1.0 even less significant.`,
                   { p: 'CLF for glass',              v: '0.85',                        r: 'Conservative; varies by room construction mass' },
                   { p: 'People loads',               v: 'ASHRAE 2017 Ch.18 Table 2',   r: 'At 75°F room temp; values decrease at lower room temps' },
                   { p: 'Latent heat of vaporisation',v: '1061 BTU/lb',                 r: 'ASHRAE standard — consistent with 0.68 latent constant derivation (60×0.075×1061/7000 = 0.682)' },
-                  { p: 'CFM/ton rule',               v: '400 CFM/ton',                 r: 'Standard rule; VRF / DOAS systems may differ significantly' },
+                  { p: 'CFM/ton rule',               v: '400 CFM/ton',                 r: 'Sanity ratio only — not a sizing input. VRF / TFA systems may differ significantly' },
                   { p: 'Sensible heat factor',       v: '1.08 BTU·min/(h·CFM·°F)',     r: 'Standard at sea level; altitude-corrected via P_atm ratio' },
                   { p: 'Latent heat factor',         v: '0.68 BTU·min/(h·CFM·gr/lb)',  r: 'Standard at sea level' },
                   { p: 'Psychrometric equation',     v: 'Magnus approximation',        r: 'Max error < 0.1% over 0–50°C range' },
