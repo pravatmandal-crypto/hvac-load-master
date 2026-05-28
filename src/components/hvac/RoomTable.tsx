@@ -2345,44 +2345,56 @@ function calculateRoomStripMetrics(room: any, elements: any[], dc: DesignConditi
   };
 
   const typedElements = (elements || []) as EnvelopeElement[];
-  const envelope = calculateEnvelopeGain(typedElements, dc);
-  const internal = calculateInternalGains(rd);
-  const vent = calculateVentilationLoad(rd, dc);
-
-  const erSensible = envelope.sensible + internal.sensible + vent.sensible * BF;
-  const erLatent = internal.latent + vent.latent * BF;
   const ductPct = Number(room.ductGainPct) || 2;
   const fanPct = Number(room.fanGainPct) || 3;
-  const parasitic = calculateParasiticGains(erSensible, erSensible, ductPct, fanPct);
+  const sensibleSafetyFactor = Number(room.sensibleSafetyPercent ?? 10) / 100;
+  const latentSafetyFactor = Number(room.latentSafetyPercent ?? 5) / 100;
+  const achCFM = (calculateRoomVolume(rd) * Math.max(getRecommendedAch(room.achProfile ?? room.activityType), rd.facph)) / 60;
 
-  const ersh = erSensible + parasitic.ductGain + parasitic.fanGain;
-  const erlh = erLatent;
-  const oaSensible = vent.sensible * (1 - BF);
-  const oaLatent = vent.latent * (1 - BF);
-  const coilSensible = ersh + oaSensible;
-  const coilLatent = erlh + oaLatent;
-  const grandTotal = coilSensible + coilLatent;
-
-  const coil = calculateCoilParameters(
-    coilSensible,
-    coilLatent,
-    dc.indoorTemp,
-    dc.indoorHumidity,
-    dc.altitude || 0,
-    BF,
-    35,
-    65,
-    getMinAdp(project?.systemType),
-  );
-
-  return {
-    totalBTU: grandTotal,
-    totalTR: grandTotal / 12000,
-    designSupplyCFM: Math.max(
-      coil.sensibleCFM,
-      (calculateRoomVolume(rd) * Math.max(getRecommendedAch(room.achProfile ?? room.activityType), rd.facph)) / 60,
-    ),
+  // Mirrors useRoomCalc — same safety factors, same fixed-ADP CFM rule — so the strip
+  // matches the Step-3 per-season Supply Air CFM values rather than under-reporting.
+  const computeSeason = (seasonDc: DesignConditions) => {
+    const envelope = calculateEnvelopeGain(typedElements, seasonDc);
+    const internal = calculateInternalGains(rd);
+    const vent = calculateVentilationLoad(rd, seasonDc);
+    const erSensible = envelope.sensible + internal.sensible + vent.sensible * BF;
+    const erLatent = internal.latent + vent.latent * BF;
+    const parasitic = calculateParasiticGains(erSensible, erSensible, ductPct, fanPct);
+    const ersh = (erSensible + parasitic.ductGain + parasitic.fanGain) * (1 + sensibleSafetyFactor);
+    const erlh = erLatent * (1 + latentSafetyFactor);
+    const coilSensible = ersh + vent.sensible * (1 - BF);
+    const coilLatent = erlh + vent.latent * (1 - BF);
+    const grandTotal = coilSensible + coilLatent;
+    const coil = calculateCoilParameters(
+      coilSensible,
+      coilLatent,
+      seasonDc.indoorTemp,
+      seasonDc.indoorHumidity,
+      seasonDc.altitude || 0,
+      BF,
+      35,
+      65,
+      getMinAdp(project?.systemType),
+    );
+    // Fixed-system-ADP basis — matches Step-3 panel and ZoneList; see CLAUDE.md invariant.
+    const designSupplyCFM = Math.max(coil.minAdpSensibleCFM, achCFM);
+    return { totalBTU: grandTotal, totalTR: grandTotal / 12000, designSupplyCFM };
   };
+
+  const summer = computeSeason(dc);
+  const includeMonsoon = !!(project?.includeMonsoon ?? project?.data?.includeMonsoon);
+  const monsoon = includeMonsoon
+    ? computeSeason(getMonsoonDesignConditions(project, dc))
+    : null;
+
+  // Governing across seasons — strip shows the value the engineer must size to.
+  return monsoon
+    ? {
+        totalBTU: Math.max(summer.totalBTU, monsoon.totalBTU),
+        totalTR: Math.max(summer.totalTR, monsoon.totalTR),
+        designSupplyCFM: Math.max(summer.designSupplyCFM, monsoon.designSupplyCFM),
+      }
+    : summer;
 }
 
 function DraggableRoomHeader({

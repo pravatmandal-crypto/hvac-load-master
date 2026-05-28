@@ -50,6 +50,10 @@ function computeZoneTotals(
   let totalSupplyCfm = 0;
   let totalDesignCfm = 0;
   let totalArea = 0;
+  // Per-room required TR (post overall-safety, governed by max of load TR and CFM TR) summed
+  // across rooms. Mirrors EquipmentSelection.computeRoomReqs so the LC zone-strip "Equipment"
+  // tile matches the SD "Required TR" for the same zone.
+  let totalRequiredTR = 0;
 
   for (const room of zoneRooms) {
     try {
@@ -107,8 +111,6 @@ function computeZoneTotals(
         65,
         minAdp,
       );
-      // Overall safety is NOT applied here — the zone summary applies its own margin
-      // via requiredTR = governingTR × 1.10. Applying it here too would double-count.
       const grandTotal = coilSensible + coilLatent;
 
       const presetTotalACH = getRecommendedAch(room.achProfile ?? room.activityType);
@@ -118,12 +120,20 @@ function computeZoneTotals(
       // not dehumidifiedCFM which uses floating indicated ADP and inflates high-sensible rooms.
       const designCFM = Math.max(coil.minAdpSensibleCFM, totalSupplyCFM);
 
+      // Per-room required TR: max(load TR, CFM-derived TR) × (1 + overall safety %).
+      // Same formula as EquipmentSelection.computeRoomReqs so LC zone-strip and SD agree.
+      const roomLoadTR = grandTotal / 12000;
+      const roomCfmTR = designCFM > 0 ? designCFM / 400 : 0;
+      const roomGoverningTR = Math.max(roomLoadTR, roomCfmTR);
+      const roomRequiredTR = roomGoverningTR * (1 + overallSafetyPct / 100);
+
       if (isFinite(grandTotal)) totalCooling += grandTotal;
       if (isFinite(heating.totalHeatingLoad)) totalHeating += heating.totalHeatingLoad;
       if (isFinite(coil.dehumidifiedCFM)) totalDehumCfm += coil.dehumidifiedCFM;
       if (isFinite(vent.cfm)) totalOaCfm += vent.cfm;
       if (isFinite(totalSupplyCFM)) totalSupplyCfm += totalSupplyCFM;
       if (isFinite(designCFM)) totalDesignCfm += designCFM;
+      if (isFinite(roomRequiredTR)) totalRequiredTR += roomRequiredTR;
       totalArea += rd.length * rd.width;
     } catch {
       // skip room if calculation fails — don't crash the whole component
@@ -139,6 +149,7 @@ function computeZoneTotals(
     totalSupplyCfm,
     totalDesignCfm,
     totalArea,
+    totalRequiredTR,
   };
 }
 
@@ -261,7 +272,11 @@ function ZoneSummaryBar({
   const governingDesignCfm = includeMonsoon && monsoonTotals
     ? Math.max(summerTotals.totalDesignCfm, monsoonTotals.totalDesignCfm)
     : summerTotals.totalDesignCfm;
-  const requiredTR = governingTR * 1.10;
+  // Equipment-sizing required TR: sum of per-room required TR (max(loadTR, cfmTR) × safety),
+  // governed by the higher of summer / monsoon. Matches EquipmentSelection.computeRoomReqs.
+  const requiredTR = includeMonsoon && monsoonTotals
+    ? Math.max(summerTotals.totalRequiredTR, monsoonTotals.totalRequiredTR)
+    : summerTotals.totalRequiredTR;
   const achGovernsAirflow = governingCfmTR >= governingLoadTR;
   const governingRoomInfo = peakSeason === 'Monsoon' && monsoonGoverningRoom ? monsoonGoverningRoom : summerGoverningRoom;
 
