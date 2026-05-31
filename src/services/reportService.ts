@@ -1587,10 +1587,21 @@ export const generatePDFReport = (
     y = subBanner(doc, 'Room Schedule', y, C);
     y += 1;
 
+    // TFA/DOAS split: a room is TFA-served when the engine persisted a TFA coil
+    // load (or flagged it tfa-only). When any room in the zone is TFA-served, add
+    // a "TFA Coil TR" + "TFA CFM" pair so the schedule shows the space (primary
+    // coil) side and the TFA side separately. Non-TFA zones get no extra columns.
+    const isTfaRoom = (room: any) =>
+      (Number(room._calcTfaCoilBTUH) || 0) > 0 ||
+      (Number(room._calcMonsoonTfaCoilBTUH) || 0) > 0 ||
+      !!room._calcTfaOnly;
+    const entityHasTfa = entity.rooms.some(isTfaRoom);
+
     const rscHead = [
       'Room', 'Floor', 'Area ft²', 'Summer TR',
       ...(includeMonsoon ? ['Monsoon TR'] : []),
       'Design CFM',
+      ...(entityHasTfa ? ['TFA Coil TR', 'TFA CFM'] : []),
       ...(includeWinter ? ['Winter BTU/h'] : []),
       'Gov TR', 'Inst. TR', 'Inst. CFM',
     ];
@@ -1599,24 +1610,41 @@ export const generatePDFReport = (
     const monDcE = monsoon ? resolveEntityDC(entity, monsoon, project) : null;
     const winDcE = winter ? resolveEntityDC(entity, winter, project) : null;
 
-    let totArea = 0, totSumBTUH = 0, totMonBTUH = 0, totSumCFM = 0, totMonCFM = 0, totWinHeat = 0;
+    let totArea = 0, totSumTRsum = 0, totMonTRsum = 0, totCFMsum = 0, totWinHeat = 0;
+    let totTfaTR = 0, totTfaCFM = 0;
+
+    // Prefer the engine's persisted values (load-only + TFA-aware) over a fresh
+    // recompute; computeDetailed (max load/CFM, OA-on-primary) is only a fallback
+    // for rooms that were never calculated. num() returns null when the field is
+    // absent so we know to fall back.
+    const num = (v: any): number | null => (v === undefined || v === null || v === '' ? null : Number(v));
 
     const rscBody: any[][] = entity.rooms.map((room: any) => {
       const sm = computeDetailed(room, envelopeElements[room.id] || [], sumDcE, project);
       const mm = monDcE ? computeDetailed(room, envelopeElements[room.id] || [], monDcE, project) : null;
       const wm = winDcE ? computeDetailed(room, envelopeElements[room.id] || [], winDcE, project) : null;
-      const govTR = Math.max(sm.governingTr, mm?.governingTr ?? 0);
-      const cfm   = Math.max(sm.designCfm,   mm?.designCfm   ?? 0);
+
+      const sumTR  = num(room._calcGoverningTR)        ?? sm.governingTr;
+      const monTR  = num(room._calcMonsoonGoverningTR) ?? (mm?.governingTr ?? 0);
+      const govTR  = num(room._calcOverallGoverningTR) ?? Math.max(sumTR, monTR);
+      const cfm    = num(room._calcOverallDesignCFM)   ?? Math.max(sm.designCfm, mm?.designCfm ?? 0);
+      // TFA coil duty is the governing (summer/monsoon) persisted value.
+      const tfaTR  = Math.max(Number(room._calcTfaCoilTR) || 0, Number(room._calcMonsoonTfaCoilTR) || 0);
+      const tfaCfm = Number(room._calcTfaCfm) || 0;
+
       totArea     += sm.area;
-      totSumBTUH  += sm.grandTotal;
-      totMonBTUH  += mm?.grandTotal ?? 0;
-      totSumCFM   += sm.designCfm;
-      totMonCFM   += mm?.designCfm ?? 0;
+      totSumTRsum += sumTR;
+      totMonTRsum += monTR;
+      totCFMsum   += cfm;
       totWinHeat  += wm?.designHeatingLoad ?? 0;
+      totTfaTR    += tfaTR;
+      totTfaCFM   += tfaCfm;
+
       const rInst = getRoomInstalledTrCfm(room.id, effectiveEquipSystems);
-      const row: any[] = [room.name || '—', room.floor || '—', n0(sm.area), n2(sm.governingTr)];
-      if (includeMonsoon) row.push(n2(mm?.governingTr ?? 0));
+      const row: any[] = [room.name || '—', room.floor || '—', n0(sm.area), n2(sumTR)];
+      if (includeMonsoon) row.push(n2(monTR));
       row.push(n0(cfm));
+      if (entityHasTfa) row.push(tfaTR > 0 ? n2(tfaTR) : '—', tfaCfm > 0 ? n0(tfaCfm) : '—');
       if (includeWinter) row.push(n0(wm?.designHeatingLoad ?? 0));
       row.push(
         n2(govTR),
@@ -1626,10 +1654,11 @@ export const generatePDFReport = (
       return row;
     });
 
-    const totSumTR  = Math.max(totSumBTUH / 12000, totSumCFM / 400);
-    const totMonTR  = includeMonsoon ? Math.max(totMonBTUH / 12000, totMonCFM / 400) : 0;
+    // Load-only zone totals (sum of per-room governing TR), matching the app UI.
+    const totSumTR  = totSumTRsum;
+    const totMonTR  = includeMonsoon ? totMonTRsum : 0;
     const totGovTR  = includeMonsoon ? Math.max(totSumTR, totMonTR) : totSumTR;
-    const totCFM    = Math.max(totSumCFM, totMonCFM);
+    const totCFM    = totCFMsum;
 
     // Totals row — installed TR/CFM from equipment selection merged at zone level
     const instE = getInstalledTrCfm(entity.id, effectiveEquipSystems, entity.rooms.map((r: any) => r.id));
@@ -1643,6 +1672,10 @@ export const generatePDFReport = (
     ];
     if (includeMonsoon) totRow.push({ content: n2(totMonTR), styles: { fontStyle: 'bold' as const, fillColor: C.total } });
     totRow.push({ content: n0(totCFM), styles: { fontStyle: 'bold' as const, fillColor: C.total } });
+    if (entityHasTfa) totRow.push(
+      { content: totTfaTR  > 0 ? n2(totTfaTR)  : '—', styles: { fontStyle: 'bold' as const, fillColor: C.total } },
+      { content: totTfaCFM > 0 ? n0(totTfaCFM) : '—', styles: { fontStyle: 'bold' as const, fillColor: C.total } },
+    );
     if (includeWinter) totRow.push({ content: n0(totWinHeat), styles: { fontStyle: 'bold' as const, fillColor: C.total } });
     totRow.push(
       { content: n2(totGovTR),   styles: { fontStyle: 'bold' as const, fillColor: C.total } },
@@ -1652,8 +1685,9 @@ export const generatePDFReport = (
     rscBody.push(totRow);
 
     const rscColStyles: Record<number, any> = { 0: { fontStyle: 'bold', cellWidth: 30 } };
-    const rInstTRIdx  = 6 + (includeMonsoon ? 1 : 0) + (includeWinter ? 1 : 0);
-    const rInstCFMIdx = 7 + (includeMonsoon ? 1 : 0) + (includeWinter ? 1 : 0);
+    const tfaCols     = entityHasTfa ? 2 : 0;
+    const rInstTRIdx  = 6 + (includeMonsoon ? 1 : 0) + tfaCols + (includeWinter ? 1 : 0);
+    const rInstCFMIdx = 7 + (includeMonsoon ? 1 : 0) + tfaCols + (includeWinter ? 1 : 0);
     rscColStyles[rInstTRIdx]  = { halign: 'right', cellWidth: 15 };
     rscColStyles[rInstCFMIdx] = { halign: 'right', cellWidth: 15 };
 
@@ -1840,6 +1874,15 @@ export const generatePDFReport = (
           ['Design CFM',    `${n0(m.designCfm)} CFM`],
           ['Governing TR',  `${n2(m.governingTr)} TR`],
           ...(includeWinter ? [['Winter Load', `${n0(m.designHeatingLoad)} BTU/h`]] : []),
+          // TFA/DOAS split — appended last so the Governing-TR highlight (col 4)
+          // stays put. Cooling seasons only; the TFA coil duty is the persisted,
+          // season-appropriate engine value (this room's share of the DOAS coil).
+          ...(isTfaRoom(room) && !/winter/i.test(seasonLabel)
+            ? [
+                ['TFA Coil', `${n2((/monsoon/i.test(seasonLabel) ? Number(room._calcMonsoonTfaCoilTR) : Number(room._calcTfaCoilTR)) || 0)} TR`],
+                ['TFA Airflow', `${n0(Number(room._calcTfaCfm) || 0)} CFM`],
+              ]
+            : []),
         ];
 
         autoTable(doc, {

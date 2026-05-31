@@ -67,6 +67,8 @@ type RoomSheetRefs = {
   summerTrCell: string; summerCfmCell: string;
   monsoonTrCell?: string; monsoonCfmCell?: string;
   winterLoadCell: string; governingTrCell: string;
+  // TFA/DOAS split — present only on rooms served by a DOAS/TFA unit.
+  tfaTrCell?: string; tfaCfmCell?: string;
   iduConfigCell: string;
 };
 
@@ -1036,9 +1038,18 @@ function buildEquipmentScheduleSheet(project: any, equipSystems: any[], allRooms
 function buildSummarySheet(project: any, refs: RoomSheetRefs[]): XLSX.WorkSheet {
   const ws: XLSX.WorkSheet = {};
   const incMon = !!project?.includeMonsoon;
-  // Columns: Sr | System | Zone | Room | Floor | Area | Height | FalseCeiling | FreshAir | Occupancy | Lighting | EquipKW | SumTR | SumCFM | [MonTR | MonCFM] | WinLoad | GovTR | IDUConfig
-  const BASE_COLS = 17;
-  const COLS = incMon ? BASE_COLS + 2 : BASE_COLS;
+  // TFA columns are added only when at least one room in the project is DOAS-served.
+  const anyTfa = refs.some(r => r.tfaTrCell);
+  // Columns: Sr | System | Zone | Room | Floor | Area | Height | FalseCeiling | FreshAir | Occupancy | Lighting | EquipKW | SumTR | SumCFM | [MonTR | MonCFM] | [TfaTR | TfaCFM] | WinLoad | GovTR | IDUConfig
+  // afterCool = index of the last cooling-load column (Summer/Monsoon CFM).
+  const afterCool = incMon ? 16 : 14;
+  const tfaOff    = anyTfa ? 2 : 0;
+  const tfaTrCol  = afterCool + 1;   // only meaningful when anyTfa
+  const tfaCfmCol = afterCool + 2;
+  const wCol = afterCool + tfaOff + 1;
+  const gCol = afterCool + tfaOff + 2;
+  const iCol = afterCool + tfaOff + 3;
+  const COLS = iCol;
   let row = 1;
 
   addMerge(ws, row, 1, row, COLS);
@@ -1055,7 +1066,8 @@ function buildSummarySheet(project: any, refs: RoomSheetRefs[]): XLSX.WorkSheet 
     'Fresh Air\n(CFM)', 'Occupancy\n(Nos.)', 'Lighting\n(W/Sq.Ft)', 'Equip.\nLoad (kW)',
     'Summer\nTR', 'Summer\nCFM',
     ...(incMon ? ['Monsoon\nTR', 'Monsoon\nCFM'] : []),
-    'Winter\nHeating\n(BTU/h)', 'Governing\nTR ▶', 'IDU Configuration',
+    ...(anyTfa ? ['TFA Coil\nTR', 'TFA\nCFM'] : []),
+    'Winter\nHeating\n(BTU/h)', 'Plant\nTR ▶', 'IDU Configuration',
   ];
   hdrs.forEach((h, i) => putV(ws, row, i + 1, h, S.tableHdr));
   row++;
@@ -1083,9 +1095,11 @@ function buildSummarySheet(project: any, refs: RoomSheetRefs[]): XLSX.WorkSheet 
       putF(ws, r, 15, ref.monsoonTrCell  ? `ROUND(${shRef(ref.sheetName, ref.monsoonTrCell)},2)`  : '0', 'n', S.calcC);
       putF(ws, r, 16, ref.monsoonCfmCell ? `ROUND(${shRef(ref.sheetName, ref.monsoonCfmCell)},0)` : '0', 'n', S.calcC);
     }
-    const wCol  = incMon ? 17 : 15;
-    const gCol  = incMon ? 18 : 16;
-    const iCol  = incMon ? 19 : 17;
+    if (anyTfa) {
+      // Non-TFA rooms have no cell ref → contribute 0 so the column totals stay correct.
+      putF(ws, r, tfaTrCol,  ref.tfaTrCell  ? `ROUND(${shRef(ref.sheetName, ref.tfaTrCell)},2)`  : '0', 'n', S.calcC);
+      putF(ws, r, tfaCfmCol, ref.tfaCfmCell ? `ROUND(${shRef(ref.sheetName, ref.tfaCfmCell)},0)` : '0', 'n', S.calcC);
+    }
     putF(ws, r, wCol, `ROUND(${shRef(ref.sheetName, ref.winterLoadCell)},0)`,   'n', S.calcC);
     putF(ws, r, gCol, `ROUND(${shRef(ref.sheetName, ref.governingTrCell)},2)`,  'n', S.total);
     putF(ws, r, iCol, shRef(ref.sheetName, ref.iduConfigCell), 's', S.calc);
@@ -1099,11 +1113,9 @@ function buildSummarySheet(project: any, refs: RoomSheetRefs[]): XLSX.WorkSheet 
   const totR = row;
   putV(ws, totR, 1, 'PROJECT TOTAL', S.total);
   addMerge(ws, totR, 1, totR, 5);
-  [6, 9, 10, 13, 14, ...(incMon ? [15, 16] : [])].forEach(c => {
+  [6, 9, 10, 13, 14, ...(incMon ? [15, 16] : []), ...(anyTfa ? [tfaTrCol, tfaCfmCol] : [])].forEach(c => {
     putF(ws, totR, c, `SUM(${rc(dataStart, c)}:${rc(row - 1, c)})`, 'n', S.total);
   });
-  const wCol  = incMon ? 17 : 15;
-  const gCol  = incMon ? 18 : 16;
   putF(ws, totR, wCol, `SUM(${rc(dataStart, wCol)}:${rc(row - 1, wCol)})`, 'n', S.total);
   putF(ws, totR, gCol, `SUM(${rc(dataStart, gCol)}:${rc(row - 1, gCol)})`, 'n', S.total);
   addBorders(ws, totR, 1, totR, COLS);
@@ -1139,6 +1151,7 @@ function buildSummarySheet(project: any, refs: RoomSheetRefs[]): XLSX.WorkSheet 
     { wch: 10 }, { wch: 10 }, { wch: 12 }, { wch: 10 }, { wch: 10 },
     { wch: 10 }, { wch: 10 }, { wch: 10 }, { wch: 10 },
     ...(incMon ? [{ wch: 10 }, { wch: 10 }] : []),
+    ...(anyTfa ? [{ wch: 10 }, { wch: 10 }] : []),
     { wch: 14 }, { wch: 12 }, { wch: 40 },
   ];
   ws['!autofilter'] = { ref: XLSX.utils.encode_range({ s: { r: hdrRow - 1, c: 0 }, e: { r: n + hdrRow, c: COLS - 1 } }) };
@@ -1349,8 +1362,37 @@ function buildRoomSheet(
   putV(ws, row, 2, r2(record.governingTR), S.total);
   putV(ws, row, 3, 'TR', S.total);
   addMerge(ws, row, 4, row, COLS);
-  putV(ws, row, 4, `Summer: MAX(${sumTR} TR, ${sumCFM}/400 = ${r2(sumCFM / 400)} TR)${incMon && monCFM ? `  |  Monsoon: MAX(${monTR} TR, ${monCFM}/400 = ${r2(monCFM / 400)} TR)` : ''}`, S.note);
+  putV(ws, row, 4, `Plant TR is load-only (coil grand total ÷ 12,000 × safety). CFM/TR is a sanity ratio: Summer ${sumCFM > 0 ? r0(sumCFM / Math.max(sumTR, 0.0001)) : 0} CFM/TR (typical 350–450).`, S.note);
   row++;
+
+  // ── TFA / DOAS coil split ───────────────────────────────────────────────────
+  // When the engine flagged this room as DOAS-served, the outdoor-air coil duty
+  // is carried by the TFA unit, NOT the primary coil above. Show it separately so
+  // the schedule reads as: Plant (space) coil + TFA (OA) coil.
+  const roomTfaTR  = Math.max(Number(record.room?._calcTfaCoilTR) || 0, Number(record.room?._calcMonsoonTfaCoilTR) || 0);
+  const roomTfaCFM = Number(record.room?._calcTfaCfm) || 0;
+  const isTfaRoom  =
+    (Number(record.room?._calcTfaCoilBTUH) || 0) > 0 ||
+    (Number(record.room?._calcMonsoonTfaCoilBTUH) || 0) > 0 ||
+    !!record.room?._calcTfaOnly;
+  let tfaTrCell: string | undefined;
+  let tfaCfmCell: string | undefined;
+  if (isTfaRoom) {
+    tfaTrCell = rc(row, 2);
+    putV(ws, row, 1, 'TFA / DOAS Coil Capacity  [outdoor-air coil TR]', S.label);
+    putV(ws, row, 2, r2(roomTfaTR), S.total);
+    putV(ws, row, 3, 'TR', S.total);
+    addMerge(ws, row, 4, row, COLS);
+    putV(ws, row, 4, record.room?._calcTfaOnly
+      ? 'TFA-only room — primary coil carries zero; the TFA supply air is the sole conditioning.'
+      : 'Outdoor-air sensible + latent handled by the DOAS/TFA unit, decoupled from the primary coil.', S.note);
+    row++;
+    tfaCfmCell = rc(row, 2);
+    putV(ws, row, 1, 'TFA Design Airflow', S.label);
+    putV(ws, row, 2, r0(roomTfaCFM), S.total);
+    putV(ws, row, 3, 'CFM', S.total);
+    row++;
+  }
 
   // Winter total ref cell
   const winterLoadCell = rc(row - (calcRows.length + 3), 9); // points back to "Total Heating Load" row
@@ -1446,6 +1488,8 @@ function buildRoomSheet(
       monsoonCfmCell:   incMon ? monCFMcell : undefined,
       winterLoadCell:   winterLoadCellFix,
       governingTrCell:  govTRcell,
+      tfaTrCell,
+      tfaCfmCell,
       iduConfigCell,
     },
   };
