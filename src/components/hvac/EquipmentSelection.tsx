@@ -1873,6 +1873,9 @@ export default function EquipmentSelection({
   // Quantity state — per-room IDU qty and single-unit qty, keyed by selectedSystemId
   const [roomQuantities, setRoomQuantities] = useState<Record<string, number>>({});
   const [unitQuantity, setUnitQuantity] = useState(1);
+  // DOAS tile: collapse supply/ERV/cooling-source/zone-links into "Advanced" — fresh
+  // air is set per-room in the Load Calculator now (Phase 1 simplification).
+  const [showDoasAdvanced, setShowDoasAdvanced] = useState(false);
 
   // Picker dialog state
   const [iduPicker, setIduPicker] = useState<{ roomId: string; roomName: string; reqTR: number; reqCFM: number } | null>(null);
@@ -5279,6 +5282,16 @@ export default function EquipmentSelection({
                           </div>
                         </div>
 
+                        {/* Advanced TFA settings — collapsed by default. Fresh air is set
+                            per-room in the Load Calculator; these are tuning / legacy controls. */}
+                        <button
+                          type="button"
+                          onClick={() => setShowDoasAdvanced(v => !v)}
+                          className="text-xs font-semibold text-teal-700 dark:text-teal-300 hover:underline self-start"
+                        >
+                          {showDoasAdvanced ? '▾ Hide advanced TFA settings' : '▸ Advanced TFA settings — supply temp, ERV, cooling source, zone links'}
+                        </button>
+                        {showDoasAdvanced && (<>
                         {/* TFA coil cooling source — decides whether the TFA coil load is
                             added to the linked chiller plant's required capacity. */}
                         {(() => {
@@ -5638,6 +5651,7 @@ export default function EquipmentSelection({
                             );
                           })()}
                         </div>
+                        </>)}
 
                         {/* Unit selection */}
                         <div>
@@ -5905,9 +5919,9 @@ export default function EquipmentSelection({
                                     const installed = list.reduce((s: number, i: any) => s + (Number(i.trCapacity) || 0) * (Number(i.quantity) || 1), 0);
                                     roomUndersized = installed > 0 && installed < required * 0.98;
                                   }
-                                  // Per-room TFA mode (Phase C). Only show when this room's zone is TFA-linked.
+                                  // Per-room TFA mode is now SET in the Load Calculator. Here we
+                                  // only show a read-only badge of the effective mode (when served).
                                   const roomDoasChip = findDoasForRoom(r);
-                                  const roomTfaModeChip = (r.tfaMode as string | undefined) ?? 'inherit';
                                   const effectiveModeChip = getEffectiveTfaMode(r, roomDoasChip);
                                   return (
                                     <span key={r.id} className={cn(
@@ -5919,24 +5933,17 @@ export default function EquipmentSelection({
                                       {roomUndersized && <span title="Room IDU under-rated for current load — review">⚠</span>}
                                       {r.name}
                                       {r.floor && <span className={cn('text-sm', roomUndersized ? 'text-amber-500' : 'text-blue-400 dark:text-blue-500')}>{r.floor}</span>}
-                                      {roomDoasChip && (
-                                        <select
-                                          value={roomTfaModeChip}
-                                          onChange={e => void updateRoomTfaMode(r.id, e.target.value as any)}
-                                          title={`TFA mode for this room. Zone linked to TFA/DOAS "${roomDoasChip.name}". Effective: ${effectiveModeChip}.`}
+                                      {roomDoasChip && effectiveModeChip !== 'no-tfa' && (
+                                        <span
+                                          title={`Fresh air is set per-room in the Load Calculator. Effective: ${effectiveModeChip}.`}
                                           className={cn(
-                                            'h-5 text-[10px] px-1 py-0 rounded border font-semibold uppercase tracking-wide cursor-pointer',
-                                            effectiveModeChip === 'tfa-served' ? 'border-teal-300 bg-teal-50 dark:bg-teal-950/30 text-teal-700 dark:text-teal-300' :
-                                            effectiveModeChip === 'tfa-only'   ? 'border-violet-300 bg-violet-50 dark:bg-violet-950/30 text-violet-700 dark:text-violet-300' :
-                                                                                  'border-slate-300 bg-slate-50 dark:bg-slate-800 text-slate-600 dark:text-slate-400',
+                                            'h-5 text-[10px] px-1.5 py-0 rounded border font-semibold uppercase tracking-wide inline-flex items-center',
+                                            effectiveModeChip === 'tfa-only' ? 'border-violet-300 bg-violet-50 dark:bg-violet-950/30 text-violet-700 dark:text-violet-300'
+                                                                             : 'border-teal-300 bg-teal-50 dark:bg-teal-950/30 text-teal-700 dark:text-teal-300',
                                           )}
-                                          onClick={e => e.stopPropagation()}
                                         >
-                                          <option value="inherit">Inherit ({effectiveModeChip})</option>
-                                          <option value="tfa-served">TFA-served</option>
-                                          <option value="tfa-only">TFA-only (corridor)</option>
-                                          <option value="no-tfa">No TFA</option>
-                                        </select>
+                                          {effectiveModeChip === 'tfa-only' ? 'TFA-only' : 'TFA'}
+                                        </span>
                                       )}
                                       <button onClick={() => void handleRemoveRoomFromZone(zone.id, r.id)}
                                         className={cn('leading-none ml-0.5 text-base font-bold hover:text-red-500', roomUndersized ? 'text-amber-400' : 'text-blue-400')}>×</button>
@@ -6439,7 +6446,6 @@ export default function EquipmentSelection({
                                         const reqTR = reqs.overallRequiredTR || reqs.requiredTR || 0;
                                         const reqCFM = reqs.overallDesignCFM || reqs.designCFM || 0;
                                         const roomDoas = findDoasForRoom(r);
-                                        const roomTfaModeRaw = (r.tfaMode as string | undefined) ?? 'inherit';
                                         const effectiveMode = getEffectiveTfaMode(r, roomDoas);
                                         return (
                                           <div key={r.id} className="flex items-start gap-2.5 px-3 py-2">
@@ -6448,23 +6454,17 @@ export default function EquipmentSelection({
                                                 <span className="text-sm font-semibold text-slate-800 dark:text-slate-200">{r.name}</span>
                                                 {r.floor && <span className="text-xs text-slate-400 dark:text-slate-500">{r.floor}</span>}
                                                 {reqTR > 0 && <span className="text-xs text-slate-400 dark:text-slate-500 font-mono">{reqTR.toFixed(2)} TR req.</span>}
-                                                {roomDoas && (
-                                                  <select
-                                                    value={roomTfaModeRaw}
-                                                    onChange={e => void updateRoomTfaMode(r.id, e.target.value as any)}
-                                                    title={`TFA mode for this room. Zone linked to TFA/DOAS "${roomDoas.name}". Effective: ${effectiveMode}.`}
+                                                {roomDoas && effectiveMode !== 'no-tfa' && (
+                                                  <span
+                                                    title={`Fresh air is set per-room in the Load Calculator. Effective: ${effectiveMode}.`}
                                                     className={cn(
-                                                      'h-5 text-[10px] px-1 py-0 rounded border font-semibold uppercase tracking-wide cursor-pointer',
-                                                      effectiveMode === 'tfa-served' ? 'border-teal-300 bg-teal-50 dark:bg-teal-950/30 text-teal-700 dark:text-teal-300' :
-                                                      effectiveMode === 'tfa-only'   ? 'border-violet-300 bg-violet-50 dark:bg-violet-950/30 text-violet-700 dark:text-violet-300' :
-                                                                                       'border-slate-300 bg-slate-50 dark:bg-slate-800 text-slate-600 dark:text-slate-400',
+                                                      'h-5 text-[10px] px-1.5 py-0 rounded border font-semibold uppercase tracking-wide inline-flex items-center',
+                                                      effectiveMode === 'tfa-only' ? 'border-violet-300 bg-violet-50 dark:bg-violet-950/30 text-violet-700 dark:text-violet-300'
+                                                                                   : 'border-teal-300 bg-teal-50 dark:bg-teal-950/30 text-teal-700 dark:text-teal-300',
                                                     )}
                                                   >
-                                                    <option value="inherit">Inherit ({effectiveMode})</option>
-                                                    <option value="tfa-served">TFA-served</option>
-                                                    <option value="tfa-only">TFA-only (Phase D)</option>
-                                                    <option value="no-tfa">No TFA</option>
-                                                  </select>
+                                                    {effectiveMode === 'tfa-only' ? 'TFA-only' : 'TFA'}
+                                                  </span>
                                                 )}
                                               </div>
                                               {idus.length > 0 && (
