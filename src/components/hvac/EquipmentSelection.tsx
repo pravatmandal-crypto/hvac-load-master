@@ -1249,8 +1249,9 @@ function UnitPickerDialog({
                       await onSaveToLibrary(genSpec);
                       const sel: SingleUnitSelection = {
                         modelId: `gen-${Date.now()}`, brand: genSpec.brand ?? 'Custom',
-                        modelSeries: genSpec.modelSeries ?? '', subType: genSpec.subType,
-                        trCapacity: genSpec.capacityTR ?? 0, cfmRated: genSpec.ratedAirflowCFM ?? 0,
+                        modelSeries: genSpec.modelSeries ?? '',
+                        trCapacity: Number(genSpec.capacityTR) || 0, cfmRated: Number(genSpec.ratedAirflowCFM) || 0,
+                        ...(genSpec.subType ? { subType: genSpec.subType } : {}),
                         ...((genSpec as any).staticPressurePa ? { staticPressurePa: (genSpec as any).staticPressurePa } : {}),
                       };
                       onSelect(sel); onClose();
@@ -1263,8 +1264,9 @@ function UnitPickerDialog({
                 onClick={() => {
                   const sel: SingleUnitSelection = {
                     modelId: `gen-${Date.now()}`, brand: genSpec.brand ?? 'Custom',
-                    modelSeries: genSpec.modelSeries ?? '', subType: genSpec.subType,
-                    trCapacity: genSpec.capacityTR ?? 0, cfmRated: genSpec.ratedAirflowCFM ?? 0,
+                    modelSeries: genSpec.modelSeries ?? '',
+                    trCapacity: Number(genSpec.capacityTR) || 0, cfmRated: Number(genSpec.ratedAirflowCFM) || 0,
+                    ...(genSpec.subType ? { subType: genSpec.subType } : {}),
                     ...((genSpec as any).staticPressurePa ? { staticPressurePa: (genSpec as any).staticPressurePa } : {}),
                   };
                   onSelect(sel); onClose();
