@@ -148,6 +148,14 @@ export interface HvacSystemDoc extends EquipmentSystem {
   tfaSupplyHumidity?: number;        // % RH at supply temp
   ervSensibleEffectiveness?: number; // 0..1
   ervLatentEffectiveness?: number;   // 0..1
+  // Where the TFA/DOAS COIL gets its cooling from:
+  //   'own-unit'      — self-contained DX / packaged conditioner (default). The TFA
+  //                     coil load is NOT added to the primary chiller plant duty.
+  //   'chiller-plant' — chilled-water Fresh-Air-HW coil fed by the SAME chiller plant
+  //                     that serves the linked rooms. The TFA coil load IS added to
+  //                     that chiller plant's required capacity.
+  // Undefined is treated as 'own-unit' so existing projects are unchanged.
+  tfaCoolingSource?: 'own-unit' | 'chiller-plant';
   // Migration bookkeeping
   migratedFromEquipmentSystem?: boolean;
   migratedAt?: any;

@@ -4454,6 +4454,24 @@ export default function EquipmentSelection({
     ? chillerThermalTR * (selectedSystem.diversityFactor ?? 0.75)
     : 0;
 
+  // TFA/DOAS coil load that lands on THIS chiller plant: only DOAS units explicitly
+  // marked tfaCoolingSource === 'chiller-plant' that serve rooms on this chiller.
+  // Outdoor-air load is non-diverse (fresh air runs continuously), so it is NOT
+  // multiplied by the diversity factor — it adds on top of the diversified space load.
+  const chillerTfaCoilTR = selectedSystem?.type === 'Chiller'
+    ? systemRoomIds.reduce((s, rid) => {
+        const room = rooms.find((r: any) => r.id === rid) as any;
+        const doas = room ? findDoasForRoom(room) : null;
+        if (!doas || (doas as any).tfaCoolingSource !== 'chiller-plant') return s;
+        const reqs: any = getRoomReqs(rid);
+        // Governing (higher of summer / monsoon) TFA coil TR for this room.
+        return s + Math.max(Number(reqs?.tfaCoilTR) || 0, Number(reqs?.monsoonTfaCoilTR) || 0);
+      }, 0)
+    : 0;
+
+  // Total required plant capacity = diversified space load + chiller-fed TFA coil.
+  const chillerPlantRequiredTR = chillerDiverseTR + chillerTfaCoilTR;
+
   // Effective chiller units — combines new chillerUnits[] with legacy unitSelection for display
   const effectiveChillerUnits = useMemo((): ODUCombinationUnit[] => {
     if (!selectedSystem || selectedSystem.type !== 'Chiller') return [];
@@ -4486,8 +4504,10 @@ export default function EquipmentSelection({
   const ctWorkingTR = effectiveCTUnits.filter(u => (u.role ?? 'working') === 'working').reduce((s, u) => s + u.trCapacity * u.quantity, 0);
   const ctStandbyTR = effectiveCTUnits.filter(u => u.role === 'standby').reduce((s, u) => s + u.trCapacity * u.quantity, 0);
   // Heat rejection duty ≈ chiller plant × 1.25 (accounts for compressor heat at COP ≈ 5).
-  // Standby CTs are redundancy and don't count toward duty coverage — compare against working only.
-  const ctRequiredTR = chillerDiverseTR * 1.25;
+  // Uses the FULL plant duty (space + any chiller-fed TFA coil) — the condenser water
+  // rejects the entire refrigeration load. Standby CTs are redundancy and don't count
+  // toward duty coverage — compare against working only.
+  const ctRequiredTR = chillerPlantRequiredTR * 1.25;
 
   // All equipment selected across systems — drives the Library tab schedule
   const projectEquipmentSchedule = useMemo(() => {
@@ -5274,6 +5294,41 @@ export default function EquipmentSelection({
                             <p className="text-xs text-slate-400">via linked primaries</p>
                           </div>
                         </div>
+
+                        {/* TFA coil cooling source — decides whether the TFA coil load is
+                            added to the linked chiller plant's required capacity. */}
+                        {(() => {
+                          const source = ((selectedSystem as any).tfaCoolingSource as string | undefined) ?? 'own-unit';
+                          const onPlant = source === 'chiller-plant';
+                          return (
+                            <div className="rounded-lg border border-teal-200 dark:border-teal-800 bg-white dark:bg-slate-900 p-4">
+                              <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+                                <div className="min-w-0">
+                                  <p className="text-sm font-bold text-slate-700 dark:text-slate-200">TFA Coil Cooling Source</p>
+                                  <p className="text-xs text-slate-400 dark:text-slate-500 mt-0.5">
+                                    {onPlant
+                                      ? 'Chilled-water Fresh-Air coil on the main plant — this TFA coil load is ADDED to the linked chiller plant capacity.'
+                                      : 'Self-contained DX / packaged unit — TFA coil load is sized on the DOAS unit only, not on the chiller plant.'}
+                                  </p>
+                                </div>
+                                <div className="inline-flex rounded-md border border-teal-300 dark:border-teal-700 overflow-hidden shrink-0">
+                                  <button
+                                    type="button"
+                                    className={cn('text-xs px-3 py-1.5 font-medium', !onPlant ? 'bg-teal-600 text-white' : 'bg-white dark:bg-slate-800 text-slate-600 dark:text-slate-300')}
+                                    onClick={() => void updateSystemField(selectedSystem.id, { tfaCoolingSource: 'own-unit' })}>
+                                    Own unit (DX/packaged)
+                                  </button>
+                                  <button
+                                    type="button"
+                                    className={cn('text-xs px-3 py-1.5 font-medium border-l border-teal-300 dark:border-teal-700', onPlant ? 'bg-teal-600 text-white' : 'bg-white dark:bg-slate-800 text-slate-600 dark:text-slate-300')}
+                                    onClick={() => void updateSystemField(selectedSystem.id, { tfaCoolingSource: 'chiller-plant' })}>
+                                    Fed by main chiller plant
+                                  </button>
+                                </div>
+                              </div>
+                            </div>
+                          );
+                        })()}
 
                         {/* TFA Supply & Heat Recovery — editable */}
                         <div className="rounded-lg border border-teal-200 dark:border-teal-800 bg-white dark:bg-slate-900 p-4">
@@ -6602,14 +6657,28 @@ export default function EquipmentSelection({
                               onKeyDown={e => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur(); }}
                             />
                             <span className="font-bold text-indigo-700 dark:text-indigo-400">{chillerDiverseTR.toFixed(2)} TR</span>
-                            <span className="text-slate-400 dark:text-slate-500 italic">plant capacity required</span>
+                            <span className="text-slate-400 dark:text-slate-500 italic">{chillerTfaCoilTR > 0 ? 'space load' : 'plant capacity required'}</span>
                           </div>
+                          {chillerTfaCoilTR > 0 && (
+                            <>
+                              <span className="text-slate-300 dark:text-slate-600">+</span>
+                              <div className="flex items-center gap-1.5">
+                                <span className="text-teal-600 dark:text-teal-400">TFA coil (on this plant):</span>
+                                <span className="font-bold text-teal-700 dark:text-teal-300">{chillerTfaCoilTR.toFixed(2)} TR</span>
+                              </div>
+                              <span className="text-slate-300 dark:text-slate-600">=</span>
+                              <div className="flex items-center gap-1.5">
+                                <span className="font-bold text-indigo-700 dark:text-indigo-400">{chillerPlantRequiredTR.toFixed(2)} TR</span>
+                                <span className="text-slate-400 dark:text-slate-500 italic">plant capacity required</span>
+                              </div>
+                            </>
+                          )}
                           {chillerTotalInstalledTR > 0 && (
                             <>
                               <span className="text-slate-300 dark:text-slate-600">→</span>
-                              <span className={cn('font-semibold text-xs', chillerWorkingTR >= chillerDiverseTR * 0.98 ? 'text-emerald-700 dark:text-emerald-400' : 'text-amber-600 dark:text-amber-400')}>
+                              <span className={cn('font-semibold text-xs', chillerWorkingTR >= chillerPlantRequiredTR * 0.98 ? 'text-emerald-700 dark:text-emerald-400' : 'text-amber-600 dark:text-amber-400')}>
                                 Working: {chillerWorkingTR.toFixed(1)} TR
-                                {chillerWorkingTR >= chillerDiverseTR * 0.98 ? ' ✓' : ` (need ${(chillerDiverseTR - chillerWorkingTR).toFixed(1)} TR more)`}
+                                {chillerWorkingTR >= chillerPlantRequiredTR * 0.98 ? ' ✓' : ` (need ${(chillerPlantRequiredTR - chillerWorkingTR).toFixed(1)} TR more)`}
                               </span>
                               {chillerStandbyTR > 0 && (
                                 <span className="font-semibold text-xs text-amber-600 dark:text-amber-400">
@@ -6932,7 +7001,7 @@ export default function EquipmentSelection({
                             </div>
                             <div className="text-xs text-amber-600 dark:text-amber-400">
                               {selectedSystem.type === 'Chiller'
-                                ? <>{includeMonsoon && <span className="mr-1">{governingSeason} ·</span>}Plant (×{(selectedSystem.diversityFactor ?? 0.75).toFixed(2)} div.): <span className="font-semibold text-indigo-700 dark:text-indigo-400">{chillerDiverseTR.toFixed(1)} TR</span></>
+                                ? <>{includeMonsoon && <span className="mr-1">{governingSeason} ·</span>}Plant (×{(selectedSystem.diversityFactor ?? 0.75).toFixed(2)} div.{chillerTfaCoilTR > 0 ? ' + TFA' : ''}): <span className="font-semibold text-indigo-700 dark:text-indigo-400">{chillerPlantRequiredTR.toFixed(1)} TR</span></>
                                 : <>
                                     {includeMonsoon && <span className="mr-1">{governingSeason} ·</span>}
                                     {totalRequiredTR > totalSummerRequiredTR * 1.05 ? 'CFM governs' : 'Load governs'}
@@ -7448,7 +7517,7 @@ export default function EquipmentSelection({
                       ahuConfig={specAhuConfig}
                       systemVentHeatingKW={systemVentHeatingKW}
                       systemReheatKW={(systemPsychro?.totalReheatBTU ?? 0) / 3412}
-                      chillerPlantTR={selectedSystem.type === 'Chiller' ? chillerDiverseTR : 0}
+                      chillerPlantTR={selectedSystem.type === 'Chiller' ? chillerPlantRequiredTR : 0}
                       zoneUnits={zoneUnitsForSpec}
                       selectedChillerUnits={selectedSystem.type === 'Chiller' ? effectiveChillerUnits : undefined}
                       selectedCTUnits={selectedSystem.type === 'Chiller' ? effectiveCTUnits : undefined}
@@ -8062,8 +8131,8 @@ export default function EquipmentSelection({
             </DialogHeader>
             <div className="space-y-3 pt-1">
               <div className="bg-cyan-50 dark:bg-cyan-900/20 border border-cyan-200 dark:border-cyan-800 rounded px-3 py-2 text-xs text-cyan-700 dark:text-cyan-300">
-                Computed duty: <span className="font-bold">{(chillerDiverseTR * 1.25).toFixed(1)} TR</span>
-                <span className="text-cyan-500 dark:text-cyan-400 ml-1">({(chillerThermalTR * 1.25 * 3.517).toFixed(0)} kW heat rejection, assuming COP ≈ 5)</span>
+                Computed duty: <span className="font-bold">{(chillerPlantRequiredTR * 1.25).toFixed(1)} TR</span>
+                <span className="text-cyan-500 dark:text-cyan-400 ml-1">({(chillerPlantRequiredTR * 1.25 * 3.517).toFixed(0)} kW heat rejection, assuming COP ≈ 5)</span>
               </div>
               <div>
                 <Label className="text-sm font-semibold uppercase text-slate-600 dark:text-slate-400">Brand *</Label>
@@ -8135,7 +8204,7 @@ export default function EquipmentSelection({
           packageSubType={selectedSystem.packageSubType}
           requiredTR={
             selectedSystem.type === 'Chiller'
-              ? Math.max(0.5, chillerDiverseTR - chillerTotalInstalledTR)
+              ? Math.max(0.5, chillerPlantRequiredTR - chillerTotalInstalledTR)
               : selectedSystem.type === 'DOAS'
               // DOAS sized off the aggregated TFA coil load across served rooms
               // (governing summer/monsoon). Falls back to the OA-CFM heuristic
