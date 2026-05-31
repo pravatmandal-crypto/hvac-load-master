@@ -8,6 +8,7 @@ import {
   calculateEnvelopeGain,
   calculateInternalGains,
   calculateVentilationLoad,
+  calculateTFALoad,
   calculateCoilParameters,
   calculateParasiticGains,
   calculateHeatingLoad,
@@ -42,8 +43,23 @@ function computeZoneTotals(
   envelopeElements: Record<string, any[]>,
   dc: DesignConditions,
   isChiller: boolean,
+  equipSystems: any[] = [],
 ) {
+  // DOAS/TFA awareness — mirror EquipmentSelection.computeRoomReqs and the LC
+  // project-summary engine so the zone strip shows the REDUCED (post-TFA) space
+  // coil, not the pre-TFA full-OA load. Build a primary→DOAS map once.
+  const doasForPrimary = new Map<string, any>();
+  for (const s of equipSystems) {
+    if (s?.type === 'DOAS') {
+      for (const pid of ((s.doasLinkedSystemIds ?? []) as string[])) doasForPrimary.set(pid, s);
+      for (const zid of ((s.doasLinkedZoneIds ?? []) as string[])) doasForPrimary.set(zid, s);
+    }
+  }
+  const doasForRoom = (room: any) =>
+    doasForPrimary.get(room?.systemId) ?? doasForPrimary.get(room?.zoneId) ?? null;
+
   let totalCooling = 0;
+  let totalTfaCoil = 0; // Σ TFA coil load (BTU/h) for this dc/season — shown separately
   let totalHeating = 0;
   let totalDehumCfm = 0;
   let totalOaCfm = 0;
@@ -76,13 +92,43 @@ function computeZoneTotals(
 
       const elements = (envelopeElements[room.id] || []) as EnvelopeElement[];
 
-      const envelope = calculateEnvelopeGain(elements, dc);
-      const internal = calculateInternalGains(rd);
-      const vent = calculateVentilationLoad(rd, dc);
-      const heating = calculateHeatingLoad(rd, elements, dc);
+      // TFA-aware design conditions — when this room is DOAS-served, the OA goes to
+      // the TFA unit (zeroed on the primary) and the cold-DOAS supply credits the
+      // space coil. Mirrors the persist path + LC project summary exactly.
+      const doas = doasForRoom(room);
+      const isTFA = !!doas;
+      const dcEff: any = isTFA
+        ? {
+            ...dc,
+            ventilationStrategy: 'tfa-cold',
+            tfaSupplyTemp: doas.tfaSupplyTemp,
+            tfaSupplyHumidity: doas.tfaSupplyHumidity,
+            ervSensibleEffectiveness: doas.ervSensibleEffectiveness,
+            ervLatentEffectiveness: doas.ervLatentEffectiveness,
+          }
+        : dc;
 
-      const erSensible = envelope.sensible + internal.sensible + vent.sensible * BF;
-      const erLatent = internal.latent + vent.latent * BF;
+      const envelope = calculateEnvelopeGain(elements, dcEff);
+      const internal = calculateInternalGains(rd);
+      const vent = calculateVentilationLoad(rd, dcEff);
+      const heating = calculateHeatingLoad(rd, elements, dcEff);
+      const tfa = isTFA ? calculateTFALoad(rd, dcEff) : null;
+
+      // Effective TFA mode: explicit room override, else 'tfa-served' when DOAS-linked.
+      // (Zone-level tfaDefaultMode is applied by the engine/SD; the strip treats an
+      // unset room as tfa-served — the common case.)
+      const rawRoomMode = room?.tfaMode as string | undefined;
+      const effectiveMode: 'no-tfa' | 'tfa-served' | 'tfa-only' = !isTFA
+        ? 'no-tfa'
+        : (rawRoomMode === 'no-tfa' || rawRoomMode === 'tfa-served' || rawRoomMode === 'tfa-only')
+          ? rawRoomMode
+          : 'tfa-served';
+      const isTfaOnly = effectiveMode === 'tfa-only';
+
+      const erVentSen = isTFA ? 0 : vent.sensible * BF;
+      const erVentLat = isTFA ? 0 : vent.latent * BF;
+      const erSensible = envelope.sensible + internal.sensible + erVentSen;
+      const erLatent = internal.latent + erVentLat;
       const ductPct = Number(room.ductGainPct) || 2;
       const fanPct = Number(room.fanGainPct) || 3;
       const sensibleSafetyPct = Number(room.sensibleSafetyPercent ?? room.sensibleSafetyFactor ?? 10);
@@ -92,10 +138,13 @@ function computeZoneTotals(
 
       const ersh = (erSensible + parasitic.ductGain + parasitic.fanGain) * (1 + sensibleSafetyPct / 100);
       const erlh = erLatent * (1 + latentSafetyPct / 100);
-      const oaSensible = vent.sensible * (1 - BF);
-      const oaLatent = vent.latent * (1 - BF);
-      const coilSensible = ersh + oaSensible;
-      const coilLatent = erlh + oaLatent;
+      const oaSensible = isTFA ? 0 : vent.sensible * (1 - BF);
+      const oaLatent = isTFA ? 0 : vent.latent * (1 - BF);
+      const tfaOffSen = tfa ? tfa.spaceSensibleOffset : 0;
+      const tfaOffLat = tfa ? tfa.spaceLatentOffset : 0;
+      const coilSensible = isTfaOnly ? 0 : (isTFA ? Math.max(0, ersh - tfaOffSen) : ersh + oaSensible);
+      const coilLatent = isTfaOnly ? 0 : (isTFA ? Math.max(0, erlh - tfaOffLat) : erlh + oaLatent);
+      if (tfa) totalTfaCoil += tfa.coilSensible + tfa.coilLatent;
       // Pass derived system type to centralized helper. Preserves the previous
       // 44/42 split for chiller vs VRF; non-chiller types now use the canonical
       // 42°F per getMinAdp (matches old isChiller=false behavior).
@@ -146,6 +195,8 @@ function computeZoneTotals(
   return {
     totalCooling,
     totalTR: totalCooling / 12000,
+    totalTfaCoil,
+    totalTfaCoilTR: totalTfaCoil / 12000,
     totalHeating,
     totalDehumCfm,
     totalOaCfm,
@@ -243,12 +294,12 @@ function ZoneSummaryBar({
   }), [dc, project]);
 
   const summerTotals = useMemo(
-    () => computeZoneTotals(zoneRooms, envelopeElements, dc, isChiller),
-    [zoneRooms, envelopeElements, dc, isChiller],
+    () => computeZoneTotals(zoneRooms, envelopeElements, dc, isChiller, equipSystems),
+    [zoneRooms, envelopeElements, dc, isChiller, equipSystems],
   );
   const monsoonTotals = useMemo(
-    () => (includeMonsoon ? computeZoneTotals(zoneRooms, envelopeElements, monsoonDc, isChiller) : null),
-    [zoneRooms, envelopeElements, monsoonDc, isChiller, includeMonsoon],
+    () => (includeMonsoon ? computeZoneTotals(zoneRooms, envelopeElements, monsoonDc, isChiller, equipSystems) : null),
+    [zoneRooms, envelopeElements, monsoonDc, isChiller, includeMonsoon, equipSystems],
   );
   const summerGoverningRoom = useMemo(
     () => computeGoverningRoom(zoneRooms, envelopeElements, dc, isChiller),
@@ -431,22 +482,30 @@ function ZoneCollapsedBadge({
   envelopeElements,
   dc,
   isChiller,
+  equipSystems,
 }: {
   zoneRooms: any[];
   envelopeElements: Record<string, any[]>;
   dc: DesignConditions;
   isChiller: boolean;
+  equipSystems?: any[];
 }) {
   const t = useMemo(
-    () => computeZoneTotals(zoneRooms, envelopeElements, dc, isChiller),
-    [zoneRooms, envelopeElements, dc, isChiller],
+    () => computeZoneTotals(zoneRooms, envelopeElements, dc, isChiller, equipSystems),
+    [zoneRooms, envelopeElements, dc, isChiller, equipSystems],
   );
 
   if (zoneRooms.length === 0) return null;
 
   return (
     <span className="hidden md:flex items-center gap-2 rounded-full border border-orange-200 dark:border-orange-800 bg-gradient-to-r from-orange-50 to-amber-50 dark:from-orange-950/30 dark:to-amber-950/30 px-2.5 py-1 text-xs font-semibold text-orange-700 dark:text-orange-400 flex-shrink-0 shadow-sm">
-      <span>{t.totalTR.toFixed(2)} TR</span>
+      <span title="Space (primary coil) TR">{t.totalTR.toFixed(2)} TR</span>
+      {t.totalTfaCoilTR > 0 && (
+        <>
+          <span className="h-3 w-px bg-orange-200" />
+          <span className="text-teal-700 dark:text-teal-400" title="TFA/DOAS coil TR (fresh-air conditioning)">+{t.totalTfaCoilTR.toFixed(1)} TFA</span>
+        </>
+      )}
       <span className="h-3 w-px bg-orange-200" />
       <span>{Math.round(t.totalDesignCfm)} CFM</span>
       {t.totalHeating > 0 && (
@@ -910,6 +969,7 @@ const ZoneList = ({
               envelopeElements={envelopeElements}
               dc={zoneDc}
               isChiller={isChiller}
+              equipSystems={equipSystems}
             />
           )}
 
