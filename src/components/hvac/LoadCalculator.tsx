@@ -178,6 +178,13 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
       zoneName: r.zoneName,
       systemId: r.systemId,
       systemName: r.systemName,
+      // Per-room TFA mode MUST survive normalization or the live resolver never
+      // sees the user's "Fresh air" choice (it would always fall back to the zone
+      // link). Preserve the persisted TFA coil too so staleness detection works.
+      tfaMode: r.tfaMode ?? r.data?.tfaMode,
+      _calcTfaCoilBTUH: r._calcTfaCoilBTUH ?? r.data?._calcTfaCoilBTUH,
+      _calcMonsoonTfaCoilBTUH: r._calcMonsoonTfaCoilBTUH ?? r.data?._calcMonsoonTfaCoilBTUH,
+      _calcTfaOnly: r._calcTfaOnly ?? r.data?._calcTfaOnly,
     };
   };
 
