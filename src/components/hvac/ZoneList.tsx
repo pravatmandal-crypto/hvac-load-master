@@ -120,12 +120,11 @@ function computeZoneTotals(
       // not dehumidifiedCFM which uses floating indicated ADP and inflates high-sensible rooms.
       const designCFM = Math.max(coil.minAdpSensibleCFM, totalSupplyCFM);
 
-      // Per-room required TR: max(load TR, CFM-derived TR) × (1 + overall safety %).
+      // Per-room required TR: load TR × (1 + overall safety %). Plant TR is LOAD-ONLY
+      // (2026-05-20 decision, confirmed) — CFM/TR is a sanity ratio, never a governor.
       // Same formula as EquipmentSelection.computeRoomReqs so LC zone-strip and SD agree.
       const roomLoadTR = grandTotal / 12000;
-      const roomCfmTR = designCFM > 0 ? designCFM / 400 : 0;
-      const roomGoverningTR = Math.max(roomLoadTR, roomCfmTR);
-      const roomRequiredTR = roomGoverningTR * (1 + overallSafetyPct / 100);
+      const roomRequiredTR = roomLoadTR * (1 + overallSafetyPct / 100);
 
       if (isFinite(grandTotal)) totalCooling += grandTotal;
       if (isFinite(heating.totalHeatingLoad)) totalHeating += heating.totalHeatingLoad;
@@ -277,7 +276,7 @@ function ZoneSummaryBar({
   const governingDesignCfm = includeMonsoon && monsoonTotals
     ? Math.max(summerTotals.totalDesignCfm, monsoonTotals.totalDesignCfm)
     : summerTotals.totalDesignCfm;
-  // Equipment-sizing required TR: sum of per-room required TR (max(loadTR, cfmTR) × safety),
+  // Equipment-sizing required TR: sum of per-room required TR (load TR × safety; load-only),
   // governed by the higher of summer / monsoon. Matches EquipmentSelection.computeRoomReqs.
   const requiredTR = includeMonsoon && monsoonTotals
     ? Math.max(summerTotals.totalRequiredTR, monsoonTotals.totalRequiredTR)

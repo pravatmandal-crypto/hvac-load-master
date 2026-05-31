@@ -48,7 +48,7 @@ src/types/          → Equipment system interfaces (IDUSelection, ODUSelection,
 4. **Parasitic gains** (`lib/hvac/parasitic.ts`) — duct and fan heat as percentage of ER sensible
 5. **Safety factors** — applied to sensible, latent, and overall totals separately
 6. **Psychrometrics** (`lib/hvac/psychrometrics.ts`) — RSHF → indicated ADP → selected ADP (min 44°F Chiller / 42°F VRF) → `minAdpSensibleCFM` at fixed system ADP → coil parameters
-7. **CFM sizing** — `designSupplyCFM = max(minAdpSensibleCFM, totalACPH_CFM)`; `cfmTR = designSupplyCFM / 400` (Carrier 400 CFM/TR rule); `governingTR = max(loadTR, cfmTR)`
+7. **CFM sizing** — `designSupplyCFM = max(minAdpSensibleCFM, totalACPH_CFM)`; `cfmTR = designSupplyCFM / 400` (Carrier 400 CFM/TR rule). **Plant/equipment TR is LOAD-ONLY** (`governingTR = grandTotalTR`, decision 2026-05-20, reconfirmed): `cfmTR` is a sanity ratio (display + 350–450 warning), NOT a governor. Do **not** revert to `max(loadTR, cfmTR)` — that inflates TR on high-airflow rooms and contradicts the locked policy.
 8. **Monsoon** — full recalculation at monsoon conditions; final TR = max(summer, monsoon)
 9. **Persist** — results written to `projects/{id}/rooms/{roomId}` in Firestore
 
