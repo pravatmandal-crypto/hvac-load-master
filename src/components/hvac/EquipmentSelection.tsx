@@ -1320,8 +1320,10 @@ function UnitPickerDialog({
                         onClick={() => {
                           const sel: SingleUnitSelection = {
                             modelId: item.id, brand: item.brand, modelSeries: item.modelSeries,
-                            subType: item.subType, trCapacity: item.capacityTR, cfmRated: item.ratedAirflowCFM ?? 0,
+                            trCapacity: Number(item.capacityTR) || 0,
+                            cfmRated: Number(item.ratedAirflowCFM) || 0,
                           };
+                          if (item.subType) sel.subType = item.subType;
                           if ((item as any).staticPressurePa) sel.staticPressurePa = (item as any).staticPressurePa;
                           onSelect(sel);
                           onClose();
@@ -1363,10 +1365,14 @@ function UnitPickerDialog({
                     <TableCell>
                       <Button size="sm" variant={sufficient ? 'default' : 'outline'} className="h-8 text-sm px-2"
                         onClick={() => {
+                          // Guard every field — Firestore rejects undefined, and ERV/HRV
+                          // catalog units often have no capacityTR. Omit subType when absent.
                           const sel: SingleUnitSelection = {
                             modelId: item.id, brand: item.brand, modelSeries: item.modelSeries,
-                            subType: item.subType, trCapacity: item.capacityTR, cfmRated: item.ratedAirflowCFM ?? 0,
+                            trCapacity: Number(item.capacityTR) || 0,
+                            cfmRated: Number(item.ratedAirflowCFM) || 0,
                           };
+                          if (item.subType) sel.subType = item.subType;
                           if ((item as any).staticPressurePa) sel.staticPressurePa = (item as any).staticPressurePa;
                           onSelect(sel);
                           onClose();
