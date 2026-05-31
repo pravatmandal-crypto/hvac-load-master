@@ -1119,6 +1119,21 @@ function buildSummarySheet(project: any, refs: RoomSheetRefs[]): XLSX.WorkSheet 
   putF(ws, totR, wCol, `SUM(${rc(dataStart, wCol)}:${rc(row - 1, wCol)})`, 'n', S.total);
   putF(ws, totR, gCol, `SUM(${rc(dataStart, gCol)}:${rc(row - 1, gCol)})`, 'n', S.total);
   addBorders(ws, totR, 1, totR, COLS);
+  row++;
+
+  // Plant-duty line — ONLY when the project has TFA-served rooms. Space coil + TFA
+  // coil = total cooling; when the TFA coil is fed by the main chiller this is the
+  // plant capacity required. Non-TFA projects get no extra row (no change).
+  if (anyTfa) {
+    const pdR = row;
+    putV(ws, pdR, 1, 'PLANT DUTY  (Space coil + TFA coil)', S.total);
+    addMerge(ws, pdR, 1, pdR, gCol - 1);
+    putF(ws, pdR, gCol, `${rc(totR, gCol)}+${rc(totR, tfaTrCol)}`, 'n', S.total);
+    addMerge(ws, pdR, gCol + 1, pdR, COLS);
+    putV(ws, pdR, gCol + 1, 'Space + TFA coil. When the TFA coil is fed by the main chiller plant, this is the plant capacity required.', mkS({ sz: 9, italic: true }, CLR.sectionBg));
+    addBorders(ws, pdR, 1, pdR, COLS);
+    row++;
+  }
   row += 2;
 
   // Assumptions (from project data)

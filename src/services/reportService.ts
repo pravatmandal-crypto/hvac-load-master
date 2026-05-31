@@ -1703,6 +1703,27 @@ export const generatePDFReport = (
     });
     y = (doc as any).lastAutoTable.finalY + 6;
 
+    // Plant-duty caption — ONLY when this zone has TFA-served rooms. Shows how the
+    // space (primary coil) and TFA coil combine. If the serving DOAS is fed by the
+    // main chiller plant, the two add into one plant duty; otherwise the TFA coil
+    // sits on its own dedicated unit. Non-TFA zones print nothing (no change).
+    if (entityHasTfa) {
+      const doasList = (effectiveEquipSystems ?? []).filter((s: any) => s?.type === 'DOAS');
+      const chillerFed = entity.rooms.some((room: any) =>
+        doasList.some((d: any) =>
+          ((d.tfaCoolingSource ?? 'own-unit') === 'chiller-plant') &&
+          (((d.doasLinkedSystemIds ?? []).includes(room.systemId)) ||
+           ((d.doasLinkedZoneIds ?? []).includes(room.zoneId)))));
+      const totalDuty = totGovTR + totTfaTR;
+      const cap = chillerFed
+        ? `Plant duty (TFA coil on main chiller): space ${n2(totGovTR)} TR + TFA coil ${n2(totTfaTR)} TR = ${n2(totalDuty)} TR`
+        : `Cooling split: space ${n2(totGovTR)} TR on chiller  +  TFA coil ${n2(totTfaTR)} TR on dedicated TFA unit  (${n2(totalDuty)} TR total)`;
+      doc.setFontSize(7.5);
+      doc.setTextColor(...C.ink);
+      doc.text(cap, PAGE.left, y);
+      y += 5;
+    }
+
     // ── Per-room detail ──────────────────────────────────────────────────────
     for (const room of entity.rooms) {
 
