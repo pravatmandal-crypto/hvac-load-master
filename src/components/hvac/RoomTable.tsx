@@ -2460,6 +2460,15 @@ function DraggableRoomHeader({
 
   const area = (Number(room?.length) || 0) * (Number(room?.width) || 0);
 
+  // Fresh-air dropdown: optimistic so the pick shows instantly, then reconciles
+  // once the saved tfaMode propagates back through the room subscription.
+  const resolvedFreshAir = resolveRoomTfa(room, equipSystems ?? []).mode;
+  const [pendingFreshAir, setPendingFreshAir] = useState<string | null>(null);
+  useEffect(() => {
+    setPendingFreshAir(p => (p && p === resolvedFreshAir ? null : p));
+  }, [resolvedFreshAir]);
+  const shownFreshAir = pendingFreshAir ?? resolvedFreshAir;
+
   return (
     <div
       ref={setNodeRef}
@@ -2504,9 +2513,9 @@ function DraggableRoomHeader({
         <select
           className="text-[10px] h-6 rounded border border-teal-200 dark:border-teal-800 bg-teal-50 dark:bg-teal-950/30 text-teal-700 dark:text-teal-300 px-1 cursor-pointer flex-shrink-0 hidden lg:inline-block"
           title="How this room's fresh air is handled"
-          value={resolveRoomTfa(room, equipSystems ?? []).mode}
+          value={shownFreshAir}
           onClick={e => e.stopPropagation()}
-          onChange={e => { e.stopPropagation(); void setRoomFreshAir(room, e.target.value as 'no-tfa' | 'tfa-served' | 'tfa-only'); }}
+          onChange={e => { e.stopPropagation(); const v = e.target.value as 'no-tfa' | 'tfa-served' | 'tfa-only'; setPendingFreshAir(v); void setRoomFreshAir(room, v); }}
         >
           <option value="no-tfa">Fresh air: on unit</option>
           <option value="tfa-served">Fresh air: central TFA</option>
