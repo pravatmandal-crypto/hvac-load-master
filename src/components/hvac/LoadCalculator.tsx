@@ -285,6 +285,12 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
       longitude: projectLongitude,
       winterOutdoorTemp: winterDesignTemp,
       winterOutdoorHumidity: winterDesignHumidity,
+      // Winter INDOOR conditions must be present or calculateHeatingLoad returns 0
+      // (it requires both winter indoor + outdoor). Without these the persisted
+      // _calcWinterHeatingBTUH was always 0 even though the live strips computed a
+      // real value via a different dc. Source from zone override, else project.
+      winterIndoorTemp: zone?.winterIndoorTemp ?? insideWinterTemp,
+      winterIndoorHumidity: zone?.winterIndoorHumidity ?? insideWinterHumidity,
       includeWinter,
     };
   };
@@ -496,10 +502,14 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
       ? {
           ...baseDc,
           ventilationStrategy: 'tfa-cold',
-          tfaSupplyTemp: (doasForThis as any).tfaSupplyTemp,
-          tfaSupplyHumidity: (doasForThis as any).tfaSupplyHumidity,
-          ervSensibleEffectiveness: (doasForThis as any).ervSensibleEffectiveness,
-          ervLatentEffectiveness: (doasForThis as any).ervLatentEffectiveness,
+          // Default to the engine's TFA defaults (cold-DOAS 55°F / 90% RH, no ERV)
+          // when the DOAS doc hasn't set them. Never leave undefined — this object
+          // is persisted to Firestore (analysis.designConditions), which rejects
+          // undefined field values. Matches calculateTFALoad's own fallbacks.
+          tfaSupplyTemp: (doasForThis as any).tfaSupplyTemp ?? 55,
+          tfaSupplyHumidity: (doasForThis as any).tfaSupplyHumidity ?? 90,
+          ervSensibleEffectiveness: (doasForThis as any).ervSensibleEffectiveness ?? 0,
+          ervLatentEffectiveness: (doasForThis as any).ervLatentEffectiveness ?? 0,
         }
       : baseDc;
     const rd: RoomDetails = {
@@ -703,8 +713,25 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
       },
     };
 
+    // Firestore rejects `undefined` anywhere in a written value. The nested
+    // analysis object can pick up undefined from optional design-condition fields
+    // (lat/long/altitude, winter humidity) or an unconfigured DOAS. Deep-strip
+    // undefined (keep null — it's valid and meaningful, e.g. tfa: null).
+    const stripUndefinedDeep = (v: any): any => {
+      if (Array.isArray(v)) return v.map(stripUndefinedDeep);
+      if (v && typeof v === 'object') {
+        const out: any = {};
+        for (const k of Object.keys(v)) {
+          if (v[k] === undefined) continue;
+          out[k] = stripUndefinedDeep(v[k]);
+        }
+        return out;
+      }
+      return v;
+    };
+
     await updateDoc(getRoomRef(zoneId, roomId, systemId), {
-      analysis,
+      analysis: stripUndefinedDeep(analysis),
       analysisUpdatedAt: new Date(),
       totalLoadBTUH: grandTotal,
       totalLoadTR: grandTotalTR,
