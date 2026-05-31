@@ -3692,12 +3692,16 @@ export default function EquipmentSelection({
   };
 
   // Persist a zone's default TFA mode (Phase E). Writes to /zones/{zoneId}.
+  // Uses setDoc+merge (not updateDoc) because LC zones can be "virtual" — they have
+  // no /zones document until an override is first saved (a freshly-added zone like
+  // "Zone 3" has none). updateDoc would throw "No document to update" and the mode
+  // would silently fail to save. merge:true creates the doc if missing.
   const updateZoneTfaDefaultMode = async (zoneId: string, mode: 'inherit' | 'tfa-served' | 'tfa-only') => {
     try {
       const ref = doc(db, 'projects', project.id, 'zones', zoneId);
       const payload: any = mode === 'inherit' ? { tfaDefaultMode: deleteField() } : { tfaDefaultMode: mode };
       payload.updatedAt = serverTimestamp();
-      await updateDoc(ref, payload);
+      await setDoc(ref, payload, { merge: true });
     } catch (err) {
       handleFirestoreError(err, OperationType.WRITE, `zones/${zoneId}`);
     }
