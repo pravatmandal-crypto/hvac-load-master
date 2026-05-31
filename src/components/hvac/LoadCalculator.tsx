@@ -134,6 +134,7 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
   const zoneRenameMigrationDoneRef = useRef<Set<string>>(new Set());
   const zoneRenameMigrationRunningRef = useRef(false);
   const creatingDoasRef = useRef(false);
+  const createdDoasIdRef = useRef<string | null>(null);
   const legacyDefaultOaFacph = Number(project?.legacyDefaultOaFacph ?? project?.data?.legacyDefaultOaFacph ?? 1.5);
 
   const normalizeRoom = (r: any): Room => {
@@ -1079,6 +1080,9 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
   const ensureProjectDoas = useCallback(async (): Promise<string | null> => {
     const existing = getProjectDoas(equipSystems);
     if (existing) return existing.id;
+    // Created earlier in this batch but equipSystems hasn't re-subscribed yet —
+    // reuse it so a "set all" loop doesn't spawn one DOAS per room.
+    if (createdDoasIdRef.current) return createdDoasIdRef.current;
     if (creatingDoasRef.current) return null;
     creatingDoasRef.current = true;
     try {
@@ -1098,6 +1102,7 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
         createdAt: serverTimestamp(),
         updatedAt: serverTimestamp(),
       });
+      createdDoasIdRef.current = refDoc.id;
       return refDoc.id;
     } catch (err) {
       toast.error('Could not create the fresh-air (TFA) unit: ' + (err instanceof Error ? err.message : 'unknown'));
@@ -1120,15 +1125,16 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
     }
   }, [ensureProjectDoas, project.id, envelopeElements]);
 
-  // Set every room in a zone at once (the uniform-zone shortcut).
-  const setZoneFreshAir = useCallback(async (zoneId: string, mode: 'no-tfa' | 'tfa-served' | 'tfa-only') => {
-    const zoneRooms = (rooms[zoneId] || []) as any[];
-    if (zoneRooms.length === 0) return;
+  // Set every room in a zone at once (the uniform-zone shortcut). Takes the actual
+  // displayed room list from ZoneList — works for both zone rows and system rows
+  // (where rooms aren't keyed by the system id).
+  const setZoneFreshAir = useCallback(async (zoneRooms: any[], mode: 'no-tfa' | 'tfa-served' | 'tfa-only') => {
+    if (!zoneRooms || zoneRooms.length === 0) return;
     if (mode !== 'no-tfa') await ensureProjectDoas();
     for (const r of zoneRooms) {
       await setRoomFreshAir(r, mode);
     }
-  }, [rooms, ensureProjectDoas, setRoomFreshAir]);
+  }, [ensureProjectDoas, setRoomFreshAir]);
 
   // ── DOAS / TFA staleness detection ──────────────────────────────────────
   // A room is "stale" when its persisted _calcTfa* fields disagree with the

@@ -1132,7 +1132,7 @@ const ZoneList = ({
                       className="h-7 text-xs rounded border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 dark:text-slate-200 px-2 cursor-pointer"
                       value=""
                       title="Apply one fresh-air mode to every room in this zone"
-                      onChange={(e) => { const v = e.target.value; if (v) { void setZoneFreshAir(zoneId, v); e.currentTarget.value = ''; } }}
+                      onChange={(e) => { const v = e.target.value; if (v) { void setZoneFreshAir(liveZoneRooms, v); e.currentTarget.value = ''; } }}
                     >
                       <option value="">— choose —</option>
                       <option value="no-tfa">On the room unit</option>
