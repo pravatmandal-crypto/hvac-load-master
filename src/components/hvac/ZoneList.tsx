@@ -9,6 +9,7 @@ import {
   calculateInternalGains,
   calculateVentilationLoad,
   calculateTFALoad,
+  resolveRoomTfa,
   calculateCoilParameters,
   calculateParasiticGains,
   calculateHeatingLoad,
@@ -45,18 +46,9 @@ function computeZoneTotals(
   isChiller: boolean,
   equipSystems: any[] = [],
 ) {
-  // DOAS/TFA awareness — mirror EquipmentSelection.computeRoomReqs and the LC
-  // project-summary engine so the zone strip shows the REDUCED (post-TFA) space
-  // coil, not the pre-TFA full-OA load. Build a primary→DOAS map once.
-  const doasForPrimary = new Map<string, any>();
-  for (const s of equipSystems) {
-    if (s?.type === 'DOAS') {
-      for (const pid of ((s.doasLinkedSystemIds ?? []) as string[])) doasForPrimary.set(pid, s);
-      for (const zid of ((s.doasLinkedZoneIds ?? []) as string[])) doasForPrimary.set(zid, s);
-    }
-  }
-  const doasForRoom = (room: any) =>
-    doasForPrimary.get(room?.systemId) ?? doasForPrimary.get(room?.zoneId) ?? null;
+  // DOAS/TFA awareness via the shared resolver (room.tfaMode-driven, legacy link
+  // fallback) so the zone strip shows the REDUCED post-TFA space coil, consistent
+  // with the LC project summary and SD.
 
   let totalCooling = 0;
   let totalTfaCoil = 0; // Σ TFA coil load (BTU/h) for this dc/season — shown separately
@@ -95,8 +87,9 @@ function computeZoneTotals(
       // TFA-aware design conditions — when this room is DOAS-served, the OA goes to
       // the TFA unit (zeroed on the primary) and the cold-DOAS supply credits the
       // space coil. Mirrors the persist path + LC project summary exactly.
-      const doas = doasForRoom(room);
+      const { doas, mode: effectiveMode } = resolveRoomTfa(room, equipSystems);
       const isTFA = !!doas;
+      const isTfaOnly = effectiveMode === 'tfa-only';
       const dcEff: any = isTFA
         ? {
             ...dc,
@@ -113,17 +106,6 @@ function computeZoneTotals(
       const vent = calculateVentilationLoad(rd, dcEff);
       const heating = calculateHeatingLoad(rd, elements, dcEff);
       const tfa = isTFA ? calculateTFALoad(rd, dcEff) : null;
-
-      // Effective TFA mode: explicit room override, else 'tfa-served' when DOAS-linked.
-      // (Zone-level tfaDefaultMode is applied by the engine/SD; the strip treats an
-      // unset room as tfa-served — the common case.)
-      const rawRoomMode = room?.tfaMode as string | undefined;
-      const effectiveMode: 'no-tfa' | 'tfa-served' | 'tfa-only' = !isTFA
-        ? 'no-tfa'
-        : (rawRoomMode === 'no-tfa' || rawRoomMode === 'tfa-served' || rawRoomMode === 'tfa-only')
-          ? rawRoomMode
-          : 'tfa-served';
-      const isTfaOnly = effectiveMode === 'tfa-only';
 
       const erVentSen = isTFA ? 0 : vent.sensible * BF;
       const erVentLat = isTFA ? 0 : vent.latent * BF;
@@ -577,6 +559,8 @@ const ZoneList = ({
   userProfile,
   moveRoom,
   equipSystems,
+  setRoomFreshAir,
+  setZoneFreshAir,
 }: any) => {
   const isChiller = String(project?.systemType || '').toLowerCase().includes('chiller');
   const [overrideDrafts, setOverrideDrafts] = useState<Record<string, string>>({});
@@ -1141,6 +1125,22 @@ const ZoneList = ({
                 forceRoomTable=true since those systems list rooms directly (no zone layer). */}
             {(forceRoomTable || !isSystem) && (
               <div className="border-t border-gray-100 dark:border-slate-700 bg-gray-50/50 dark:bg-slate-800/50">
+                {setZoneFreshAir && zoneRooms.length > 0 && (
+                  <div className="px-4 py-2 flex items-center gap-2 text-xs border-b border-gray-100 dark:border-slate-700/50">
+                    <span className="text-slate-500 dark:text-slate-400">Set all rooms&rsquo; fresh air:</span>
+                    <select
+                      className="h-7 text-xs rounded border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 dark:text-slate-200 px-2 cursor-pointer"
+                      value=""
+                      title="Apply one fresh-air mode to every room in this zone"
+                      onChange={(e) => { const v = e.target.value; if (v) { void setZoneFreshAir(zoneId, v); e.currentTarget.value = ''; } }}
+                    >
+                      <option value="">— choose —</option>
+                      <option value="no-tfa">On the room unit</option>
+                      <option value="tfa-served">Central cold TFA</option>
+                      <option value="tfa-only">TFA-only (corridor)</option>
+                    </select>
+                  </div>
+                )}
                 <RoomTable
                   rooms={zoneRooms}
                   liveRooms={liveZoneRooms}
@@ -1161,6 +1161,8 @@ const ZoneList = ({
                   onRoomDraftChange={onRoomDraftChange}
                   onEnvelopeDraftChange={onEnvelopeDraftChange}
                   userId={userProfile?.uid}
+                  equipSystems={equipSystems}
+                  setRoomFreshAir={setRoomFreshAir}
                 />
               </div>
             )}

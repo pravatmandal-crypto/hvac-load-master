@@ -10,6 +10,7 @@ import {
   calculateParasiticGains,
   calculatePsychrometrics,
   calculateTFALoad,
+  resolveRoomTfa,
   getRecommendedAch,
   getMinAdp,
   calculateSingleElementGain,
@@ -20,16 +21,10 @@ import {
 // make the whole report TFA-aware. Synchronous render = no concurrency concern.
 let reportEquipSystems: any[] = [];
 
-// Find the DOAS/TFA system that serves a room (system- or zone-linked), if any.
-const findReportDoasForRoom = (room: any): any | null => {
-  for (const s of reportEquipSystems) {
-    if (s?.type !== 'DOAS') continue;
-    const sysIds = (s.doasLinkedSystemIds ?? []) as string[];
-    const zoneIds = (s.doasLinkedZoneIds ?? []) as string[];
-    if (sysIds.includes(room?.systemId) || sysIds.includes(room?.zoneId) || zoneIds.includes(room?.zoneId)) return s;
-  }
-  return null;
-};
+// DOAS/TFA system serving a room — delegates to the shared resolver (room.tfaMode
+// primary, legacy link fallback) against the report's equip systems.
+const findReportDoasForRoom = (room: any): any | null =>
+  resolveRoomTfa(room, reportEquipSystems).doas;
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -710,12 +705,8 @@ const computeDetailed = (room: any, elements: any[], dc: DC, project: any): Deta
   // TFA unit, NOT the primary coil. Recompute with the cold-DOAS branch so the
   // primary COIL loads — and therefore ADP, RSHF, GSHF, supply-air state,
   // dehumidified CFM and reheat — reflect the reduced (sensible-leaning) coil.
-  const doas = findReportDoasForRoom(room);
+  const { doas, mode: effTfaMode } = resolveRoomTfa(room, reportEquipSystems);
   const isTFA = !!doas;
-  const rawTfaMode = room?.tfaMode as string | undefined;
-  const effTfaMode: 'no-tfa' | 'tfa-served' | 'tfa-only' = !isTFA
-    ? 'no-tfa'
-    : (rawTfaMode === 'no-tfa' || rawTfaMode === 'tfa-served' || rawTfaMode === 'tfa-only') ? rawTfaMode : 'tfa-served';
   const isTfaOnly = effTfaMode === 'tfa-only';
   const dcEff: any = isTFA
     ? { ...dc, ventilationStrategy: 'tfa-cold', tfaSupplyTemp: doas.tfaSupplyTemp, tfaSupplyHumidity: doas.tfaSupplyHumidity, ervSensibleEffectiveness: doas.ervSensibleEffectiveness, ervLatentEffectiveness: doas.ervLatentEffectiveness }

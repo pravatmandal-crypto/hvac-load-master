@@ -37,6 +37,10 @@ import {
   calculateReheat,
   getRecommendedAch,
   getMinAdp,
+  resolveRoomTfa,
+  getProjectDoas,
+  pickCoolingSource,
+  TFA_SUPPLY_DEFAULTS,
   type RoomDetails,
 } from '../../lib/hvac';
 import { EnvelopeElement, ACTIVITY_TYPES, ACTIVITY_ACH_RECOMMENDATIONS } from '../../lib/hvac/constants';
@@ -129,6 +133,7 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
   // useEffect can clear them on project switch.
   const zoneRenameMigrationDoneRef = useRef<Set<string>>(new Set());
   const zoneRenameMigrationRunningRef = useRef(false);
+  const creatingDoasRef = useRef(false);
   const legacyDefaultOaFacph = Number(project?.legacyDefaultOaFacph ?? project?.data?.legacyDefaultOaFacph ?? 1.5);
 
   const normalizeRoom = (r: any): Room => {
@@ -466,36 +471,11 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
     setRoomSaveStates(prev => ({ ...prev, [roomId]: 'saving' }));
 
     try {
-    // ── TFA / DOAS detection ──
-    // A room is TFA-served if EITHER its primary system is in some DOAS's
-    // doasLinkedSystemIds (legacy) OR its zone is in some DOAS's
-    // doasLinkedZoneIds (Phase B+, zone-granularity). Otherwise behave exactly
-    // as before (backward-compat: projects without a DOAS see identical numbers).
-    // Phase C: room.tfaMode='no-tfa' opts out even if the zone is linked.
-    const doasCandidate = (systemId || zoneId)
-      ? equipSystems.find((s: any) => {
-          if (s?.type !== 'DOAS') return false;
-          const sysIds = (s?.doasLinkedSystemIds ?? []) as string[];
-          const zoneIds = (s?.doasLinkedZoneIds ?? []) as string[];
-          if (systemId && sysIds.includes(systemId)) return true;
-          if (zoneId && zoneIds.includes(zoneId)) return true;
-          if (systemId && zoneIds.includes(systemId)) return true;
-          return false;
-        })
-      : null;
-    // Resolve effective TFA mode: explicit room override → zone default → 'tfa-served'.
-    const rawRoomMode = (roomSource as any)?.tfaMode as string | undefined;
-    const zoneDocForRoom = zones.find((z: any) => z.id === zoneId);
-    const zoneDefaultMode = (zoneDocForRoom as any)?.tfaDefaultMode as string | undefined;
-    const effectiveTfaMode: 'no-tfa' | 'tfa-served' | 'tfa-only' = !doasCandidate
-      ? 'no-tfa'
-      : (rawRoomMode === 'no-tfa' || rawRoomMode === 'tfa-served' || rawRoomMode === 'tfa-only')
-        ? rawRoomMode
-        : (zoneDefaultMode === 'tfa-only' || zoneDefaultMode === 'tfa-served')
-          ? zoneDefaultMode
-          : 'tfa-served';
+    // ── TFA / DOAS detection via the shared resolver (room.tfaMode primary, legacy
+    // zone/system link as fallback). Projects without a DOAS see identical numbers.
+    const { doas: doasForThis, mode: effectiveTfaMode } =
+      resolveRoomTfa({ ...roomSource, systemId, zoneId }, equipSystems, zones);
     const roomTfaMode = effectiveTfaMode; // alias used below
-    const doasForThis = effectiveTfaMode === 'no-tfa' ? null : doasCandidate;
     const isTFA = !!doasForThis;
     const baseDc = getDesignConditionsForZone(zoneId, systemId);
     const dc: any = isTFA
@@ -850,20 +830,9 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
     let tfaCarryingDeficitTotal = 0;
     const tfaUndersizedRoomIds: string[] = [];
 
-    // ── Build (systemId|zoneId) → DOAS lookup (one DOAS can serve many primaries) ──
-    // Project totals must apply the same TFA branch as persistRoomAnalysisSnapshot
-    // and EquipmentSelection.computeRoomReqs — otherwise the Project-Level Summary
-    // shows pre-DOAS numbers even after rooms are persisted in TFA mode.
-    // Includes both legacy system-links and Phase B+ zone-links.
-    const doasForPrimary = new Map<string, any>();
-    for (const s of equipSystems as any[]) {
-      if (s?.type === 'DOAS') {
-        for (const pid of ((s.doasLinkedSystemIds ?? []) as string[])) doasForPrimary.set(pid, s);
-        for (const zid of ((s.doasLinkedZoneIds ?? []) as string[])) doasForPrimary.set(zid, s);
-      }
-    }
-
-    const calculateCoolingSnapshot = (room: any, elements: EnvelopeElement[], zoneDc: typeof defaultDesignConditions, doas: any | null, zoneDefaultMode?: string) => {
+    // TFA branch resolution uses the shared resolver (room.tfaMode primary, legacy
+    // link fallback) so the Project-Level Summary matches persist + SD + reports.
+    const calculateCoolingSnapshot = (room: any, elements: EnvelopeElement[], zoneDc: typeof defaultDesignConditions, doas: any | null) => {
       const rd: RoomDetails = {
         id: room.id,
         name: room.name ?? '',
@@ -902,17 +871,8 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
       const internal = calculateInternalGains(rd);
       const vent = calculateVentilationLoad(rd, dcEff);
       const tfa = isTFA ? calculateTFALoad(rd, dcEff) : null;
-      // Phase D: tfa-only rooms route ALL load through TFA supply carrying.
-      // Phase E: respect zone.tfaDefaultMode when room.tfaMode is 'inherit'/unset.
-      const rawRoomModeSnap = (room as any)?.tfaMode as string | undefined;
-      const zoneDefaultSnap = zoneDefaultMode;
-      const effectiveModeSnap: 'no-tfa' | 'tfa-served' | 'tfa-only' = !isTFA
-        ? 'no-tfa'
-        : (rawRoomModeSnap === 'no-tfa' || rawRoomModeSnap === 'tfa-served' || rawRoomModeSnap === 'tfa-only')
-          ? rawRoomModeSnap
-          : (zoneDefaultSnap === 'tfa-only' || zoneDefaultSnap === 'tfa-served')
-            ? zoneDefaultSnap
-            : 'tfa-served';
+      // Effective mode from the shared resolver (room.tfaMode primary, link fallback).
+      const effectiveModeSnap = resolveRoomTfa(room, equipSystems, zones).mode;
       const isTfaOnly = effectiveModeSnap === 'tfa-only';
 
       // Bypass-OA terms zero out when TFA is active — OA goes to the DOAS unit.
@@ -995,14 +955,12 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
         indoorHumidity: zoneRecord?.winterIndoorHumidity ?? defaultDesignConditions.winterIndoorHumidity ?? insideWinterHumidity,
       };
 
-      const zoneDefaultModeForLoop = (zoneRecord as any)?.tfaDefaultMode as string | undefined;
       for (const room of (zoneRooms as any[])) {
         const elements = (liveEnvelopeElements[room.id] || []) as EnvelopeElement[];
-        // Phase C: room.tfaMode='no-tfa' opts out of TFA even if zone is linked.
-        const candidate = doasForPrimary.get(room.systemId) ?? doasForPrimary.get(room.zoneId) ?? null;
-        const doas = (room as any)?.tfaMode === 'no-tfa' ? null : candidate;
-        const summerSnapshot = calculateCoolingSnapshot(room, elements, zoneSummerDc, doas, zoneDefaultModeForLoop);
-        const heatingSnapshot = calculateCoolingSnapshot(room, elements, zoneHeatingDc, doas, zoneDefaultModeForLoop);
+        // Shared resolver: room.tfaMode drives TFA serving; legacy link as fallback.
+        const { doas } = resolveRoomTfa(room, equipSystems, zones);
+        const summerSnapshot = calculateCoolingSnapshot(room, elements, zoneSummerDc, doas);
+        const heatingSnapshot = calculateCoolingSnapshot(room, elements, zoneHeatingDc, doas);
 
         summerCooling += summerSnapshot.grandTotal;
         summerDesignCfm += summerSnapshot.designSupplyCFM;
@@ -1027,7 +985,7 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
         }
 
         if (includeMonsoon) {
-          const monsoonSnapshot = calculateCoolingSnapshot(room, elements, zoneMonsoonDc, doas, zoneDefaultModeForLoop);
+          const monsoonSnapshot = calculateCoolingSnapshot(room, elements, zoneMonsoonDc, doas);
           monsoonCooling += monsoonSnapshot.grandTotal;
           monsoonDesignCfm += monsoonSnapshot.designSupplyCFM;
           monsoonCoilDehumCfm += monsoonSnapshot.coilDehumCFM;
@@ -1115,6 +1073,63 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
     equipSystems,
   ]);
 
+  // ── Simplified "Fresh air" control (per-room TFA in the Load Calculator) ──
+  // One project-level DOAS is auto-created the first time a room is set to a
+  // central/corridor mode; room.tfaMode then drives everything (shared resolver).
+  const ensureProjectDoas = useCallback(async (): Promise<string | null> => {
+    const existing = getProjectDoas(equipSystems);
+    if (existing) return existing.id;
+    if (creatingDoasRef.current) return null;
+    creatingDoasRef.current = true;
+    try {
+      const refDoc = await addDoc(collection(db, 'projects', project.id, 'equipmentSystems'), {
+        name: 'TFA / Fresh Air',
+        type: 'DOAS',
+        brand: null,
+        brandLocked: false,
+        diversityFactor: 1,
+        assignedRoomIds: [],
+        iduSelections: {},
+        zones: [],
+        oduSelection: null,
+        unitSelection: null,
+        ...TFA_SUPPLY_DEFAULTS,
+        tfaCoolingSource: pickCoolingSource(project, equipSystems),
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      });
+      return refDoc.id;
+    } catch (err) {
+      toast.error('Could not create the fresh-air (TFA) unit: ' + (err instanceof Error ? err.message : 'unknown'));
+      return null;
+    } finally {
+      creatingDoasRef.current = false;
+    }
+  }, [equipSystems, project.id]);
+
+  // Set one room's fresh-air mode: ensure a DOAS exists (for central/corridor),
+  // write the explicit tfaMode, then re-persist that room so loads/exports update.
+  const setRoomFreshAir = useCallback(async (room: any, mode: 'no-tfa' | 'tfa-served' | 'tfa-only') => {
+    try {
+      if (mode !== 'no-tfa') await ensureProjectDoas();
+      await updateDoc(doc(db, 'projects', project.id, 'rooms', room.id), { tfaMode: mode, updatedAt: serverTimestamp() });
+      const zoneId = room.zoneId as string;
+      await persistRoomAnalysisSnapshot(zoneId, room.id, room.systemId ?? zoneId, { ...room, tfaMode: mode }, envelopeElements[room.id] ?? []);
+    } catch (err) {
+      toast.error('Could not update fresh air: ' + (err instanceof Error ? err.message : 'unknown'));
+    }
+  }, [ensureProjectDoas, project.id, envelopeElements]);
+
+  // Set every room in a zone at once (the uniform-zone shortcut).
+  const setZoneFreshAir = useCallback(async (zoneId: string, mode: 'no-tfa' | 'tfa-served' | 'tfa-only') => {
+    const zoneRooms = (rooms[zoneId] || []) as any[];
+    if (zoneRooms.length === 0) return;
+    if (mode !== 'no-tfa') await ensureProjectDoas();
+    for (const r of zoneRooms) {
+      await setRoomFreshAir(r, mode);
+    }
+  }, [rooms, ensureProjectDoas, setRoomFreshAir]);
+
   // ── DOAS / TFA staleness detection ──────────────────────────────────────
   // A room is "stale" when its persisted _calcTfa* fields disagree with the
   // current DOAS configuration in equipSystems. Two cases:
@@ -1125,25 +1140,18 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
   // The banner in the project summary surfaces a single "Recalculate" action.
   const tfaStaleRoomIds = useMemo(() => {
     const stale: string[] = [];
-    const doasSystems = equipSystems.filter((s: any) => s?.type === 'DOAS');
-    if (doasSystems.length === 0) return stale;
-    // Union of system-links and Phase B+ zone-links.
-    const doasLinkedSet = new Set<string>();
-    for (const d of doasSystems) {
-      for (const id of (d.doasLinkedSystemIds ?? []) as string[]) doasLinkedSet.add(id);
-      for (const id of (d.doasLinkedZoneIds ?? []) as string[]) doasLinkedSet.add(id);
-    }
+    if (!getProjectDoas(equipSystems)) return stale;
+    // A room is "stale" when its current TFA mode disagrees with its persisted
+    // TFA fields (mode says served but no _calcTfa*, or vice-versa).
     for (const zoneRooms of Object.values(rooms)) {
       for (const r of zoneRooms as any[]) {
-        const sysId = r.systemId as string | undefined;
-        const zoneId = r.zoneId as string | undefined;
-        const shouldBeTFA = (!!sysId && doasLinkedSet.has(sysId)) || (!!zoneId && doasLinkedSet.has(zoneId));
+        const shouldBeTFA = resolveRoomTfa(r, equipSystems, zones).mode !== 'no-tfa';
         const hasTFAFields = Number(r._calcTfaCoilBTUH) > 0;
         if (shouldBeTFA !== hasTFAFields) stale.push(r.id);
       }
     }
     return stale;
-  }, [equipSystems, rooms]);
+  }, [equipSystems, rooms, zones]);
 
   const recalcAllRooms = useCallback(async () => {
     const ids = tfaStaleRoomIds;
@@ -3418,6 +3426,8 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
                 roomSaveStates={roomSaveStates}
                 moveRoom={moveRoom}
                 equipSystems={equipSystems}
+                setRoomFreshAir={setRoomFreshAir}
+                setZoneFreshAir={setZoneFreshAir}
               />
             )}
           </div>

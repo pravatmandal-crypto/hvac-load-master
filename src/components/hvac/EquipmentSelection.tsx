@@ -24,7 +24,7 @@ import type { EquipmentModel } from '../../constants/equipment-catalog';
 import GlobalEquipmentLibrary from './GlobalEquipmentLibrary';
 import { getLibraryItemsByType, GLOBAL_LIB_COLLECTION } from '../../services/equipmentLibraryService';
 import { ComboboxInput } from '../ui/combobox-input';
-import { calculateCoilParameters, calculatePsychrometrics, EZ_OPTIONS, calcZoneVentilation, calcSystemVentilation62, calculateEnvelopeGain, calculateInternalGains, calculateVentilationLoad, calculateTFALoad, calculateParasiticGains, getRecommendedAch, getMinAdp } from '../../lib/hvac';
+import { calculateCoilParameters, calculatePsychrometrics, EZ_OPTIONS, calcZoneVentilation, calcSystemVentilation62, calculateEnvelopeGain, calculateInternalGains, calculateVentilationLoad, calculateTFALoad, calculateParasiticGains, getRecommendedAch, getMinAdp, resolveRoomTfa } from '../../lib/hvac';
 import { calculateRoomVolume } from '../../lib/hvac/geometry';
 import SpecSheet from './SpecSheet';
 import type {
@@ -3654,42 +3654,14 @@ export default function EquipmentSelection({
     };
   };
 
-  // Returns the TFA/DOAS system (if any) that serves a given room.
-  // A room is TFA-served if EITHER:
-  //   (a) its primary system is in some DOAS's doasLinkedSystemIds (legacy, coarse),
-  //   (b) its zone is in some DOAS's doasLinkedZoneIds (preferred, Phase B+).
-  // First match wins. Used to switch computeRoomReqs into TFA mode.
-  const findDoasForRoom = (room: any) => {
-    const sysId = room?.systemId as string | undefined;
-    const zoneId = room?.zoneId as string | undefined;
-    if (!sysId && !zoneId) return null;
-    return equipSystems.find(s => {
-      if (s.type !== 'DOAS') return false;
-      const sysIds = ((s as any).doasLinkedSystemIds ?? []) as string[];
-      const zoneIds = ((s as any).doasLinkedZoneIds ?? []) as string[];
-      if (sysId && sysIds.includes(sysId)) return true;
-      if (zoneId && zoneIds.includes(zoneId)) return true;
-      // Also catch legacy case where sysId equals a linked id but room.zoneId is also set
-      if (sysId && zoneIds.includes(sysId)) return true;
-      return false;
-    }) ?? null;
-  };
-
-  // Effective TFA mode for a room — used by the engine (Phase C+).
-  // Resolution order:
-  //   1. explicit room.tfaMode if 'no-tfa' / 'tfa-served' / 'tfa-only'
-  //   2. zone.tfaDefaultMode (Phase E) if set on the room's LC zone doc
-  //   3. fallback to 'tfa-served' when zone is TFA-linked
-  //   4. 'no-tfa' when no DOAS serves this room
-  const getEffectiveTfaMode = (room: any, doas: any | null): 'no-tfa' | 'tfa-served' | 'tfa-only' => {
-    if (!doas) return 'no-tfa';
-    const raw = (room?.tfaMode as string | undefined) ?? 'inherit';
-    if (raw === 'no-tfa' || raw === 'tfa-served' || raw === 'tfa-only') return raw;
-    const zoneDoc = zoneDocs.find((z: any) => z.id === room?.zoneId);
-    const zoneDefault = (zoneDoc as any)?.tfaDefaultMode as string | undefined;
-    if (zoneDefault === 'tfa-only' || zoneDefault === 'tfa-served') return zoneDefault;
-    return 'tfa-served';
-  };
+  // TFA/DOAS resolution now lives in the shared lib/hvac/tfa resolver (single source
+  // of truth across LC / SD / ZoneList / reports). These thin wrappers keep the
+  // existing call sites unchanged. room.tfaMode is the primary driver; the legacy
+  // zone/system link is the fallback for unset rooms.
+  const findDoasForRoom = (room: any) => resolveRoomTfa(room, equipSystems, zoneDocs).doas;
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  const getEffectiveTfaMode = (room: any, _doas: any | null): 'no-tfa' | 'tfa-served' | 'tfa-only' =>
+    resolveRoomTfa(room, equipSystems, zoneDocs).mode;
 
   // Persist a zone's default TFA mode (Phase E). Writes to /zones/{zoneId}.
   // Uses setDoc+merge (not updateDoc) because LC zones can be "virtual" — they have

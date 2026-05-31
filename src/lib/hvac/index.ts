@@ -92,3 +92,12 @@ export {
   type ZoneVentilation62,
   type SystemVentilation62,
 } from './ventilation62';
+
+// TFA / DOAS shared resolver (single source of truth for room TFA serving + mode)
+export {
+  getProjectDoas,
+  resolveRoomTfa,
+  pickCoolingSource,
+  TFA_SUPPLY_DEFAULTS,
+  type ResolvedTfaMode,
+} from './tfa';

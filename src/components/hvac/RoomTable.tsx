@@ -27,6 +27,7 @@ import {
   SPACE_TYPES_62,
   getSpaceType,
   calcRoomVbz,
+  resolveRoomTfa,
   type WallColor,
   type DesignConditions,
   type RoomDetails,
@@ -74,6 +75,8 @@ type RoomTableProps = {
   onRoomDraftChange?: (zoneId: string, roomId: string, draft: Record<string, any> | null, systemId?: string) => void;
   onEnvelopeDraftChange?: (roomId: string, draft: EnvelopeElement[] | null) => void;
   userId?: string;
+  equipSystems?: any[];
+  setRoomFreshAir?: (room: any, mode: 'no-tfa' | 'tfa-served' | 'tfa-only') => void;
 };
 
 type RoomParameterState = {
@@ -2398,6 +2401,8 @@ function DraggableRoomHeader({
   elementCount,
   metrics,
   onDelete,
+  equipSystems,
+  setRoomFreshAir,
 }: {
   id: string;
   isExpanded: boolean;
@@ -2406,6 +2411,8 @@ function DraggableRoomHeader({
   elementCount: number;
   metrics: { totalBTU: number; totalTR: number; designSupplyCFM: number };
   onDelete: () => void;
+  equipSystems?: any[];
+  setRoomFreshAir?: (room: any, mode: 'no-tfa' | 'tfa-served' | 'tfa-only') => void;
 }) {
   const { attributes, listeners, setNodeRef, isDragging } = useDraggable({ id });
 
@@ -2446,6 +2453,20 @@ function DraggableRoomHeader({
         {Math.round(metrics.designSupplyCFM)} Design CFM
       </span>
 
+      {setRoomFreshAir && (
+        <select
+          className="text-[10px] h-6 rounded border border-teal-200 dark:border-teal-800 bg-teal-50 dark:bg-teal-950/30 text-teal-700 dark:text-teal-300 px-1 cursor-pointer flex-shrink-0 hidden lg:inline-block"
+          title="How this room's fresh air is handled"
+          value={resolveRoomTfa(room, equipSystems ?? []).mode}
+          onClick={e => e.stopPropagation()}
+          onChange={e => { e.stopPropagation(); void setRoomFreshAir(room, e.target.value as 'no-tfa' | 'tfa-served' | 'tfa-only'); }}
+        >
+          <option value="no-tfa">Fresh air: on unit</option>
+          <option value="tfa-served">Fresh air: central TFA</option>
+          <option value="tfa-only">Fresh air: TFA-only</option>
+        </select>
+      )}
+
       <span className="text-xs bg-gray-100 dark:bg-slate-700 text-gray-600 dark:text-slate-400 rounded px-1.5 py-0.5 flex-shrink-0">
         {elementCount} element{elementCount !== 1 ? 's' : ''}
       </span>
@@ -2473,7 +2494,9 @@ const MemoDraggableRoomHeader = memo(DraggableRoomHeader, (prev, next) => {
     prev.room?.floor === next.room?.floor &&
     prev.room?.length === next.room?.length &&
     prev.room?.width === next.room?.width &&
-    prev.room?.height === next.room?.height
+    prev.room?.height === next.room?.height &&
+    prev.room?.tfaMode === next.room?.tfaMode &&
+    prev.equipSystems === next.equipSystems
   );
 });
 
@@ -2486,7 +2509,7 @@ export default function RoomTable({
   rooms, liveRooms, zoneId, systemId, expandedRoom, setExpandedRoom,
   updateRoom, deleteRoom, addEnvelopeElement, updateEnvelopeElement,
   deleteEnvelopeElement, saveEnvelopeChanges, envelopeElements, project, designConditions, roomSaveStates, onRoomDraftChange, onEnvelopeDraftChange,
-  userId,
+  userId, equipSystems, setRoomFreshAir,
 }: RoomTableProps) {
   const [dirtyRoomId, setDirtyRoomId] = useState<string | null>(null);
 
@@ -2629,6 +2652,8 @@ export default function RoomTable({
                 isExpanded={isExpanded}
                 onToggle={() => handleExpandedRoomChange(isExpanded ? null : id)}
                 onDelete={() => handleDeleteRoom(id)}
+                equipSystems={equipSystems}
+                setRoomFreshAir={setRoomFreshAir}
               />
             )}
 
