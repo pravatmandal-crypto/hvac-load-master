@@ -28,6 +28,7 @@ import {
   getSpaceType,
   calcRoomVbz,
   resolveRoomTfa,
+  calculateTFALoad,
   type WallColor,
   type DesignConditions,
   type RoomDetails,
@@ -163,7 +164,7 @@ function areRoomParameterStatesEqual(left: RoomParameterState, right: RoomParame
 
 // ─── Per-room calculation hook ────────────────────────────────────────────────
 
-function useRoomCalc(room: any, elements: any[], designConditions: DesignConditions, project?: any) {
+function useRoomCalc(room: any, elements: any[], designConditions: DesignConditions, project?: any, equipSystems: any[] = []) {
   return useMemo(() => {
     const rd: RoomDetails = {
       id: room.id,
@@ -189,12 +190,30 @@ function useRoomCalc(room: any, elements: any[], designConditions: DesignConditi
     const vent = calculateVentilationLoad(rd, designConditions);
     const heating = calculateHeatingLoad(rd, typedElements, designConditions);
 
-    // Effective room loads (with bypass factor on ventilation)
+    // TFA / DOAS: when this room is DOAS-served, OA is conditioned by the TFA unit
+    // (not the primary coil). Resolve via the shared resolver and recompute the
+    // primary coil from the reduced loads so this room's displayed Plant TR / ADP /
+    // RSHF match the project summary and reports.
+    const { doas: tfaDoas, mode: tfaMode } = resolveRoomTfa(room, equipSystems);
+    const isTFA = !!tfaDoas;
+    const isTfaOnly = tfaMode === 'tfa-only';
+    const tfa = isTFA
+      ? calculateTFALoad(rd, {
+          ...designConditions,
+          ventilationStrategy: 'tfa-cold',
+          tfaSupplyTemp: (tfaDoas as any).tfaSupplyTemp,
+          tfaSupplyHumidity: (tfaDoas as any).tfaSupplyHumidity,
+          ervSensibleEffectiveness: (tfaDoas as any).ervSensibleEffectiveness,
+          ervLatentEffectiveness: (tfaDoas as any).ervLatentEffectiveness,
+        } as any)
+      : null;
+
+    // Effective room loads (bypass-OA term goes to the TFA unit when DOAS-served)
     const erSensible =
       envelope.sensible +
       internal.sensible +
-      vent.sensible * BF;
-    const erLatent = internal.latent + vent.latent * BF;
+      (isTFA ? 0 : vent.sensible * BF);
+    const erLatent = internal.latent + (isTFA ? 0 : vent.latent * BF);
 
     const ductPct = Number(room.ductGainPct) || 2;
     const fanPct = Number(room.fanGainPct) || 3;
@@ -210,19 +229,23 @@ function useRoomCalc(room: any, elements: any[], designConditions: DesignConditi
     
     const erh = ersh + erlh;
 
-    // Outside air (un-bypassed)
-    const oaSensible = vent.sensible * (1 - BF);
-    const oaLatent = vent.latent * (1 - BF);
+    // Outside air on the PRIMARY coil — zero when the TFA unit handles the OA.
+    const oaSensible = isTFA ? 0 : vent.sensible * (1 - BF);
+    const oaLatent = isTFA ? 0 : vent.latent * (1 - BF);
     const oaTotal = oaSensible + oaLatent;
 
-    // Coil sizing uses full OA load (engineering standard):
-    // Coil sensible = room sensible + OA sensible (+ duct/fan)
-    // Coil latent   = room latent + OA latent
-    const coilSensible = ersh + oaSensible;
-    const coilLatent = erlh + oaLatent;
+    // Primary coil. Non-TFA: room + full OA. TFA-served: room minus cold-DOAS supply
+    // credit (OA is on the TFA coil). TFA-only (corridor): primary carries nothing.
+    const tfaOffSen = tfa ? tfa.spaceSensibleOffset : 0;
+    const tfaOffLat = tfa ? tfa.spaceLatentOffset : 0;
+    const coilSensible = isTfaOnly ? 0 : (isTFA ? Math.max(0, ersh - tfaOffSen) : ersh + oaSensible);
+    const coilLatent = isTfaOnly ? 0 : (isTFA ? Math.max(0, erlh - tfaOffLat) : erlh + oaLatent);
 
-    const grandTotal = erh + oaTotal;
+    const grandTotal = coilSensible + coilLatent;
     const grandTotalTR = grandTotal / 12000;
+    // TFA/DOAS coil duty for this room (shown alongside the reduced primary).
+    const tfaCoilTR = tfa ? (tfa.coilSensible + tfa.coilLatent) / 12000 : 0;
+    const tfaCfm = tfa ? tfa.cfm : 0;
     const rshf = coilSensible > 0 ? coilSensible / (coilSensible + coilLatent) : 1;
 
     // Psychrometric properties and moisture management
@@ -400,6 +423,10 @@ function useRoomCalc(room: any, elements: any[], designConditions: DesignConditi
       oaTotal,
       grandTotal,
       grandTotalTR,
+      isTFA,
+      isTfaOnly,
+      tfaCoilTR,
+      tfaCfm,
       cfmTR,
       governingTR,
       requiredTR,
@@ -649,13 +676,14 @@ function BufferedNumberInput({
 type CustomWallType = { id: string; displayId: string; name: string; uValue: number; wallCategory: string };
 
 function RoomDetail({
-  room, zoneId, systemId, elements, designConditions, project,
+  room, zoneId, systemId, elements, designConditions, project, equipSystems = [],
   updateRoom, addEnvelopeElement, updateEnvelopeElement, deleteEnvelopeElement, saveEnvelopeChanges,
   saveState, onDirtyChange, onRoomDraftChange, onEnvelopeDraftChange, customWallTypes = [], customRoofTypes = [], customFloorTypes = [],
 }: {
   room: any; zoneId: string; systemId?: string; elements: any[];
   designConditions: DesignConditions;
   project?: any;
+  equipSystems?: any[];
   saveState?: 'idle' | 'saving' | 'saved';
   updateRoom: (zoneId: string, roomId: string, data: Record<string, any>, systemId?: string) => Promise<void> | void;
   addEnvelopeElement: (zoneId: string, roomId: string, type: ElementType, systemId?: string) => void;
@@ -700,9 +728,9 @@ function RoomDetail({
   const isEnvelopeDirty = envelopeDraft !== null;
   const liveElements: EnvelopeElement[] = (envelopeDraft ?? elements) as EnvelopeElement[];
 
-  const c = useRoomCalc(liveRoom, liveElements, designConditions, project);
+  const c = useRoomCalc(liveRoom, liveElements, designConditions, project, equipSystems);
   const monsoonDc = useMemo(() => getMonsoonDesignConditions(project, designConditions), [project, designConditions]);
-  const monsoonCalc = useRoomCalc(liveRoom, liveElements, monsoonDc, project);
+  const monsoonCalc = useRoomCalc(liveRoom, liveElements, monsoonDc, project, equipSystems);
   const hasMonsoon = !!(project?.includeMonsoon ?? project?.data?.includeMonsoon);
   const loadGoverningSeason = hasMonsoon && monsoonCalc.grandTotalTR > c.grandTotalTR ? 'Monsoon' : 'Summer';
   const cfmGoverningSeason = hasMonsoon && monsoonCalc.cfmTR > c.cfmTR ? 'Monsoon' : 'Summer';
@@ -2322,7 +2350,7 @@ function RoomDetail({
   );
 }
 
-function calculateRoomStripMetrics(room: any, elements: any[], dc: DesignConditions, project?: any) {
+function calculateRoomStripMetrics(room: any, elements: any[], dc: DesignConditions, project?: any, equipSystems: any[] = []) {
   const rd: RoomDetails = {
     id: room.id,
     name: room.name ?? '',
@@ -2347,26 +2375,38 @@ function calculateRoomStripMetrics(room: any, elements: any[], dc: DesignConditi
   const latentSafetyFactor = Number(room.latentSafetyPercent ?? 5) / 100;
   const achCFM = (calculateRoomVolume(rd) * Math.max(getRecommendedAch(room.achProfile ?? room.activityType), rd.facph)) / 60;
 
+  // TFA/DOAS: same shared resolver as everywhere else. When DOAS-served, the strip
+  // shows the REDUCED primary (space) TR and the TFA coil separately.
+  const { doas: stripDoas, mode: stripMode } = resolveRoomTfa(room, equipSystems);
+  const isTFA = !!stripDoas;
+  const isTfaOnly = stripMode === 'tfa-only';
+
   // Mirrors useRoomCalc — same safety factors, same fixed-ADP CFM rule — so the strip
   // matches the Step-3 per-season Supply Air CFM values rather than under-reporting.
   const computeSeason = (seasonDc: DesignConditions) => {
-    const envelope = calculateEnvelopeGain(typedElements, seasonDc);
+    const dcEff: any = isTFA
+      ? { ...seasonDc, ventilationStrategy: 'tfa-cold', tfaSupplyTemp: (stripDoas as any).tfaSupplyTemp, tfaSupplyHumidity: (stripDoas as any).tfaSupplyHumidity, ervSensibleEffectiveness: (stripDoas as any).ervSensibleEffectiveness, ervLatentEffectiveness: (stripDoas as any).ervLatentEffectiveness }
+      : seasonDc;
+    const envelope = calculateEnvelopeGain(typedElements, dcEff);
     const internal = calculateInternalGains(rd);
-    const vent = calculateVentilationLoad(rd, seasonDc);
-    const erSensible = envelope.sensible + internal.sensible + vent.sensible * BF;
-    const erLatent = internal.latent + vent.latent * BF;
+    const vent = calculateVentilationLoad(rd, dcEff);
+    const tfa = isTFA ? calculateTFALoad(rd, dcEff) : null;
+    const erSensible = envelope.sensible + internal.sensible + (isTFA ? 0 : vent.sensible * BF);
+    const erLatent = internal.latent + (isTFA ? 0 : vent.latent * BF);
     const parasitic = calculateParasiticGains(erSensible, erSensible, ductPct, fanPct);
     const ersh = (erSensible + parasitic.ductGain + parasitic.fanGain) * (1 + sensibleSafetyFactor);
     const erlh = erLatent * (1 + latentSafetyFactor);
-    const coilSensible = ersh + vent.sensible * (1 - BF);
-    const coilLatent = erlh + vent.latent * (1 - BF);
+    const tfaOffSen = tfa ? tfa.spaceSensibleOffset : 0;
+    const tfaOffLat = tfa ? tfa.spaceLatentOffset : 0;
+    const coilSensible = isTfaOnly ? 0 : (isTFA ? Math.max(0, ersh - tfaOffSen) : ersh + vent.sensible * (1 - BF));
+    const coilLatent = isTfaOnly ? 0 : (isTFA ? Math.max(0, erlh - tfaOffLat) : erlh + vent.latent * (1 - BF));
     const grandTotal = coilSensible + coilLatent;
     const coil = calculateCoilParameters(
       coilSensible,
       coilLatent,
-      seasonDc.indoorTemp,
-      seasonDc.indoorHumidity,
-      seasonDc.altitude || 0,
+      dcEff.indoorTemp,
+      dcEff.indoorHumidity,
+      dcEff.altitude || 0,
       BF,
       35,
       65,
@@ -2374,7 +2414,8 @@ function calculateRoomStripMetrics(room: any, elements: any[], dc: DesignConditi
     );
     // Fixed-system-ADP basis — matches Step-3 panel and ZoneList; see CLAUDE.md invariant.
     const designSupplyCFM = Math.max(coil.minAdpSensibleCFM, achCFM);
-    return { totalBTU: grandTotal, totalTR: grandTotal / 12000, designSupplyCFM };
+    const tfaCoilTR = tfa ? (tfa.coilSensible + tfa.coilLatent) / 12000 : 0;
+    return { totalBTU: grandTotal, totalTR: grandTotal / 12000, designSupplyCFM, tfaCoilTR };
   };
 
   const summer = computeSeason(dc);
@@ -2389,6 +2430,7 @@ function calculateRoomStripMetrics(room: any, elements: any[], dc: DesignConditi
         totalBTU: Math.max(summer.totalBTU, monsoon.totalBTU),
         totalTR: Math.max(summer.totalTR, monsoon.totalTR),
         designSupplyCFM: Math.max(summer.designSupplyCFM, monsoon.designSupplyCFM),
+        tfaCoilTR: Math.max(summer.tfaCoilTR, monsoon.tfaCoilTR),
       }
     : summer;
 }
@@ -2409,7 +2451,7 @@ function DraggableRoomHeader({
   onToggle: () => void;
   room: any;
   elementCount: number;
-  metrics: { totalBTU: number; totalTR: number; designSupplyCFM: number };
+  metrics: { totalBTU: number; totalTR: number; designSupplyCFM: number; tfaCoilTR?: number };
   onDelete: () => void;
   equipSystems?: any[];
   setRoomFreshAir?: (room: any, mode: 'no-tfa' | 'tfa-served' | 'tfa-only') => void;
@@ -2443,9 +2485,14 @@ function DraggableRoomHeader({
       <span className="text-xs text-gray-400 dark:text-slate-500 hidden md:inline">{room?.length ?? 0}×{room?.width ?? 0}×{room?.height ?? 0} ft</span>
       {area > 0 && <span className="text-xs text-gray-400 dark:text-slate-500 hidden md:inline">{area} ft²</span>}
 
-      <span className="text-[10px] bg-blue-50 dark:bg-blue-950/30 text-blue-700 dark:text-blue-400 border border-blue-200 dark:border-blue-800 rounded px-1.5 py-0.5">
+      <span className="text-[10px] bg-blue-50 dark:bg-blue-950/30 text-blue-700 dark:text-blue-400 border border-blue-200 dark:border-blue-800 rounded px-1.5 py-0.5" title="Space (primary coil) TR">
         {metrics.totalTR.toFixed(2)} TR
       </span>
+      {metrics.tfaCoilTR != null && metrics.tfaCoilTR > 0 && (
+        <span className="text-[10px] bg-teal-50 dark:bg-teal-950/30 text-teal-700 dark:text-teal-400 border border-teal-200 dark:border-teal-800 rounded px-1.5 py-0.5" title="TFA/DOAS coil TR (fresh-air conditioning)">
+          +{metrics.tfaCoilTR.toFixed(1)} TFA
+        </span>
+      )}
       <span className="text-[10px] bg-amber-50 dark:bg-amber-950/30 text-amber-700 dark:text-amber-400 border border-amber-200 dark:border-amber-800 rounded px-1.5 py-0.5">
         {Math.round(metrics.totalBTU).toLocaleString()} BTU/h
       </span>
@@ -2590,7 +2637,7 @@ export default function RoomTable({
       const summaryRoom = (id ? liveRoomMap.get(id) : null) ?? room;
       const elements: any[] = id ? (envelopeElements?.[id] || []) : [];
       // Always compute live metrics so Room strip stays in sync with Zone/Project totals.
-      const metrics = calculateRoomStripMetrics(summaryRoom, elements, dc, project);
+      const metrics = calculateRoomStripMetrics(summaryRoom, elements, dc, project, equipSystems);
 
       return {
         idx,
@@ -2666,6 +2713,7 @@ export default function RoomTable({
                 elements={elements}
                 designConditions={dc}
                 project={project}
+                equipSystems={equipSystems}
                 saveState={roomSaveStates?.[id] ?? 'idle'}
                 updateRoom={updateRoom}
                 addEnvelopeElement={addEnvelopeElement}
