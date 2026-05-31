@@ -9,10 +9,27 @@ import {
   calculateCoilParameters,
   calculateParasiticGains,
   calculatePsychrometrics,
+  calculateTFALoad,
   getRecommendedAch,
   getMinAdp,
   calculateSingleElementGain,
 } from '../lib/hvac-logic';
+
+// DOAS/TFA systems for the report currently being built. Set once at the top of
+// each (synchronous) report-generation entry point; read by computeDetailed to
+// make the whole report TFA-aware. Synchronous render = no concurrency concern.
+let reportEquipSystems: any[] = [];
+
+// Find the DOAS/TFA system that serves a room (system- or zone-linked), if any.
+const findReportDoasForRoom = (room: any): any | null => {
+  for (const s of reportEquipSystems) {
+    if (s?.type !== 'DOAS') continue;
+    const sysIds = (s.doasLinkedSystemIds ?? []) as string[];
+    const zoneIds = (s.doasLinkedZoneIds ?? []) as string[];
+    if (sysIds.includes(room?.systemId) || sysIds.includes(room?.zoneId) || zoneIds.includes(room?.zoneId)) return s;
+  }
+  return null;
+};
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -109,6 +126,15 @@ type DetailedMetrics = {
   cfmTr: number;
   governingTr: number;
   requiredTr: number;
+  // TFA / DOAS (outdoor-air coil handled by the DOAS unit; zero when not DOAS-served)
+  isTFA: boolean;
+  isTfaOnly: boolean;
+  tfaCoilSensible: number;
+  tfaCoilLatent: number;
+  tfaCoilTr: number;
+  tfaCfm: number;
+  tfaSupplyOffsetSen: number;
+  tfaSupplyOffsetLat: number;
   // Coil parameters
   indicatedAdp: number;
   selectedAdp: number;
@@ -643,35 +669,64 @@ const computeDetailed = (room: any, elements: any[], dc: DC, project: any): Deta
   const ductPct   = asNum(room?.ductGainPct, 2);
   const fanPct    = asNum(room?.fanGainPct,  3);
 
-  const envelope  = calculateEnvelopeGain(elements, dc);
+  // TFA/DOAS: when this room is DOAS-served, the outdoor air is conditioned by the
+  // TFA unit, NOT the primary coil. Recompute with the cold-DOAS branch so the
+  // primary COIL loads — and therefore ADP, RSHF, GSHF, supply-air state,
+  // dehumidified CFM and reheat — reflect the reduced (sensible-leaning) coil.
+  const doas = findReportDoasForRoom(room);
+  const isTFA = !!doas;
+  const rawTfaMode = room?.tfaMode as string | undefined;
+  const effTfaMode: 'no-tfa' | 'tfa-served' | 'tfa-only' = !isTFA
+    ? 'no-tfa'
+    : (rawTfaMode === 'no-tfa' || rawTfaMode === 'tfa-served' || rawTfaMode === 'tfa-only') ? rawTfaMode : 'tfa-served';
+  const isTfaOnly = effTfaMode === 'tfa-only';
+  const dcEff: any = isTFA
+    ? { ...dc, ventilationStrategy: 'tfa-cold', tfaSupplyTemp: doas.tfaSupplyTemp, tfaSupplyHumidity: doas.tfaSupplyHumidity, ervSensibleEffectiveness: doas.ervSensibleEffectiveness, ervLatentEffectiveness: doas.ervLatentEffectiveness }
+    : dc;
+
+  const envelope  = calculateEnvelopeGain(elements, dcEff);
   const internal  = calculateInternalGains(room);
-  const vent      = calculateVentilationLoad(room, dc);
+  const vent      = calculateVentilationLoad(room, dcEff);
   const heating   = calculateHeatingLoad(room, elements, dc);
+  const tfa       = isTFA ? calculateTFALoad(room, dcEff) : null;
 
   const area = asNum(room?.length, 0) * asNum(room?.width, 0);
   const faCfm = (calculateRoomVolume(room) * asNum(room?.facph, 0)) / 60;
 
-  const erSensibleRaw = envelope.sensible + internal.sensible + vent.sensible * BF;
-  const erLatentRaw   = internal.latent   + vent.latent   * BF;
+  // In TFA mode the bypass-OA terms go to the DOAS unit, not the primary coil.
+  const erVentSenBF   = isTFA ? 0 : vent.sensible * BF;
+  const erVentLatBF   = isTFA ? 0 : vent.latent   * BF;
+  const erSensibleRaw = envelope.sensible + internal.sensible + erVentSenBF;
+  const erLatentRaw   = internal.latent   + erVentLatBF;
   const parasitic     = calculateParasiticGains(erSensibleRaw, erSensibleRaw, ductPct, fanPct);
   const ersh          = (erSensibleRaw + parasitic.ductGain + parasitic.fanGain) * (1 + sSafetyPct / 100);
   const erlh          = erLatentRaw * (1 + lSafetyPct / 100);
   const erh           = ersh + erlh;
-  const oaSensible    = vent.sensible * (1 - BF);
-  const oaLatent      = vent.latent   * (1 - BF);
-  const coilSensible  = ersh + oaSensible;
-  const coilLatent    = erlh + oaLatent;
-  const grandTotal    = erh + oaSensible + oaLatent;
+  const oaSensible    = isTFA ? 0 : vent.sensible * (1 - BF);
+  const oaLatent      = isTFA ? 0 : vent.latent   * (1 - BF);
+  // Cold-DOAS supply offsets a portion of the space coil load (engineering credit).
+  const tfaOffSen     = tfa ? tfa.spaceSensibleOffset : 0;
+  const tfaOffLat     = tfa ? tfa.spaceLatentOffset   : 0;
+  const coilSensible  = isTfaOnly ? 0 : (isTFA ? Math.max(0, ersh - tfaOffSen) : ersh + oaSensible);
+  const coilLatent    = isTfaOnly ? 0 : (isTFA ? Math.max(0, erlh - tfaOffLat) : erlh + oaLatent);
+  const grandTotal    = coilSensible + coilLatent;
   const loadTr        = grandTotal / 12000;
 
-  const coil = calculateCoilParameters(coilSensible, coilLatent, dc.indoorTemp, dc.indoorHumidity, dc.altitude, BF, 35, 65, getMinAdp(project?.systemType));
+  // Coil recomputed from the (TFA-reduced) loads — drives ADP / RSHF / supply air.
+  const coil = calculateCoilParameters(coilSensible, coilLatent, dcEff.indoorTemp, dcEff.indoorHumidity, dcEff.altitude, BF, 35, 65, getMinAdp(project?.systemType));
 
   const totalAch     = Math.max(getRecommendedAch(room?.achProfile ?? room?.activityType), asNum(room?.facph, 0));
   const totalSupplyCfm = (calculateRoomVolume(room) * totalAch) / 60;
   const designCfm    = Math.max(coil.minAdpSensibleCFM, totalSupplyCfm);
   const cfmTr        = designCfm / 400;
-  const governingTr  = Math.max(loadTr, cfmTr);
+  // Plant TR is LOAD-ONLY (locked policy 2026-05-20). cfmTr is a sanity ratio only.
+  const governingTr  = loadTr;
   const requiredTr   = governingTr * (1 + oSafetyPct / 100);
+  // TFA/DOAS coil duty (outdoor-air conditioning) handled by the DOAS unit.
+  const tfaCoilSensible = tfa ? tfa.coilSensible : 0;
+  const tfaCoilLatent   = tfa ? tfa.coilLatent   : 0;
+  const tfaCoilTr       = (tfaCoilSensible + tfaCoilLatent) / 12000;
+  const tfaCfm          = tfa ? tfa.cfm : 0;
 
   // ── Heating safety + humidification (used when called with winter DC) ──────
   const heatingSafetyPct  = asNum(room?.heatingSafetyPercent, 10);
@@ -731,6 +786,10 @@ const computeDetailed = (room: any, elements: any[], dc: DC, project: any): Deta
     sSafetyPct, lSafetyPct, oSafetyPct,
     ersh, erlh, erh, oaSensible, oaLatent,
     coilSensible, coilLatent, grandTotal, loadTr, cfmTr, governingTr, requiredTr,
+    // TFA / DOAS — zero when the room isn't DOAS-served.
+    isTFA, isTfaOnly,
+    tfaCoilSensible, tfaCoilLatent, tfaCoilTr, tfaCfm,
+    tfaSupplyOffsetSen: tfaOffSen, tfaSupplyOffsetLat: tfaOffLat,
     indicatedAdp: coil.indicatedADP,
     selectedAdp:  coil.selectedADP,
     rshf:         coil.rshf,
@@ -1095,6 +1154,8 @@ export const generatePDFReport = (
   const effectiveEquipSystems = hvacHierarchy && equipSystems.length === 0
     ? hvacHierarchy.systems
     : equipSystems;
+  // Make computeDetailed TFA-aware for this report build.
+  reportEquipSystems = effectiveEquipSystems ?? [];
 
   const doc      = new jsPDF({ unit: 'mm', format: 'a4' });
   const pageW    = doc.internal.pageSize.getWidth();
@@ -1231,20 +1292,25 @@ export const generatePDFReport = (
 
   // Compute project totals per season
   const projectSeasonTotals = seasons.map((season) => {
-    let cooling = 0; let cfm = 0; let heating = 0;
+    let cooling = 0; let cfm = 0; let heating = 0; let tfaCoil = 0;
     entities.forEach((entity) => {
       const dc = resolveEntityDC(entity, season, project);
       entity.rooms.forEach((room) => {
         const m = computeDetailed(room, envelopeElements[room.id] || [], dc, project);
-        cooling  += m.grandTotal;
+        cooling  += m.grandTotal;     // space (primary) coil — TFA-reduced
         cfm      += m.designCfm;
         heating  += m.designHeatingLoad;
+        tfaCoil  += m.tfaCoilSensible + m.tfaCoilLatent; // TFA/DOAS coil duty
       });
     });
     const loadTr = cooling / 12000;
     const cfmTr  = cfm / 400;
-    return { season: season.label, key: season.key, loadTr, cfm, cfmTr, heating, governingTr: Math.max(loadTr, cfmTr) };
+    const tfaCoilTr = tfaCoil / 12000;
+    // Plant TR is LOAD-ONLY. cfmTr retained as a sanity ratio only.
+    return { season: season.label, key: season.key, loadTr, cfm, cfmTr, heating, tfaCoilTr, governingTr: loadTr };
   });
+  const projectTfaCoilTR = Math.max(0, ...projectSeasonTotals.filter(s => s.key !== 'winter').map(s => s.tfaCoilTr));
+  const hasTfa = projectTfaCoilTR > 0;
 
   const coolingSeasonsOnly = projectSeasonTotals.filter(s => s.key !== 'winter');
   const peakSeason = coolingSeasonsOnly.reduce((a, b) => b.governingTr > a.governingTr ? b : a);
@@ -1274,9 +1340,7 @@ export const generatePDFReport = (
       for (const season of coolingSeasonsForRoom) {
         const dc = resolveEntityDC(entity, season, project);
         const m = computeDetailed(room, envelopeElements[room.id] || [], dc, project);
-        const lt = m.grandTotal / 12000;
-        const ct = m.designCfm / 400;
-        const gov = Math.max(lt, ct);
+        const gov = m.grandTotal / 12000; // load-only
         if (gov > maxGov) maxGov = gov;
       }
       roomGovTR.set(room.id, maxGov);
@@ -1293,8 +1357,11 @@ export const generatePDFReport = (
       // double-count here.
       ['Total Zones',                      n0(entities.length)],
       ['Total Rooms',                      n0(allRooms.length)],
-      ['Peak Governing Season',            `${peakSeason.season}  (${n2(peakSeason.governingTr)} TR  ·  ${n0(peakSeason.cfm)} CFM)`],
-      ['Recommended Submission Basis',     `${n2(recTR)} TR  and  ${n0(recCFM)} CFM`],
+      ['Peak Governing Season',            `${peakSeason.season}  (${n2(peakSeason.governingTr)} TR space  ·  ${n0(peakSeason.cfm)} CFM)`],
+      ['Recommended Submission Basis',     hasTfa
+        ? `Space coil ${n2(recTR)} TR  +  TFA/DOAS coil ${n2(projectTfaCoilTR)} TR  =  ${n2(recTR + projectTfaCoilTR)} TR  ·  ${n0(recCFM)} CFM`
+        : `${n2(recTR)} TR  and  ${n0(recCFM)} CFM`],
+      ...(hasTfa ? [['TFA / DOAS Coil Capacity', `${n2(projectTfaCoilTR)} TR  (outdoor-air coil, governing season)`]] as [string,string][] : []),
       ['Total Installed IDU / FCU Capacity', totalIDUStr],
       ['Total Installed Plant / ODU Capacity', totalPlantStr],
       ['Diversity Factor Applied',         diversityStr],
@@ -1342,7 +1409,9 @@ export const generatePDFReport = (
 
   // Season summary table
   const sumHead = [
-    'Season', 'Load TR', 'CFM TR', 'Governing TR', 'Design CFM',
+    'Season', 'Space TR', 'CFM TR', 'Governing TR',
+    ...(hasTfa ? ['TFA Coil TR'] : []),
+    'Design CFM',
     ...(includeWinter ? ['Winter Heat BTU/h'] : []),
   ];
   const sumBody = projectSeasonTotals.map((s) => [
@@ -1350,6 +1419,7 @@ export const generatePDFReport = (
     s.key === 'winter' ? '—' : n2(s.loadTr),
     s.key === 'winter' ? '—' : n2(s.cfmTr),
     s.key === 'winter' ? '—' : n2(s.governingTr),
+    ...(hasTfa ? [s.key === 'winter' ? '—' : n2(s.tfaCoilTr)] : []),
     s.key === 'winter' ? '—' : n0(s.cfm),
     ...(includeWinter ? [s.key === 'winter' ? n0(s.heating) : '—'] : []),
   ]);
@@ -1410,8 +1480,9 @@ export const generatePDFReport = (
     });
     const sumTr    = sumBTUH / 12000;
     const monTr    = monBTUH / 12000;
-    const sumGovTR = Math.max(sumTr, sumCfm / 400);
-    const monGovTR = monsoon ? Math.max(monTr, monCfm / 400) : 0;
+    // Load-only governing (space coil). sumBTUH/monBTUH are already TFA-reduced.
+    const sumGovTR = sumTr;
+    const monGovTR = monsoon ? monTr : 0;
     const govTr    = includeMonsoon ? Math.max(sumGovTR, monGovTR) : sumGovTR;
     const govCfm   = Math.max(sumCfm, monCfm);
     const inst = getInstalledTrCfm(entity.id, effectiveEquipSystems, entity.rooms.map(r => r.id));
@@ -1521,7 +1592,8 @@ export const generatePDFReport = (
         if (eMon) { const mm = computeDetailed(rm, envelopeElements[rm.id] || [], eMon, project); mBTU += mm.grandTotal; mCFM += mm.designCfm; }
       });
       const sTR = sBTU / 12000, mTR = mBTU / 12000;
-      const govTR  = includeMonsoon ? Math.max(Math.max(sTR, sCFM / 400), Math.max(mTR, mCFM / 400)) : Math.max(sTR, sCFM / 400);
+      // Load-only governing (space coil); grandTotal is already TFA-reduced.
+      const govTR  = includeMonsoon ? Math.max(sTR, mTR) : sTR;
       const govCFM = Math.max(sCFM, mCFM);
       const inst   = getInstalledTrCfm(entity.id, effectiveEquipSystems, entity.rooms.map(r => r.id));
       const fitStatus = inst.tr === 0 ? 'No Equip' : inst.tr >= govTR * 0.97 ? 'OK' : 'Undersized';
@@ -1849,15 +1921,27 @@ export const generatePDFReport = (
           [`  Safety Factor Applied`, `+${m.sSafetyPct}% sensible`, `+${m.lSafetyPct}% latent`],
           [{ content: '  ERSH (with safety factor)', styles: { fontStyle: 'bold', fillColor: C.total } }, { content: n0(m.ersh), styles: { fontStyle: 'bold', fillColor: C.total } }, { content: '—', styles: { fillColor: C.total } }],
           [{ content: '  ERLH (with safety factor)', styles: { fontStyle: 'bold', fillColor: C.total } }, { content: '—', styles: { fillColor: C.total } }, { content: n0(m.erlh), styles: { fontStyle: 'bold', fillColor: C.total } }],
-          // OA
-          [{ content: 'OUTDOOR AIR (unbypassed coil load)', colSpan: 3, styles: { fontStyle: 'bold', fillColor: C.accentBg, textColor: C.ink } }],
-          ['  OA Sensible',        n0(m.oaSensible), '—'],
-          ['  OA Latent',          '—',              n0(m.oaLatent)],
-          // Coil
-          [{ content: 'COIL LOADS', colSpan: 3, styles: { fontStyle: 'bold', fillColor: C.accentBg, textColor: C.ink } }],
+          // Outdoor air — to the TFA/DOAS coil when DOAS-served, else on the primary coil.
+          ...(m.isTFA
+            ? [
+                [{ content: 'TFA / DOAS COIL  (outdoor air — conditioned by the DOAS unit, not the primary)', colSpan: 3, styles: { fontStyle: 'bold', fillColor: C.accentBg, textColor: C.ink } }],
+                ['  TFA Coil Sensible',  n0(m.tfaCoilSensible), '—'],
+                ['  TFA Coil Latent',    '—',                   n0(m.tfaCoilLatent)],
+                [{ content: `  TFA Coil Total   =   ${n0(m.tfaCoilSensible + m.tfaCoilLatent)} BTU/h   (${n2(m.tfaCoilTr)} TR · ${n0(m.tfaCfm)} CFM OA)`, colSpan: 3, styles: { fontStyle: 'bold', fillColor: C.total } }],
+                ...((m.tfaSupplyOffsetSen > 0 || m.tfaSupplyOffsetLat > 0)
+                  ? [['  Cold-DOAS supply credit to space', m.tfaSupplyOffsetSen > 0 ? `-${n0(m.tfaSupplyOffsetSen)}` : '—', m.tfaSupplyOffsetLat > 0 ? `-${n0(m.tfaSupplyOffsetLat)}` : '—']]
+                  : []),
+                [{ content: m.isTfaOnly ? 'PRIMARY COIL  (TFA-only — primary carries zero)' : 'PRIMARY COIL  (space — OA handled by TFA)', colSpan: 3, styles: { fontStyle: 'bold', fillColor: C.accentBg, textColor: C.ink } }],
+              ]
+            : [
+                [{ content: 'OUTDOOR AIR (unbypassed coil load)', colSpan: 3, styles: { fontStyle: 'bold', fillColor: C.accentBg, textColor: C.ink } }],
+                ['  OA Sensible',        n0(m.oaSensible), '—'],
+                ['  OA Latent',          '—',              n0(m.oaLatent)],
+                [{ content: 'COIL LOADS', colSpan: 3, styles: { fontStyle: 'bold', fillColor: C.accentBg, textColor: C.ink } }],
+              ]),
           ['  Coil Sensible',      n0(m.coilSensible),  '—'],
           ['  Coil Latent',        '—',                 n0(m.coilLatent)],
-          [{ content: `  GRAND TOTAL   =   ${n0(m.grandTotal)} BTU/h   (${n2(m.loadTr)} TR)`, colSpan: 3, styles: { fontStyle: 'bold', fillColor: C.grandBg, textColor: C.grandFg, fontSize: 8.5 } }],
+          [{ content: `  ${m.isTFA ? 'SPACE COIL TOTAL' : 'GRAND TOTAL'}   =   ${n0(m.grandTotal)} BTU/h   (${n2(m.loadTr)} TR)`, colSpan: 3, styles: { fontStyle: 'bold', fillColor: C.grandBg, textColor: C.grandFg, fontSize: 8.5 } }],
         ];
 
         autoTable(doc, {
@@ -2176,6 +2260,8 @@ export const generatePDFReport = (
             { label: 'Equipment',   value: equipLoad,  color: [155, 75, 215]  as [number,number,number] },
             { label: 'People',      value: peopleLoad, color: [215, 55, 80]   as [number,number,number] },
             { label: 'Fresh Air',   value: freshAir,   color: [45,  170, 110] as [number,number,number] },
+            // TFA-served rooms: OA is on the DOAS coil, not the primary — show it separately.
+            { label: 'TFA Coil (OA)', value: m.isTFA ? (m.tfaCoilSensible + m.tfaCoilLatent) : 0, color: [20, 160, 160] as [number,number,number] },
           ];
           const segments: PieSeg[] = allSegs.filter((s) => s.value > 1);
 
@@ -2933,6 +3019,7 @@ export const generateEngineeringReviewPDF = (
   const effectiveZones       = hvacHierarchy ? Object.values(hvacHierarchy.zonesBySystem).flat() : zones;
   const effectiveRooms       = hvacHierarchy ? hvacHierarchy.rooms : rooms;
   const effectiveEquipSystems = hvacHierarchy && equipSystems.length === 0 ? hvacHierarchy.systems : equipSystems;
+  reportEquipSystems = effectiveEquipSystems ?? [];
 
   const seasons = getSeasonProfiles(project);
   const summer  = seasons.find((s) => s.key === 'summer')!;
