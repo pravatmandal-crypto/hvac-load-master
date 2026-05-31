@@ -127,7 +127,11 @@ function computeZoneTotals(
       const roomRequiredTR = roomLoadTR * (1 + overallSafetyPct / 100);
 
       if (isFinite(grandTotal)) totalCooling += grandTotal;
-      if (isFinite(heating.totalHeatingLoad)) totalHeating += heating.totalHeatingLoad;
+      // Apply overall safety to heating — mirrors the per-room persisted
+      // _calcWinterHeatingBTUH and the LC project-summary card, so the zone /
+      // system strips reconcile with the project Heating Load total.
+      const roomHeating = heating.totalHeatingLoad * (1 + overallSafetyPct / 100);
+      if (isFinite(roomHeating)) totalHeating += roomHeating;
       if (isFinite(coil.dehumidifiedCFM)) totalDehumCfm += coil.dehumidifiedCFM;
       if (isFinite(vent.cfm)) totalOaCfm += vent.cfm;
       if (isFinite(totalSupplyCFM)) totalSupplyCfm += totalSupplyCFM;
