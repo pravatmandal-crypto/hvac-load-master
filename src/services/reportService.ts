@@ -544,6 +544,7 @@ const formatDiversitySummary = (
   systems: any[],
   flatRooms: any[],
   roomGovTR: Map<string, number>,
+  roomTfaGovTR?: Map<string, number>,
 ): string => {
   const parts: string[] = [];
   for (const sys of systems) {
@@ -566,19 +567,28 @@ const formatDiversitySummary = (
       if (odu) installedTR = odu.effectiveTR ?? ((odu.trCapacity ?? 0) * (odu.modules ?? 1));
     }
 
-    // Sum of zone governing TR for rooms tied to this system
-    let sumRoomTR = 0;
+    // Sum of room governing TR for rooms tied to this system — space and chiller-fed TFA.
+    let sumSpaceTR = 0, sumTfaTR = 0;
     for (const r of flatRooms) {
       if (r.systemId === sys.id || r.zoneId === sys.id || r.hvacSystemId === sys.id) {
-        sumRoomTR += roomGovTR.get(r.id) ?? 0;
+        sumSpaceTR += roomGovTR.get(r.id) ?? 0;
+        sumTfaTR   += roomTfaGovTR?.get(r.id) ?? 0;
       }
     }
+    if (sumSpaceTR <= 0 && sumTfaTR <= 0) continue;
 
-    const effDf = (sumRoomTR > 0 && installedTR > 0) ? (installedTR / sumRoomTR) : null;
-    if (effDf == null) continue;
+    // Design diversity de-rates SPACE peaks (zones don't peak together). The TFA/OA
+    // coil runs continuously, so it is NOT diversified — it adds on top.
+    const df = Math.max(0, Math.min(1, Number(sys.diversityFactor ?? 0.75)));
+    const requiredTR = sumSpaceTR * df + sumTfaTR;
+    if (requiredTR <= 0 || installedTR <= 0) continue;
 
+    const marginPct = (installedTR / requiredTR) * 100;
     const name = sys.name ?? sys.id;
-    parts.push(`${name}: ${(effDf * 100).toFixed(0)}% (${n2(installedTR)} / ${n2(sumRoomTR)} TR)`);
+    const tfaNote = sumTfaTR > 0
+      ? `${n2(sumSpaceTR)}×${df.toFixed(2)} + TFA ${n2(sumTfaTR)} = ${n2(requiredTR)} TR req'd`
+      : `${n2(sumSpaceTR)}×${df.toFixed(2)} = ${n2(requiredTR)} TR req'd`;
+    parts.push(`${name}: diversity ${(df * 100).toFixed(0)}% → ${tfaNote}; installed ${n2(installedTR)} TR (${marginPct.toFixed(0)}%)`);
   }
   return parts.length > 0 ? parts.join('  |  ') : '—  (all systems at 100%)';
 };
@@ -1311,10 +1321,19 @@ export const generatePDFReport = (
   });
   const projectTfaCoilTR = Math.max(0, ...projectSeasonTotals.filter(s => s.key !== 'winter').map(s => s.tfaCoilTr));
   const hasTfa = projectTfaCoilTR > 0;
+  // Is any DOAS fed by the main chiller plant? If so, its coil load is ON the plant
+  // and must be added to the plant duty; otherwise the TFA is a separate unit.
+  const chillerFedTfa = (reportEquipSystems ?? []).some((s: any) => s?.type === 'DOAS' && ((s.tfaCoolingSource ?? 'own-unit') === 'chiller-plant'));
 
   const coolingSeasonsOnly = projectSeasonTotals.filter(s => s.key !== 'winter');
   const peakSeason = coolingSeasonsOnly.reduce((a, b) => b.governingTr > a.governingTr ? b : a);
   const recTR  = peakSeason.governingTr;
+  // Plant duty = SIMULTANEOUS peak of (space + chiller-fed TFA) in the same season —
+  // not the sum of peaks from different seasons. When TFA is on its own unit, the
+  // plant is the space coil only and the TFA is reported separately.
+  const plantSeasonPeak = coolingSeasonsOnly.reduce((a, b) =>
+    ((b.loadTr + (chillerFedTfa ? b.tfaCoilTr : 0)) > (a.loadTr + (chillerFedTfa ? a.tfaCoilTr : 0))) ? b : a);
+  const plantGovTR = plantSeasonPeak.loadTr + (chillerFedTfa ? plantSeasonPeak.tfaCoilTr : 0);
   // CFM must come from the same peak cooling season — winter CFM is inflated by heating ventilation loads
   const recCFM = peakSeason.cfm;
   const allRooms = entities.flatMap((e) => e.rooms);
@@ -1331,22 +1350,28 @@ export const generatePDFReport = (
     : '—  (no equipment selected)';
   const totalPlantStr = computeTotalInstalledPlant(activeEquipSystems);
 
-  // Per-room peak governing TR (max across cooling seasons) — drives effective diversity calc
-  const roomGovTR = new Map<string, number>();
+  // Per-room governing TR (max across cooling seasons), kept SEPARATE for space and
+  // chiller-fed TFA so diversity can be applied to space only (OA is non-diverse).
+  const roomGovTR = new Map<string, number>();       // space (primary) coil
+  const roomTfaGovTR = new Map<string, number>();     // chiller-fed TFA coil (0 if own-unit)
   const coolingSeasonsForRoom = seasons.filter(s => s.key !== 'winter');
   entities.forEach((entity) => {
     entity.rooms.forEach((room) => {
-      let maxGov = 0;
+      const rdoas = findReportDoasForRoom(room);
+      const roomChillerFed = !!rdoas && ((rdoas.tfaCoolingSource ?? 'own-unit') === 'chiller-plant');
+      let maxSpace = 0, maxTfa = 0;
       for (const season of coolingSeasonsForRoom) {
         const dc = resolveEntityDC(entity, season, project);
         const m = computeDetailed(room, envelopeElements[room.id] || [], dc, project);
-        const gov = m.grandTotal / 12000; // load-only
-        if (gov > maxGov) maxGov = gov;
+        if (m.grandTotal / 12000 > maxSpace) maxSpace = m.grandTotal / 12000;
+        const tfaTr = (m.tfaCoilSensible + m.tfaCoilLatent) / 12000;
+        if (roomChillerFed && tfaTr > maxTfa) maxTfa = tfaTr;
       }
-      roomGovTR.set(room.id, maxGov);
+      roomGovTR.set(room.id, maxSpace);
+      roomTfaGovTR.set(room.id, maxTfa);
     });
   });
-  const diversityStr = formatDiversitySummary(activeEquipSystems, flatRoomDocs, roomGovTR);
+  const diversityStr = formatDiversitySummary(activeEquipSystems, flatRoomDocs, roomGovTR, roomTfaGovTR);
   autoTable(doc, {
     startY: y,
     body: [
@@ -1357,11 +1382,15 @@ export const generatePDFReport = (
       // double-count here.
       ['Total Zones',                      n0(entities.length)],
       ['Total Rooms',                      n0(allRooms.length)],
-      ['Peak Governing Season',            `${peakSeason.season}  (${n2(peakSeason.governingTr)} TR space  ·  ${n0(peakSeason.cfm)} CFM)`],
-      ['Recommended Submission Basis',     hasTfa
-        ? `Space coil ${n2(recTR)} TR  +  TFA/DOAS coil ${n2(projectTfaCoilTR)} TR  =  ${n2(recTR + projectTfaCoilTR)} TR  ·  ${n0(recCFM)} CFM`
-        : `${n2(recTR)} TR  and  ${n0(recCFM)} CFM`],
-      ...(hasTfa ? [['TFA / DOAS Coil Capacity', `${n2(projectTfaCoilTR)} TR  (outdoor-air coil, governing season)`]] as [string,string][] : []),
+      ['Peak Governing Season',            chillerFedTfa
+        ? `${plantSeasonPeak.season}  (${n2(plantGovTR)} TR plant  ·  ${n0(recCFM)} CFM)`
+        : `${peakSeason.season}  (${n2(peakSeason.governingTr)} TR space  ·  ${n0(peakSeason.cfm)} CFM)`],
+      ['Recommended Submission Basis',     chillerFedTfa
+        ? `Space ${n2(plantSeasonPeak.loadTr)} TR  +  TFA coil ${n2(plantSeasonPeak.tfaCoilTr)} TR  (one plant, ${plantSeasonPeak.season})  =  ${n2(plantGovTR)} TR  ·  ${n0(recCFM)} CFM`
+        : hasTfa
+          ? `Chiller ${n2(recTR)} TR  +  separate TFA unit ${n2(projectTfaCoilTR)} TR  ·  ${n0(recCFM)} CFM`
+          : `${n2(recTR)} TR  and  ${n0(recCFM)} CFM`],
+      ...(hasTfa ? [['TFA / DOAS Coil Capacity', `${n2(projectTfaCoilTR)} TR  (outdoor-air coil, governing season)${chillerFedTfa ? ' — on main chiller plant' : ' — dedicated TFA unit'}`]] as [string,string][] : []),
       ['Total Installed IDU / FCU Capacity', totalIDUStr],
       ['Total Installed Plant / ODU Capacity', totalPlantStr],
       ['Diversity Factor Applied',         diversityStr],
