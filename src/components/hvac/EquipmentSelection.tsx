@@ -3721,8 +3721,10 @@ export default function EquipmentSelection({
     // / no ERV) when DOAS hasn't been configured by the user yet.
     // Phase C: per-room override. A room marked 'no-tfa' opts out of the TFA
     // branch even if its zone is TFA-linked (e.g. hi-wall split that can't take
-    // ducted TFA supply). 'tfa-only' is accepted but treated as 'tfa-served'
-    // by the engine until Phase D wires the corridor math.
+    // ducted TFA supply).
+    // Phase D: 'tfa-only' (corridor case) routes ALL load through the TFA supply
+    // air — the primary coil contribution is zeroed below and a carrying-capacity
+    // deficit is computed when 1.08 × CFM_tfa × (T_room − T_supply) < room sensible.
     const doasCandidate = findDoasForRoom(room);
     const effectiveTfaMode = getEffectiveTfaMode(room, doasCandidate);
     const doas = effectiveTfaMode === 'no-tfa' ? null : doasCandidate;
@@ -3847,11 +3849,15 @@ export default function EquipmentSelection({
   const recalcSystemRooms = async () => {
     if (!project?.id || !selectedSystemId) return;
     // For non-DOAS: rooms directly assigned to this system.
-    // For DOAS: rooms belonging to any primary system linked via doasLinkedSystemIds —
-    // computeRoomReqs will detect the DOAS link and switch to TFA mode.
+    // For DOAS: rooms belonging to any primary system linked via doasLinkedSystemIds OR
+    // any zone linked via doasLinkedZoneIds — computeRoomReqs detects the link and switches
+    // to TFA mode. Both link types must be honored or zone-linked DOAS rooms never recalc.
     const sys = equipSystems.find(s => s.id === selectedSystemId);
     const linkedIds: string[] = sys && sys.type === 'DOAS'
-      ? ((sys as any).doasLinkedSystemIds ?? [])
+      ? [
+          ...((sys as any).doasLinkedSystemIds ?? []),
+          ...((sys as any).doasLinkedZoneIds ?? []),
+        ]
       : [];
     const sysRooms = sys && sys.type === 'DOAS'
       ? rooms.filter((r: any) => linkedIds.includes(r.zoneId) || linkedIds.includes(r.systemId))
@@ -3914,6 +3920,11 @@ export default function EquipmentSelection({
       monsoonTfaCoilBTUH: Number((r as any)?._calcMonsoonTfaCoilBTUH) || 0,
       monsoonTfaCoilTR:   Number((r as any)?._calcMonsoonTfaCoilTR) || 0,
       isTFA:              !!(r as any)?._calcTfaCoilBTUH,
+      // Phase D fallback — persisted by LC so the SD undersized warning shows
+      // before any live "Refresh Loads" recalc on this system.
+      isTfaOnly:          !!(r as any)?._calcTfaOnly,
+      tfaCarryingBTUH:    Number((r as any)?._calcTfaCarryingBTUH) || 0,
+      tfaCarryingDeficit: Number((r as any)?._calcTfaCarryingDeficit) || 0,
     };
   };
 
@@ -4020,6 +4031,26 @@ export default function EquipmentSelection({
       .filter((r: any) => linked.has(r.zoneId) || linked.has(r.systemId))
       .map((r: any) => r.id);
   }, [selectedSystem, rooms]);
+
+  // Phase D — tfa-only rooms served by this DOAS whose sensible load exceeds the
+  // TFA supply-air carrying capacity (1.08 × CFM × ΔT). Warning only; the engine
+  // never auto-bumps CFM. Mirrors the LC project-summary banner.
+  const doasUndersizedRooms = useMemo(() => {
+    return doasServedRoomIds
+      .map((rid) => {
+        const reqs: any = getRoomReqs(rid);
+        const r = rooms.find((x: any) => x.id === rid) as any;
+        return {
+          id: rid,
+          name: r?.name ?? 'Room',
+          deficit: Number(reqs?.tfaCarryingDeficit) || 0,
+          isTfaOnly: !!reqs?.isTfaOnly,
+        };
+      })
+      .filter((x) => x.isTfaOnly && x.deficit > 0);
+    // getRoomReqs reads recalcResults + rooms; both are deps.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [doasServedRoomIds, recalcResults, rooms]);
 
   // OA CFM for DOAS = sum of facph × volume over served rooms.
   const doasOACFM = useMemo(
@@ -5212,6 +5243,19 @@ export default function EquipmentSelection({
                         <span className="text-xs text-teal-500 dark:text-teal-500 ml-1">Dedicated Outdoor Air System</span>
                       </div>
                       <div className="p-5 space-y-5">
+                        {/* Phase D — TFA-only rooms whose sensible load exceeds the supply-air
+                            carrying capacity at the designed CFM + supply temp. Warning only. */}
+                        {doasUndersizedRooms.length > 0 && (
+                          <div className="rounded-lg border border-rose-300 dark:border-rose-700 bg-rose-50 dark:bg-rose-950/30 px-4 py-3">
+                            <p className="text-sm font-semibold text-rose-800 dark:text-rose-300">
+                              TFA undersized — {doasUndersizedRooms.length} TFA-only room{doasUndersizedRooms.length === 1 ? '' : 's'} exceed{doasUndersizedRooms.length === 1 ? 's' : ''} carrying capacity
+                            </p>
+                            <p className="text-xs text-rose-700 dark:text-rose-400 mt-0.5">
+                              {doasUndersizedRooms.map(r => `${r.name} (+${Math.round(r.deficit).toLocaleString()} BTU/h)`).join(', ')}.
+                              The TFA supply can&rsquo;t absorb the room sensible at the designed CFM and supply temp. Increase OA CFM (raise <code>facph</code>), lower the TFA supply temp, or add a small DX assist. The engine sizes the calc as-is — it does not auto-correct.
+                            </p>
+                          </div>
+                        )}
                         {/* OA CFM + TFA coil summary */}
                         <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                           <div className="rounded-lg border border-teal-200 dark:border-teal-800 bg-teal-50/60 dark:bg-teal-950/20 px-4 py-3">
