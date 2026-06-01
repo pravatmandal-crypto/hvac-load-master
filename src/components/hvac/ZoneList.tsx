@@ -52,6 +52,7 @@ function computeZoneTotals(
 
   let totalCooling = 0;
   let totalTfaCoil = 0; // Σ TFA coil load (BTU/h) for this dc/season — shown separately
+  let totalTfaWinterHeating = 0; // Σ TFA/DOAS fresh-air winter heating coil (BTU/h)
   let totalHeating = 0;
   let totalDehumCfm = 0;
   let totalOaCfm = 0;
@@ -98,6 +99,7 @@ function computeZoneTotals(
             tfaSupplyHumidity: doas.tfaSupplyHumidity,
             ervSensibleEffectiveness: doas.ervSensibleEffectiveness,
             ervLatentEffectiveness: doas.ervLatentEffectiveness,
+            tfaWinterSupplyTemp: doas.tfaWinterSupplyTemp,
           }
         : dc;
 
@@ -127,6 +129,7 @@ function computeZoneTotals(
       const coilSensible = isTfaOnly ? 0 : (isTFA ? Math.max(0, ersh - tfaOffSen) : ersh + oaSensible);
       const coilLatent = isTfaOnly ? 0 : (isTFA ? Math.max(0, erlh - tfaOffLat) : erlh + oaLatent);
       if (tfa) totalTfaCoil += tfa.coilSensible + tfa.coilLatent;
+      if (tfa) totalTfaWinterHeating += (tfa.winterCoilSensible || 0) * (1 + overallSafetyPct / 100);
       // Pass derived system type to centralized helper. Preserves the previous
       // 44/42 split for chiller vs VRF; non-chiller types now use the canonical
       // 42°F per getMinAdp (matches old isChiller=false behavior).
@@ -179,6 +182,7 @@ function computeZoneTotals(
     totalTR: totalCooling / 12000,
     totalTfaCoil,
     totalTfaCoilTR: totalTfaCoil / 12000,
+    totalTfaWinterHeating,
     totalHeating,
     totalDehumCfm,
     totalOaCfm,
@@ -399,7 +403,12 @@ function ZoneSummaryBar({
               <div className="rounded-lg border border-blue-200 dark:border-blue-800 bg-white dark:bg-slate-800 px-3 py-2">
                 <p className="text-xs font-bold uppercase tracking-wide text-blue-700 dark:text-blue-400">Heating</p>
                 <p className="mt-1 font-mono text-lg font-bold text-blue-900 dark:text-blue-200">{n(summerTotals.totalHeating)}</p>
-                <p className="text-[10px] text-blue-600 dark:text-blue-400">BTU/h winter load</p>
+                <p className="text-[10px] text-blue-600 dark:text-blue-400">BTU/h winter load (space)</p>
+                {summerTotals.totalTfaWinterHeating > 0 && (
+                  <p className="mt-0.5 text-[10px] font-semibold text-teal-700 dark:text-teal-400" title="TFA/DOAS fresh-air winter heating coil — sized on the DOAS unit">
+                    + {n(summerTotals.totalTfaWinterHeating)} TFA heat
+                  </p>
+                )}
               </div>
               <div className="rounded-lg border border-emerald-200 dark:border-emerald-800 bg-white dark:bg-slate-800 px-3 py-2">
                 <p className="text-xs font-bold uppercase tracking-wide text-emerald-700 dark:text-emerald-400">Design CFM</p>
@@ -514,8 +523,16 @@ function ZoneCollapsedBadge({
       {t.totalHeating > 0 && (
         <>
           <span className="h-3 w-px bg-orange-200" />
-          <span className="text-sky-700 dark:text-sky-400" title="Winter heating load">
+          <span className="text-sky-700 dark:text-sky-400" title="Winter heating load (space)">
             {Math.round(t.totalHeating).toLocaleString()} BTU/h <span className="opacity-70">heat</span>
+          </span>
+        </>
+      )}
+      {t.totalTfaWinterHeating > 0 && (
+        <>
+          <span className="h-3 w-px bg-orange-200" />
+          <span className="text-teal-700 dark:text-teal-400" title="TFA/DOAS fresh-air winter heating coil (DOAS duty)">
+            +{Math.round(t.totalTfaWinterHeating).toLocaleString()} BTU/h <span className="opacity-70">TFA heat</span>
           </span>
         </>
       )}

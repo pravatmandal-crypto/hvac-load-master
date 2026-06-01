@@ -184,6 +184,7 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
       tfaMode: r.tfaMode ?? r.data?.tfaMode,
       _calcTfaCoilBTUH: r._calcTfaCoilBTUH ?? r.data?._calcTfaCoilBTUH,
       _calcMonsoonTfaCoilBTUH: r._calcMonsoonTfaCoilBTUH ?? r.data?._calcMonsoonTfaCoilBTUH,
+      _calcTfaWinterHeatingBTUH: r._calcTfaWinterHeatingBTUH ?? r.data?._calcTfaWinterHeatingBTUH,
       _calcTfaOnly: r._calcTfaOnly ?? r.data?._calcTfaOnly,
     };
   };
@@ -472,9 +473,13 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
     systemId?: string,
     roomOverride?: Room,
     elementsOverride?: EnvelopeElement[],
+    equipSystemsOverride?: any[],
   ) => {
     const roomSource = roomOverride ?? (rooms[zoneId] || []).find((r) => r.id === roomId);
     if (!roomSource) return;
+    // Allow callers to pass a DOAS-augmented list when equipSystems is mid-refresh
+    // (e.g. right after auto-creating the project DOAS) — see setRoomFreshAir.
+    const equipForTfa = equipSystemsOverride ?? equipSystems;
 
     setRoomSaveStates(prev => ({ ...prev, [roomId]: 'saving' }));
 
@@ -482,7 +487,7 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
     // ── TFA / DOAS detection via the shared resolver (room.tfaMode primary, legacy
     // zone/system link as fallback). Projects without a DOAS see identical numbers.
     const { doas: doasForThis, mode: effectiveTfaMode } =
-      resolveRoomTfa({ ...roomSource, systemId, zoneId }, equipSystems, zones);
+      resolveRoomTfa({ ...roomSource, systemId, zoneId }, equipForTfa, zones);
     const roomTfaMode = effectiveTfaMode; // alias used below
     const isTFA = !!doasForThis;
     const baseDc = getDesignConditionsForZone(zoneId, systemId);
@@ -498,6 +503,10 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
           tfaSupplyHumidity: (doasForThis as any).tfaSupplyHumidity ?? 90,
           ervSensibleEffectiveness: (doasForThis as any).ervSensibleEffectiveness ?? 0,
           ervLatentEffectiveness: (doasForThis as any).ervLatentEffectiveness ?? 0,
+          // Winter TFA supply setpoint. Default neutral (winter indoor temp) is
+          // applied inside calculateTFALoad when this is absent — keep null (not
+          // undefined) so the persisted analysis.designConditions stays Firestore-safe.
+          tfaWinterSupplyTemp: (doasForThis as any).tfaWinterSupplyTemp ?? null,
         }
       : baseDc;
     const rd: RoomDetails = {
@@ -767,6 +776,12 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
       _calcMonsoonTfaCoilTR: isTFA && monsoonTfa
         ? parseFloat(((monsoonTfa.coilSensible + monsoonTfa.coilLatent) / 12000).toFixed(3))
         : deleteField(),
+      // TFA/DOAS winter heating coil — tempers cold OA up to the (neutral) winter
+      // supply setpoint. Season-independent (uses winter design temps), so summer
+      // `tfa` carries it. Overall safety applied to mirror _calcWinterHeatingBTUH.
+      _calcTfaWinterHeatingBTUH: isTFA && tfa
+        ? parseFloat(((tfa.winterCoilSensible || 0) * (1 + overallSafetyPct / 100)).toFixed(0))
+        : deleteField(),
       updatedAt: new Date(),
     });
 
@@ -779,6 +794,15 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
               ...r,
               analysis,
               analysisUpdatedAt: Date.now(),
+              // Carry the mode that was just persisted — otherwise the optimistic
+              // state keeps the OLD tfaMode while the calc fields reflect the new one,
+              // so the resolver falls back to the legacy zone-link and the Fresh-air
+              // dropdown visibly reverts (e.g. "TFA-only" snapping back to "central TFA").
+              tfaMode: (roomSource as any).tfaMode ?? (r as any).tfaMode,
+              _calcTfaOnly: !!isTfaOnly,
+              _calcTfaCoilBTUH: isTFA && tfa ? parseFloat((tfa.coilSensible + tfa.coilLatent).toFixed(0)) : undefined,
+              _calcMonsoonTfaCoilBTUH: isTFA && monsoonTfa ? parseFloat((monsoonTfa.coilSensible + monsoonTfa.coilLatent).toFixed(0)) : undefined,
+              _calcTfaWinterHeatingBTUH: isTFA && tfa ? parseFloat(((tfa.winterCoilSensible || 0) * (1 + overallSafetyPct / 100)).toFixed(0)) : undefined,
               totalLoadBTUH: grandTotal,
               totalLoadTR: grandTotalTR,
               dehumidifiedCFM: coil.dehumidifiedCFM,
@@ -1084,12 +1108,25 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
   // ── Simplified "Fresh air" control (per-room TFA in the Load Calculator) ──
   // One project-level DOAS is auto-created the first time a room is set to a
   // central/corridor mode; room.tfaMode then drives everything (shared resolver).
-  const ensureProjectDoas = useCallback(async (): Promise<string | null> => {
+  // A minimal DOAS doc mirroring what ensureProjectDoas writes — used to resolve TFA
+  // immediately after creation, before the equipSystems listener has re-fired.
+  const makeSyntheticDoas = useCallback((id: string): any => ({
+    id,
+    name: 'TFA / Fresh Air',
+    type: 'DOAS',
+    ...TFA_SUPPLY_DEFAULTS,
+    tfaCoolingSource: pickCoolingSource(project, equipSystems),
+  }), [project, equipSystems]);
+
+  // Returns the project DOAS doc (the real one if it exists, otherwise a synthetic
+  // stand-in for the one just created). Callers thread this into the snapshot so the
+  // first TFA room computes TFA loads now, instead of waiting for a manual Recalculate.
+  const ensureProjectDoas = useCallback(async (): Promise<any | null> => {
     const existing = getProjectDoas(equipSystems);
-    if (existing) return existing.id;
+    if (existing) return existing;
     // Created earlier in this batch but equipSystems hasn't re-subscribed yet —
     // reuse it so a "set all" loop doesn't spawn one DOAS per room.
-    if (createdDoasIdRef.current) return createdDoasIdRef.current;
+    if (createdDoasIdRef.current) return makeSyntheticDoas(createdDoasIdRef.current);
     if (creatingDoasRef.current) return null;
     creatingDoasRef.current = true;
     try {
@@ -1110,27 +1147,34 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
         updatedAt: serverTimestamp(),
       });
       createdDoasIdRef.current = refDoc.id;
-      return refDoc.id;
+      return makeSyntheticDoas(refDoc.id);
     } catch (err) {
       toast.error('Could not create the fresh-air (TFA) unit: ' + (err instanceof Error ? err.message : 'unknown'));
       return null;
     } finally {
       creatingDoasRef.current = false;
     }
-  }, [equipSystems, project.id]);
+  }, [equipSystems, project.id, makeSyntheticDoas]);
 
   // Set one room's fresh-air mode: ensure a DOAS exists (for central/corridor),
   // write the explicit tfaMode, then re-persist that room so loads/exports update.
   const setRoomFreshAir = useCallback(async (room: any, mode: 'no-tfa' | 'tfa-served' | 'tfa-only') => {
     try {
-      if (mode !== 'no-tfa') await ensureProjectDoas();
+      // When we just created the DOAS, equipSystems hasn't re-subscribed yet, so
+      // splice the (synthetic) DOAS into the list the snapshot resolves TFA against —
+      // otherwise the first room would persist as no-TFA until a manual Recalculate.
+      let equip = equipSystems;
+      if (mode !== 'no-tfa') {
+        const doas = await ensureProjectDoas();
+        if (doas && !getProjectDoas(equipSystems)) equip = [...(equipSystems ?? []), doas];
+      }
       await updateDoc(doc(db, 'projects', project.id, 'rooms', room.id), { tfaMode: mode, updatedAt: serverTimestamp() });
       const zoneId = room.zoneId as string;
-      await persistRoomAnalysisSnapshot(zoneId, room.id, room.systemId ?? zoneId, { ...room, tfaMode: mode }, envelopeElements[room.id] ?? []);
+      await persistRoomAnalysisSnapshot(zoneId, room.id, room.systemId ?? zoneId, { ...room, tfaMode: mode }, envelopeElements[room.id] ?? [], equip);
     } catch (err) {
       toast.error('Could not update fresh air: ' + (err instanceof Error ? err.message : 'unknown'));
     }
-  }, [ensureProjectDoas, project.id, envelopeElements]);
+  }, [ensureProjectDoas, project.id, envelopeElements, equipSystems]);
 
   // Set every room in a zone at once (the uniform-zone shortcut). Takes the actual
   // displayed room list from ZoneList — works for both zone rows and system rows

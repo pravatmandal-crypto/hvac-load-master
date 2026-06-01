@@ -205,6 +205,7 @@ function useRoomCalc(room: any, elements: any[], designConditions: DesignConditi
           tfaSupplyHumidity: (tfaDoas as any).tfaSupplyHumidity,
           ervSensibleEffectiveness: (tfaDoas as any).ervSensibleEffectiveness,
           ervLatentEffectiveness: (tfaDoas as any).ervLatentEffectiveness,
+          tfaWinterSupplyTemp: (tfaDoas as any).tfaWinterSupplyTemp,
         } as any)
       : null;
 
@@ -427,6 +428,9 @@ function useRoomCalc(room: any, elements: any[], designConditions: DesignConditi
       isTfaOnly,
       tfaCoilTR,
       tfaCfm,
+      // TFA/DOAS winter heating coil (tempers OA up to the neutral winter supply).
+      // Overall safety applied to mirror the room designHeatingLoad presentation.
+      tfaWinterHeatingBTUH: tfa ? tfa.winterCoilSensible * (1 + overallSafetyFactor) : 0,
       cfmTR,
       governingTR,
       requiredTR,
@@ -2131,15 +2135,26 @@ function RoomDetail({
                   <TableCell className="text-xs py-1.5 text-right font-mono font-semibold text-amber-700">{n(c.designHeatingLoad - c.heatingSubtotal)}</TableCell>
                 </TableRow>
                 <TableRow className="bg-blue-700">
-                  <TableCell className="text-xs py-2 font-bold text-white">DESIGN HEATING LOAD</TableCell>
+                  <TableCell className="text-xs py-2 font-bold text-white">DESIGN HEATING LOAD (Space)</TableCell>
                   <TableCell className="text-xs py-2 text-right text-blue-200">—</TableCell>
                   <TableCell className="text-xs py-2 text-right font-mono font-bold text-white">{n(c.designHeatingLoad)} BTU/h</TableCell>
                 </TableRow>
+                {c.isTFA && c.tfaWinterHeatingBTUH > 0 && (
+                  <TableRow className="bg-teal-50 dark:bg-teal-950/30">
+                    <TableCell className="text-xs py-2 font-semibold text-teal-700 dark:text-teal-400">
+                      + TFA / DOAS Fresh-Air Heating Coil
+                      <span className="ml-1 text-[10px] font-normal text-teal-500">tempers OA to neutral supply — sized on the DOAS unit, not the space heater</span>
+                    </TableCell>
+                    <TableCell className="text-xs py-2 text-right text-teal-300">—</TableCell>
+                    <TableCell className="text-xs py-2 text-right font-mono font-bold text-teal-700 dark:text-teal-400">{n(c.tfaWinterHeatingBTUH)} BTU/h</TableCell>
+                  </TableRow>
+                )}
               </TableBody>
             </Table>
           </div>
           <p className="text-[10px] text-gray-400 mt-1.5">
             Raw total: {n(c.heating.totalHeatingLoad)} BTU/h — Safety {(c.heatingSafetyFactor*100).toFixed(0)}% per ASHRAE Ch.18 (thermal bridges + infiltration margin) — Pickup {(c.heatingPickupFactor*100).toFixed(0)}% per Carrier Manual Pt.1
+            {c.isTFA && c.tfaWinterHeatingBTUH > 0 && ' — TFA fresh-air heating coil shown separately (DOAS duty, overall safety applied)'}
           </p>
         </div>
 

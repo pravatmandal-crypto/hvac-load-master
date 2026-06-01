@@ -83,6 +83,7 @@ export interface RoomCalcResult {
   _calcTfaCfm?: number;
   _calcMonsoonTfaCoilBTUH?: number;
   _calcMonsoonTfaCoilTR?: number;
+  _calcTfaWinterHeatingBTUH?: number;
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -347,6 +348,11 @@ export async function calculateAndPersistRoom(
           _calcTfaCoilBTUH: parseFloat((tfa.coilSensible + tfa.coilLatent).toFixed(0)),
           _calcTfaCoilTR: parseFloat(((tfa.coilSensible + tfa.coilLatent) / 12000).toFixed(3)),
           _calcTfaCfm: parseFloat(tfa.cfm.toFixed(0)),
+          // TFA/DOAS fresh-air winter heating coil (tempers OA to neutral supply).
+          // Overall safety applied to mirror _calcWinterHeatingBTUH / the LC path.
+          _calcTfaWinterHeatingBTUH: parseFloat(
+            ((tfa.winterCoilSensible || 0) * (1 + overallSafetyPct / 100)).toFixed(0),
+          ),
           ...(monsoonTfa
             ? {
                 _calcMonsoonTfaCoilBTUH: parseFloat(

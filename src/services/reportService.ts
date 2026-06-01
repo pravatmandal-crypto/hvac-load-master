@@ -1724,6 +1724,7 @@ export const generatePDFReport = (
       'Design CFM',
       ...(entityHasTfa ? ['TFA Coil TR', 'TFA CFM'] : []),
       ...(includeWinter ? ['Winter BTU/h'] : []),
+      ...(includeWinter && entityHasTfa ? ['TFA Heat BTU/h'] : []),
       'Gov TR', 'Inst. TR', 'Inst. CFM',
     ];
 
@@ -1732,7 +1733,7 @@ export const generatePDFReport = (
     const winDcE = winter ? resolveEntityDC(entity, winter, project) : null;
 
     let totArea = 0, totSumTRsum = 0, totMonTRsum = 0, totCFMsum = 0, totWinHeat = 0;
-    let totTfaTR = 0, totTfaCFM = 0;
+    let totTfaTR = 0, totTfaCFM = 0, totTfaWinterHeat = 0;
 
     // Prefer the engine's persisted values (load-only + TFA-aware) over a fresh
     // recompute; computeDetailed (max load/CFM, OA-on-primary) is only a fallback
@@ -1760,6 +1761,7 @@ export const generatePDFReport = (
       totWinHeat  += wm?.designHeatingLoad ?? 0;
       totTfaTR    += tfaTR;
       totTfaCFM   += tfaCfm;
+      totTfaWinterHeat += Number(room._calcTfaWinterHeatingBTUH) || 0;
 
       const rInst = getRoomInstalledTrCfm(room.id, effectiveEquipSystems);
       const row: any[] = [room.name || '—', room.floor || '—', n0(sm.area), n2(sumTR)];
@@ -1767,6 +1769,7 @@ export const generatePDFReport = (
       row.push(n0(cfm));
       if (entityHasTfa) row.push(tfaTR > 0 ? n2(tfaTR) : '—', tfaCfm > 0 ? n0(tfaCfm) : '—');
       if (includeWinter) row.push(n0(wm?.designHeatingLoad ?? 0));
+      if (includeWinter && entityHasTfa) row.push((Number(room._calcTfaWinterHeatingBTUH) || 0) > 0 ? n0(Number(room._calcTfaWinterHeatingBTUH)) : '—');
       row.push(
         n2(govTR),
         rInst.tr  > 0 ? n2(rInst.tr)  : '—',
@@ -1798,6 +1801,7 @@ export const generatePDFReport = (
       { content: totTfaCFM > 0 ? n0(totTfaCFM) : '—', styles: { fontStyle: 'bold' as const, fillColor: C.total } },
     );
     if (includeWinter) totRow.push({ content: n0(totWinHeat), styles: { fontStyle: 'bold' as const, fillColor: C.total } });
+    if (includeWinter && entityHasTfa) totRow.push({ content: totTfaWinterHeat > 0 ? n0(totTfaWinterHeat) : '—', styles: { fontStyle: 'bold' as const, fillColor: C.total } });
     totRow.push(
       { content: n2(totGovTR),   styles: { fontStyle: 'bold' as const, fillColor: C.total } },
       { content: instTRStr,  styles: { fontStyle: 'bold' as const, fillColor: C.grandBg, textColor: C.grandFg, halign: 'right' as const } },
@@ -1807,8 +1811,9 @@ export const generatePDFReport = (
 
     const rscColStyles: Record<number, any> = { 0: { fontStyle: 'bold', cellWidth: 30 } };
     const tfaCols     = entityHasTfa ? 2 : 0;
-    const rInstTRIdx  = 6 + (includeMonsoon ? 1 : 0) + tfaCols + (includeWinter ? 1 : 0);
-    const rInstCFMIdx = 7 + (includeMonsoon ? 1 : 0) + tfaCols + (includeWinter ? 1 : 0);
+    const tfaHeatCol  = (includeWinter && entityHasTfa) ? 1 : 0;
+    const rInstTRIdx  = 6 + (includeMonsoon ? 1 : 0) + tfaCols + (includeWinter ? 1 : 0) + tfaHeatCol;
+    const rInstCFMIdx = 7 + (includeMonsoon ? 1 : 0) + tfaCols + (includeWinter ? 1 : 0) + tfaHeatCol;
     rscColStyles[rInstTRIdx]  = { halign: 'right', cellWidth: 15 };
     rscColStyles[rInstCFMIdx] = { halign: 'right', cellWidth: 15 };
 
@@ -2028,6 +2033,9 @@ export const generatePDFReport = (
           ['Design CFM',    `${n0(m.designCfm)} CFM`],
           ['Governing TR',  `${n2(m.governingTr)} TR`],
           ...(includeWinter ? [['Winter Load', `${n0(m.designHeatingLoad)} BTU/h`]] : []),
+          ...(includeWinter && Number((room as any)?._calcTfaWinterHeatingBTUH) > 0
+            ? [['TFA Heat Coil', `${n0(Number((room as any)._calcTfaWinterHeatingBTUH))} BTU/h`]]
+            : []),
           // TFA/DOAS split — appended last so the Governing-TR highlight (col 4)
           // stays put. Cooling seasons only; the TFA coil duty is the persisted,
           // season-appropriate engine value (this room's share of the DOAS coil).
@@ -2438,7 +2446,10 @@ export const generatePDFReport = (
           ...humRow,
           [`Subtotal  (safety ${wm.heatingSafetyPct.toFixed(0)}% applied)`,   '—', `${n0(wm.heatingSubtotal)}`],
           [`Pickup / Warm-up Allowance  (+${wm.heatingPickupPct.toFixed(0)}%)`, '—', `${n0(wm.designHeatingLoad - wm.heatingSubtotal)}`],
-          ['DESIGN HEATING LOAD',                                                '—', `${n0(wm.designHeatingLoad)} BTU/h`],
+          ['DESIGN HEATING LOAD (Space)',                                        '—', `${n0(wm.designHeatingLoad)} BTU/h`],
+          ...(Number((room as any)?._calcTfaWinterHeatingBTUH) > 0
+            ? [['+ TFA / DOAS Fresh-Air Heating Coil  (OA temper — DOAS duty)', '—', `${n0(Number((room as any)._calcTfaWinterHeatingBTUH))} BTU/h`]]
+            : []),
         ],
         theme: 'grid',
         styles: { fontSize: 7.5, cellPadding: 2, textColor: C.ink },

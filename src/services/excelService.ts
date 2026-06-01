@@ -69,6 +69,7 @@ type RoomSheetRefs = {
   winterLoadCell: string; governingTrCell: string;
   // TFA/DOAS split — present only on rooms served by a DOAS/TFA unit.
   tfaTrCell?: string; tfaCfmCell?: string;
+  tfaWinterHeatCell?: string; // TFA fresh-air winter heating coil (BTU/h)
   iduConfigCell: string;
 };
 
@@ -552,13 +553,14 @@ function buildCoverSheet(project: any, records: RoomRecord[], equipSystems: any[
   row++;
   const loadStart = row;
 
-  let totSumBTUH = 0, totSumCFM = 0, totMonBTUH = 0, totMonCFM = 0, totWin = 0, totArea = 0;
+  let totSumBTUH = 0, totSumCFM = 0, totMonBTUH = 0, totMonCFM = 0, totWin = 0, totArea = 0, totTfaWinHeat = 0;
   for (const rec of records) {
     totSumBTUH += rec.summer.grandTotal;
     totSumCFM  += rec.summer.designSupplyCFM;
     totMonBTUH += rec.monsoon?.grandTotal ?? 0;
     totMonCFM  += rec.monsoon?.designSupplyCFM ?? 0;
     totWin     += rec.winter.total;
+    totTfaWinHeat += Number(rec.room?._calcTfaWinterHeatingBTUH) || 0;
     totArea    += rec.summer.area;
   }
   const sumGovTR = totSumBTUH / 12000;
@@ -575,7 +577,8 @@ function buildCoverSheet(project: any, records: RoomRecord[], equipSystems: any[
     ...(project?.includeMonsoon ? [['Monsoon Cooling Load', r0(totMonBTUH / 12000), 'TR', ''] as [string, any, string, string]] : []),
     ['Plant Cooling Capacity',      r2(govTR),                'TR',    'Coil load basis — MAX(Summer, Monsoon)'],
     ['Design Airflow (Plant)',      r0(govCFM),               'CFM',   `Sanity: ${r0(cfmPerTR)} CFM/TR (typical 350–450)`],
-    ['Total Winter Heating Load',   r0(totWin),               'BTU/h', ''],
+    ['Total Winter Heating Load',   r0(totWin),               'BTU/h', 'Space heating (envelope + infiltration)'],
+    ...(totTfaWinHeat > 0 ? [['Total TFA Fresh-Air Heating Coil', r0(totTfaWinHeat), 'BTU/h', 'DOAS winter OA-temper duty'] as [string, any, string, string]] : []),
   ];
   for (const [k, v, u, rem] of loadRows) {
     const isBasis = k.includes('Governing');
@@ -1044,11 +1047,16 @@ function buildSummarySheet(project: any, refs: RoomSheetRefs[]): XLSX.WorkSheet 
   // afterCool = index of the last cooling-load column (Summer/Monsoon CFM).
   const afterCool = incMon ? 16 : 14;
   const tfaOff    = anyTfa ? 2 : 0;
+  // TFA winter heating coil column — added after the Winter Heating column when any
+  // room carries a TFA fresh-air heating coil.
+  const anyTfaHeat = refs.some(r => r.tfaWinterHeatCell);
+  const tfaHeatOff = anyTfaHeat ? 1 : 0;
   const tfaTrCol  = afterCool + 1;   // only meaningful when anyTfa
   const tfaCfmCol = afterCool + 2;
   const wCol = afterCool + tfaOff + 1;
-  const gCol = afterCool + tfaOff + 2;
-  const iCol = afterCool + tfaOff + 3;
+  const tfaHeatCol = wCol + 1;       // only meaningful when anyTfaHeat
+  const gCol = afterCool + tfaOff + 1 + tfaHeatOff + 1;
+  const iCol = afterCool + tfaOff + 1 + tfaHeatOff + 2;
   const COLS = iCol;
   let row = 1;
 
@@ -1067,7 +1075,9 @@ function buildSummarySheet(project: any, refs: RoomSheetRefs[]): XLSX.WorkSheet 
     'Summer\nTR', 'Summer\nCFM',
     ...(incMon ? ['Monsoon\nTR', 'Monsoon\nCFM'] : []),
     ...(anyTfa ? ['TFA Coil\nTR', 'TFA\nCFM'] : []),
-    'Winter\nHeating\n(BTU/h)', 'Plant\nTR ▶', 'IDU Configuration',
+    'Winter\nHeating\n(BTU/h)',
+    ...(anyTfaHeat ? ['TFA Heat\n(BTU/h)'] : []),
+    'Plant\nTR ▶', 'IDU Configuration',
   ];
   hdrs.forEach((h, i) => putV(ws, row, i + 1, h, S.tableHdr));
   row++;
@@ -1101,6 +1111,9 @@ function buildSummarySheet(project: any, refs: RoomSheetRefs[]): XLSX.WorkSheet 
       putF(ws, r, tfaCfmCol, ref.tfaCfmCell ? `ROUND(${shRef(ref.sheetName, ref.tfaCfmCell)},0)` : '0', 'n', S.calcC);
     }
     putF(ws, r, wCol, `ROUND(${shRef(ref.sheetName, ref.winterLoadCell)},0)`,   'n', S.calcC);
+    if (anyTfaHeat) {
+      putF(ws, r, tfaHeatCol, ref.tfaWinterHeatCell ? `ROUND(${shRef(ref.sheetName, ref.tfaWinterHeatCell)},0)` : '0', 'n', S.calcC);
+    }
     putF(ws, r, gCol, `ROUND(${shRef(ref.sheetName, ref.governingTrCell)},2)`,  'n', S.total);
     putF(ws, r, iCol, shRef(ref.sheetName, ref.iduConfigCell), 's', S.calc);
     row++;
@@ -1117,6 +1130,7 @@ function buildSummarySheet(project: any, refs: RoomSheetRefs[]): XLSX.WorkSheet 
     putF(ws, totR, c, `SUM(${rc(dataStart, c)}:${rc(row - 1, c)})`, 'n', S.total);
   });
   putF(ws, totR, wCol, `SUM(${rc(dataStart, wCol)}:${rc(row - 1, wCol)})`, 'n', S.total);
+  if (anyTfaHeat) putF(ws, totR, tfaHeatCol, `SUM(${rc(dataStart, tfaHeatCol)}:${rc(row - 1, tfaHeatCol)})`, 'n', S.total);
   putF(ws, totR, gCol, `SUM(${rc(dataStart, gCol)}:${rc(row - 1, gCol)})`, 'n', S.total);
   addBorders(ws, totR, 1, totR, COLS);
   row++;
@@ -1167,7 +1181,9 @@ function buildSummarySheet(project: any, refs: RoomSheetRefs[]): XLSX.WorkSheet 
     { wch: 10 }, { wch: 10 }, { wch: 10 }, { wch: 10 },
     ...(incMon ? [{ wch: 10 }, { wch: 10 }] : []),
     ...(anyTfa ? [{ wch: 10 }, { wch: 10 }] : []),
-    { wch: 14 }, { wch: 12 }, { wch: 40 },
+    { wch: 14 },
+    ...(anyTfaHeat ? [{ wch: 13 }] : []),
+    { wch: 12 }, { wch: 40 },
   ];
   ws['!autofilter'] = { ref: XLSX.utils.encode_range({ s: { r: hdrRow - 1, c: 0 }, e: { r: n + hdrRow, c: COLS - 1 } }) };
   (ws as any)['!freeze'] = { xSplit: 0, ySplit: hdrRow };
@@ -1329,13 +1345,22 @@ function buildRoomSheet(
     ['Coil Sensible',           record.summer.coilSensible,     record.monsoon?.coilSensible ?? null,     '', 0, ''],
     ['Coil Latent',             record.summer.coilLatent,       record.monsoon?.coilLatent ?? null,       '', 0, ''],
     ['Grand Total (BTUh)',       record.summer.grandTotal,       record.monsoon?.grandTotal ?? null,       'Total Heating Load', record.winter.total, 'BTU/h'],
+    // Winter-only row: TFA/DOAS fresh-air heating coil (DOAS duty). Summer/monsoon
+    // cells stay blank (comp === '' → blank-rendered below).
+    ...(Number(record.room?._calcTfaWinterHeatingBTUH) > 0
+      ? [['', 0, null, '+ TFA Fresh-Air Heating Coil', Number(record.room._calcTfaWinterHeatingBTUH), 'BTU/h'] as CalcRow]
+      : []),
   ];
 
+  // Captured during the loop so cross-sheet refs don't depend on fragile row math
+  // (the optional TFA heating row would otherwise shift the "last row" assumption).
+  let winterTotalCell = '';
+  let tfaWinterHeatCell: string | undefined;
   for (const [comp, sv, mv, wcomp, wv, wu] of calcRows) {
     const isBold = comp.startsWith('Grand') || comp.startsWith('ERSH') || comp.startsWith('ERLH');
     const sty = isBold ? S.total : S.calc;
     putV(ws, row, 1, comp, isBold ? S.label : S.calc);
-    putV(ws, row, 2, r0(sv), sty); putV(ws, row, 3, 'BTU/h', sty);
+    putV(ws, row, 2, comp ? r0(sv) : '', sty); putV(ws, row, 3, comp ? 'BTU/h' : '', sty);
     putV(ws, row, 4, '');
     putV(ws, row, 5, incMon && mv !== null ? r0(mv) : '—', sty);
     putV(ws, row, 6, incMon && mv !== null ? 'BTU/h' : '', sty);
@@ -1343,6 +1368,8 @@ function buildRoomSheet(
     putV(ws, row, 8, wcomp, wcomp ? S.label : S.calc);
     putV(ws, row, 9, wcomp && wv ? r0(wv) : '', wcomp ? S.total : S.calc);
     putV(ws, row, 10, wu, S.calc);
+    if (wcomp === 'Total Heating Load') winterTotalCell = rc(row, 9);
+    if (wcomp === '+ TFA Fresh-Air Heating Coil') tfaWinterHeatCell = rc(row, 9);
     row++;
   }
 
@@ -1409,11 +1436,9 @@ function buildRoomSheet(
     row++;
   }
 
-  // Winter total ref cell
-  const winterLoadCell = rc(row - (calcRows.length + 3), 9); // points back to "Total Heating Load" row
-  // Recalculate correct winterLoadCell
-  const winterLoadRow = calcStart + calcRows.length - 1; // last calc row (Grand Total) has winter
-  const winterLoadCellFix = rc(winterLoadRow, 9);
+  // Winter total ref cell — captured in the loop above (robust against the optional
+  // TFA heating row, which would otherwise be mistaken for the last "Grand Total" row).
+  const winterLoadCellFix = winterTotalCell || rc(calcStart + 10, 9);
 
   addBorders(ws, calcStart, 1, row - 1, COLS);
   row++;
@@ -1505,6 +1530,7 @@ function buildRoomSheet(
       governingTrCell:  govTRcell,
       tfaTrCell,
       tfaCfmCell,
+      tfaWinterHeatCell,
       iduConfigCell,
     },
   };

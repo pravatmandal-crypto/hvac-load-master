@@ -176,16 +176,23 @@ export const calculateTFALoad = (
       ((indoor.humidityRatio - supply.humidityRatio) * ASHRAE_CONSTANTS.GRAINS_PER_LB),
   );
 
-  // ── Winter heating on TFA (heats OA from winter outdoor to supply temp) ──
+  // ── Winter heating on TFA (heats cold OA up to the winter supply setpoint) ──
+  // In heating season the DOAS tempers incoming OA. Default supply is NEUTRAL
+  // (= winter indoor temp): the DOAS carries the entire fresh-air heating duty
+  // so the space heating system only covers envelope + infiltration losses
+  // (calculateHeatingLoad uses winterInfiltrationACH, not facph, to match this).
+  // Using the cold summer supplyTemp (55°F) here would wrongly under-heat the OA.
   let winterCoilSensible = 0;
   let warning: string | undefined;
   if (typeof design.winterOutdoorTemp === 'number') {
-    const winterDeltaT = supplyTemp - design.winterOutdoorTemp;
+    const winterIndoorTemp = design.winterIndoorTemp ?? design.indoorTemp;
+    const winterSupplyTemp =
+      typeof design.tfaWinterSupplyTemp === 'number' ? design.tfaWinterSupplyTemp : winterIndoorTemp;
+    const winterDeltaT = winterSupplyTemp - design.winterOutdoorTemp;
     if (winterDeltaT > 0) {
       winterCoilSensible = ASHRAE_CONSTANTS.SENSIBLE_COOLING_CONSTANT * cfm * winterDeltaT;
       // ERV sensible recovery applies in winter too — exhaust at indoor temp
       // pre-heats incoming OA.
-      const winterIndoorTemp = design.winterIndoorTemp ?? design.indoorTemp;
       const winterErvRecovered =
         epsS *
         ASHRAE_CONSTANTS.SENSIBLE_COOLING_CONSTANT *

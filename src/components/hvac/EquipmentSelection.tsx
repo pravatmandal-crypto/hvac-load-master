@@ -4116,6 +4116,18 @@ export default function EquipmentSelection({
     };
   }, [doasOACFM, selectedSystem, project]);
 
+  // TFA/DOAS fresh-air WINTER heating coil — sum of the per-room persisted
+  // _calcTfaWinterHeatingBTUH (engine tempers cold OA up to the neutral winter
+  // supply). No live winter-supply control yet, so the persisted values (each
+  // computed against that room's winter design conditions) are the source.
+  const doasTfaWinterHeatingBTUH = useMemo(
+    () => doasServedRoomIds.reduce((sum, rid) => {
+      const r = rooms.find((x: any) => x.id === rid) as any;
+      return sum + (Number(r?._calcTfaWinterHeatingBTUH) || 0);
+    }, 0),
+    [doasServedRoomIds, rooms],
+  );
+
   // VRF diversity calculation — individual IDUs + zone AHU/IDU selections
   const totalIDU_TR = selectedSystem
     ? Object.values(selectedSystem.iduSelections as any).reduce((s: number, x: any) => s + normalizeIDUList(x).reduce((ss, u) => ss + u.trCapacity * (u.quantity ?? 1), 0), 0)
@@ -5264,7 +5276,7 @@ export default function EquipmentSelection({
                           </div>
                         )}
                         {/* OA CFM + TFA coil summary */}
-                        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                        <div className={cn('grid grid-cols-1 gap-3', doasTfaWinterHeatingBTUH > 0 ? 'sm:grid-cols-4' : 'sm:grid-cols-3')}>
                           <div className="rounded-lg border border-teal-200 dark:border-teal-800 bg-teal-50/60 dark:bg-teal-950/20 px-4 py-3">
                             <p className="text-xs font-bold uppercase tracking-wide text-teal-600 dark:text-teal-400">OA Flow Required</p>
                             <p className="mt-1 font-mono text-xl font-bold text-teal-900 dark:text-teal-200">{Math.round(doasOACFM).toLocaleString()}</p>
@@ -5273,8 +5285,15 @@ export default function EquipmentSelection({
                           <div className="rounded-lg border border-teal-200 dark:border-teal-800 bg-teal-50/60 dark:bg-teal-950/20 px-4 py-3">
                             <p className="text-xs font-bold uppercase tracking-wide text-teal-600 dark:text-teal-400">TFA Coil Load</p>
                             <p className="mt-1 font-mono text-xl font-bold text-teal-900 dark:text-teal-200">{doasTFAAggregate.governingCoilTR.toFixed(1)}</p>
-                            <p className="text-xs text-teal-500 dark:text-teal-400">TR · {doasTFAAggregate.governs} governs</p>
+                            <p className="text-xs text-teal-500 dark:text-teal-400">TR · {doasTFAAggregate.governs} governs (cooling)</p>
                           </div>
+                          {doasTfaWinterHeatingBTUH > 0 && (
+                            <div className="rounded-lg border border-sky-200 dark:border-sky-800 bg-sky-50/60 dark:bg-sky-950/20 px-4 py-3">
+                              <p className="text-xs font-bold uppercase tracking-wide text-sky-600 dark:text-sky-400">TFA Heating Coil</p>
+                              <p className="mt-1 font-mono text-xl font-bold text-sky-900 dark:text-sky-200">{Math.round(doasTfaWinterHeatingBTUH).toLocaleString()}</p>
+                              <p className="text-xs text-sky-500 dark:text-sky-400">BTU/h · winter OA temper</p>
+                            </div>
+                          )}
                           <div className="rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 px-4 py-3">
                             <p className="text-xs font-bold uppercase tracking-wide text-slate-500 dark:text-slate-400">Rooms Served</p>
                             <p className="mt-1 font-mono text-xl font-bold text-slate-800 dark:text-slate-200">{doasServedRoomIds.length}</p>

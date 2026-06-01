@@ -32,6 +32,11 @@ export interface DesignConditions {
   // (low absolute humidity, handles all latent + sub-cools the space).
   tfaSupplyTemp?: number;      // °F
   tfaSupplyHumidity?: number;  // % RH at supply temp
+  // Winter TFA supply temp leaving the DOAS unit. In heating season the DOAS
+  // tempers cold OA up to this setpoint; default is neutral delivery (= winter
+  // indoor temp) so the DOAS carries the full fresh-air heating duty and the
+  // space heating system only covers envelope/infiltration losses.
+  tfaWinterSupplyTemp?: number; // °F
   // ERV / HRV effectiveness (0..1). 0 or undefined = no energy recovery.
   // Typical wheel: 0.70 sensible, 0.65 latent. HRV: latent = 0.
   ervSensibleEffectiveness?: number;
