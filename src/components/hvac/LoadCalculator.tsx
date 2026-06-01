@@ -183,7 +183,10 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
       // link). Preserve the persisted TFA coil too so staleness detection works.
       tfaMode: r.tfaMode ?? r.data?.tfaMode,
       _calcTfaCoilBTUH: r._calcTfaCoilBTUH ?? r.data?._calcTfaCoilBTUH,
+      _calcTfaCoilTR: r._calcTfaCoilTR ?? r.data?._calcTfaCoilTR,
+      _calcTfaCfm: r._calcTfaCfm ?? r.data?._calcTfaCfm,
       _calcMonsoonTfaCoilBTUH: r._calcMonsoonTfaCoilBTUH ?? r.data?._calcMonsoonTfaCoilBTUH,
+      _calcMonsoonTfaCoilTR: r._calcMonsoonTfaCoilTR ?? r.data?._calcMonsoonTfaCoilTR,
       _calcTfaWinterHeatingBTUH: r._calcTfaWinterHeatingBTUH ?? r.data?._calcTfaWinterHeatingBTUH,
       _calcTfaOnly: r._calcTfaOnly ?? r.data?._calcTfaOnly,
     };

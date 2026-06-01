@@ -375,7 +375,10 @@ function useRoomCalc(room: any, elements: any[], designConditions: DesignConditi
     const hTransSafe    = heating.transmissionLoss  * (1 + heatingSafetyFactor);
     const hVentSafe     = heating.ventilationHeating * (1 + heatingSafetyFactor);
     const hHumLoad      = includeHumidifier && winterHumidification.needed ? winterHumidification.energyBTU : 0;
-    const heatingSubtotal    = hTransSafe + hVentSafe + hHumLoad;
+    // Humidification conditions the fresh air → it belongs on the TFA/DOAS unit, not
+    // the space heating load. Space heating is sensible only; hHumLoad is shown as a
+    // separate DOAS line alongside the TFA fresh-air heating coil.
+    const heatingSubtotal    = hTransSafe + hVentSafe;
     const designHeatingLoad  = heatingSubtotal * (1 + heatingPickupFactor);
 
     // Separate OA FACPH from total-supply ACH requirement.
@@ -2112,15 +2115,6 @@ function RoomDetail({
                   <TableCell className="text-xs py-1.5 text-right font-mono text-gray-500 dark:text-slate-400">{n(c.heating.ventilationHeating)}</TableCell>
                   <TableCell className="text-xs py-1.5 text-right font-mono font-semibold">{n(c.hVentSafe)}</TableCell>
                 </TableRow>
-                {c.includeHumidifier && c.winterHumidification.needed && (
-                  <TableRow className="bg-sky-50 dark:bg-sky-950/30">
-                    <TableCell className="text-xs py-1.5 text-sky-700 dark:text-sky-400 font-medium">
-                      Humidifier Energy (ṁ={c.winterHumidification.humidifierRate.toFixed(2)} lbs/hr × 1,061)
-                    </TableCell>
-                    <TableCell className="text-xs py-1.5 text-right font-mono text-gray-500">—</TableCell>
-                    <TableCell className="text-xs py-1.5 text-right font-mono font-semibold text-sky-700">{n(c.hHumLoad)}</TableCell>
-                  </TableRow>
-                )}
                 <TableRow className="bg-blue-50 dark:bg-blue-950/30">
                   <TableCell className="text-xs py-1.5 font-semibold text-blue-800 dark:text-blue-300">Subtotal (before pickup)</TableCell>
                   <TableCell className="text-xs py-1.5 text-right text-gray-400">—</TableCell>
@@ -2147,6 +2141,16 @@ function RoomDetail({
                     </TableCell>
                     <TableCell className="text-xs py-2 text-right text-teal-300">—</TableCell>
                     <TableCell className="text-xs py-2 text-right font-mono font-bold text-teal-700 dark:text-teal-400">{n(c.tfaWinterHeatingBTUH)} BTU/h</TableCell>
+                  </TableRow>
+                )}
+                {c.includeHumidifier && c.winterHumidification.needed && (
+                  <TableRow className="bg-sky-50 dark:bg-sky-950/30">
+                    <TableCell className="text-xs py-2 font-semibold text-sky-700 dark:text-sky-400">
+                      + TFA / DOAS Humidification
+                      <span className="ml-1 text-[10px] font-normal text-sky-500">fresh-air moisture (ṁ={c.winterHumidification.humidifierRate.toFixed(2)} lbs/hr × 1,061) — DOAS duty</span>
+                    </TableCell>
+                    <TableCell className="text-xs py-2 text-right text-sky-300">—</TableCell>
+                    <TableCell className="text-xs py-2 text-right font-mono font-bold text-sky-700 dark:text-sky-400">{n(c.hHumLoad)} BTU/h</TableCell>
                   </TableRow>
                 )}
               </TableBody>
@@ -2209,8 +2213,8 @@ function RoomDetail({
               {/* Include-in-heating toggle */}
               <div className="flex items-center justify-between bg-white dark:bg-slate-800 border border-sky-200 dark:border-sky-900 rounded-lg px-3 py-2">
                 <div>
-                  <p className="text-xs font-semibold text-gray-700 dark:text-slate-300">Include humidifier energy penalty in heating load</p>
-                  <p className="text-[10px] text-gray-400 dark:text-slate-500 mt-0.5">Adds {n(c.winterHumidification.energyBTU)} BTU/h to Design Heating Load in the table above</p>
+                  <p className="text-xs font-semibold text-gray-700 dark:text-slate-300">Include humidifier energy penalty (TFA / DOAS duty)</p>
+                  <p className="text-[10px] text-gray-400 dark:text-slate-500 mt-0.5">Adds {n(c.winterHumidification.energyBTU)} BTU/h as a TFA/DOAS humidification line (fresh-air moisture), shown with the TFA heating coil above — not in the space heating load</p>
                 </div>
                 <button
                   type="button"

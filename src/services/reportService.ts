@@ -583,7 +583,7 @@ const formatDiversitySummary = (
     const tfaNote = sumTfaTR > 0
       ? `${n2(sumSpaceTR)}×${df.toFixed(2)} + TFA ${n2(sumTfaTR)} = ${n2(requiredTR)} TR req'd`
       : `${n2(sumSpaceTR)}×${df.toFixed(2)} = ${n2(requiredTR)} TR req'd`;
-    parts.push(`${name}: diversity ${(df * 100).toFixed(0)}% → ${tfaNote}; installed ${n2(installedTR)} TR (${marginPct.toFixed(0)}%)`);
+    parts.push(`${name}: diversity ${(df * 100).toFixed(0)}% -> ${tfaNote}; installed ${n2(installedTR)} TR (${marginPct.toFixed(0)}%)`);
   }
   return parts.length > 0 ? parts.join('  |  ') : '—  (all systems at 100%)';
 };
@@ -786,7 +786,10 @@ const computeDetailed = (room: any, elements: any[], dc: DC, project: any): Deta
     ? Math.min(100, Math.round((wOut / wSatIndoor.humidityRatio) * 100))
     : 0;
   const hHumLoad       = includeHumidifier && humNeeded ? humEnergyBTU : 0;
-  const heatingSubtotal   = hTransSafe + hVentSafe + hSlabSafe + hHumLoad;
+  // Humidification conditions the fresh air, which the TFA/DOAS unit handles — so it
+  // is NOT part of the space heating load. Space heating is sensible only (envelope +
+  // infiltration + slab); hHumLoad is reported on the DOAS side alongside the TFA coil.
+  const heatingSubtotal   = hTransSafe + hVentSafe + hSlabSafe;
   const designHeatingLoad = heatingSubtotal * (1 + heatingPickupPct / 100);
 
   return {
@@ -1008,15 +1011,18 @@ const buildEngineeringReview = (
         }
       }
 
-      // Winter humidifier dominance
-      if (wm && wm.hHumLoad > 0 && wm.designHeatingLoad > 0) {
-        const humPct = (wm.hHumLoad / wm.designHeatingLoad) * 100;
+      // Winter humidifier dominance — share of the TOTAL winter duty
+      // (space heating + TFA fresh-air coil + humidification), since humidification
+      // now sits on the DOAS side rather than inside the space heating load.
+      if (wm && wm.hHumLoad > 0) {
+        const totalWinterDuty = wm.designHeatingLoad + (Number((room as any)?._calcTfaWinterHeatingBTUH) || 0) + wm.hHumLoad;
+        const humPct = totalWinterDuty > 0 ? (wm.hHumLoad / totalWinterDuty) * 100 : 0;
         if (humPct > 40) {
           findings.push({
             severity: 'warning',
             scope: roomLabel,
-            title: `Winter humidifier is ${humPct.toFixed(0)}% of total heating load`,
-            description: `${n0(wm.hHumLoad)} BTU/h humidifier vs ${n0(wm.designHeatingLoad)} BTU/h total winter heating. Humidification is dominating the winter design.`,
+            title: `Winter humidifier is ${humPct.toFixed(0)}% of total winter duty`,
+            description: `${n0(wm.hHumLoad)} BTU/h humidification vs ${n0(totalWinterDuty)} BTU/h total winter duty (space heating + TFA coil + humidification). Humidification is dominating the winter design.`,
             recommendation: `Lower indoor RH target in winter (e.g. 70°F / 40%). For most Indian climates with mild winters and naturally humid outdoor air, humidification is unnecessary.`,
           });
         }
@@ -1339,6 +1345,11 @@ export const generatePDFReport = (
   });
   const projectTfaCoilTR = Math.max(0, ...projectSeasonTotals.filter(s => s.key !== 'winter').map(s => s.tfaCoilTr));
   const hasTfa = projectTfaCoilTR > 0;
+  // TFA/DOAS fresh-air winter heating coil — project total (season-independent).
+  const projectTfaWinterHeatingBTUH = entities.reduce(
+    (s: number, e: any) => s + e.rooms.reduce((rs: number, r: any) => rs + (Number(r._calcTfaWinterHeatingBTUH) || 0), 0),
+    0,
+  );
   // Is any DOAS fed by the main chiller plant? If so, its coil load is ON the plant
   // and must be added to the plant duty; otherwise the TFA is a separate unit.
   const chillerFedTfa = (reportEquipSystems ?? []).some((s: any) => s?.type === 'DOAS' && ((s.tfaCoolingSource ?? 'own-unit') === 'chiller-plant'));
@@ -1433,6 +1444,11 @@ export const generatePDFReport = (
         data.cell.styles.textColor = C.grandFg;
         data.cell.styles.fontStyle = 'bold';
       }
+      // Diversity row carries a long string — shrink so it wraps cleanly inside the
+      // value cell instead of overflowing the table edge.
+      if (data.section === 'body' && data.row.index === 7 && data.column.index === 1) {
+        data.cell.styles.fontSize = 7.5;
+      }
     },
     margin: { left: PAGE.left, right: PAGE.right },
   });
@@ -1462,6 +1478,7 @@ export const generatePDFReport = (
     ...(hasTfa ? ['TFA Coil TR'] : []),
     'Design CFM',
     ...(includeWinter ? ['Winter Heat BTU/h'] : []),
+    ...(includeWinter && projectTfaWinterHeatingBTUH > 0 ? ['TFA Heat BTU/h'] : []),
   ];
   const sumBody = projectSeasonTotals.map((s) => [
     s.season,
@@ -1471,6 +1488,7 @@ export const generatePDFReport = (
     ...(hasTfa ? [s.key === 'winter' ? '—' : n2(s.tfaCoilTr)] : []),
     s.key === 'winter' ? '—' : n0(s.cfm),
     ...(includeWinter ? [s.key === 'winter' ? n0(s.heating) : '—'] : []),
+    ...(includeWinter && projectTfaWinterHeatingBTUH > 0 ? [s.key === 'winter' ? n0(projectTfaWinterHeatingBTUH) : '—'] : []),
   ]);
 
   autoTable(doc, {
@@ -1750,9 +1768,16 @@ export const generatePDFReport = (
       const monTR  = num(room._calcMonsoonGoverningTR) ?? (mm?.governingTr ?? 0);
       const govTR  = num(room._calcOverallGoverningTR) ?? Math.max(sumTR, monTR);
       const cfm    = num(room._calcOverallDesignCFM)   ?? Math.max(sm.designCfm, mm?.designCfm ?? 0);
-      // TFA coil duty is the governing (summer/monsoon) persisted value.
-      const tfaTR  = Math.max(Number(room._calcTfaCoilTR) || 0, Number(room._calcMonsoonTfaCoilTR) || 0);
-      const tfaCfm = Number(room._calcTfaCfm) || 0;
+      // TFA coil duty — governing (summer/monsoon) persisted value, falling back to
+      // the live recompute when the room object doesn't carry the persisted _calc
+      // fields, so the schedule matches the per-room cooling breakdown.
+      const tfaTR  = Math.max(
+        Number(room._calcTfaCoilTR) || 0,
+        Number(room._calcMonsoonTfaCoilTR) || 0,
+        sm.tfaCoilTr || 0,
+        mm?.tfaCoilTr || 0,
+      );
+      const tfaCfm = Number(room._calcTfaCfm) || sm.tfaCfm || mm?.tfaCfm || 0;
 
       totArea     += sm.area;
       totSumTRsum += sumTR;
@@ -2041,8 +2066,8 @@ export const generatePDFReport = (
           // season-appropriate engine value (this room's share of the DOAS coil).
           ...(isTfaRoom(room) && !/winter/i.test(seasonLabel)
             ? [
-                ['TFA Coil', `${n2((/monsoon/i.test(seasonLabel) ? Number(room._calcMonsoonTfaCoilTR) : Number(room._calcTfaCoilTR)) || 0)} TR`],
-                ['TFA Airflow', `${n0(Number(room._calcTfaCfm) || 0)} CFM`],
+                ['TFA Coil', `${n2((/monsoon/i.test(seasonLabel) ? Number(room._calcMonsoonTfaCoilTR) : Number(room._calcTfaCoilTR)) || m.tfaCoilTr || 0)} TR`],
+                ['TFA Airflow', `${n0(Number(room._calcTfaCfm) || m.tfaCfm || 0)} CFM`],
               ]
             : []),
         ];
@@ -2430,7 +2455,7 @@ export const generatePDFReport = (
 
       // ── Heating load table with safety + pickup ───────────────────────────
       const humRow: string[][] = wm.includeHumidifier && wm.humNeeded
-        ? [['Humidifier Energy  (ṁ × h_fg)', `—`, `${n0(wm.hHumLoad)} BTU/h`]]
+        ? [['+ TFA / DOAS Humidification  (fresh-air moisture — DOAS duty)', '—', `${n0(wm.hHumLoad)} BTU/h`]]
         : [];
       const slabRow: string[][] = wm.hSlabRaw > 0
         ? [['Slab-Edge Loss  (F × Perimeter × dT)',   `${n0(wm.hSlabRaw)}`,     `${n0(wm.hSlabSafe)}`]]
@@ -2443,13 +2468,13 @@ export const generatePDFReport = (
           ['Transmission Loss  (U × A × dT)',         `${n0(wm.hTransRaw)}`,    `${n0(wm.hTransSafe)}`],
           ['Ventilation Heating  (1.08 × CFM × dT)',  `${n0(wm.hVentRaw)}`,     `${n0(wm.hVentSafe)}`],
           ...slabRow,
-          ...humRow,
           [`Subtotal  (safety ${wm.heatingSafetyPct.toFixed(0)}% applied)`,   '—', `${n0(wm.heatingSubtotal)}`],
           [`Pickup / Warm-up Allowance  (+${wm.heatingPickupPct.toFixed(0)}%)`, '—', `${n0(wm.designHeatingLoad - wm.heatingSubtotal)}`],
           ['DESIGN HEATING LOAD (Space)',                                        '—', `${n0(wm.designHeatingLoad)} BTU/h`],
           ...(Number((room as any)?._calcTfaWinterHeatingBTUH) > 0
             ? [['+ TFA / DOAS Fresh-Air Heating Coil  (OA temper — DOAS duty)', '—', `${n0(Number((room as any)._calcTfaWinterHeatingBTUH))} BTU/h`]]
             : []),
+          ...humRow,
         ],
         theme: 'grid',
         styles: { fontSize: 7.5, cellPadding: 2, textColor: C.ink },
