@@ -1367,6 +1367,12 @@ export const generatePDFReport = (
     ((b.loadTr + (chillerFedTfa ? b.tfaCoilTr : 0)) > (a.loadTr + (chillerFedTfa ? a.tfaCoilTr : 0))) ? b : a);
   // CFM must come from the same peak cooling season — winter CFM is inflated by heating ventilation loads
   const recCFM = peakSeason.cfm;
+  // Submission airflow = PEAK design CFM across cooling seasons (summer + monsoon).
+  // Design airflow can peak in a different season than plant TR (e.g. summer airflow
+  // exceeds monsoon airflow even when monsoon governs TR), so ductwork / AHU must be
+  // sized to the higher of the two — not the TR-governing season's CFM. Winter is
+  // excluded (its CFM is inflated by heating-ventilation loads).
+  const submissionCFM = Math.max(0, ...coolingSeasonsOnly.map(s => s.cfm));
   const allRooms = entities.flatMap((e) => e.rooms);
 
   // Stats panel — filter equipment systems to those that have at least one live room pointing to them
@@ -1420,10 +1426,10 @@ export const generatePDFReport = (
         ? `${plantSeasonPeak.season}  (${n2(plantRequiredTR)} TR plant, diversity applied  ·  ${n0(recCFM)} CFM)`
         : `${peakSeason.season}  (${n2(peakSeason.governingTr)} TR space  ·  ${n0(peakSeason.cfm)} CFM)`],
       ['Recommended Submission Basis',     chillerFedTfa
-        ? `Space (diversified) + TFA coil on one plant  =  ${n2(plantRequiredTR)} TR  ·  ${n0(recCFM)} CFM`
+        ? `Space (diversified) + TFA coil on one plant  =  ${n2(plantRequiredTR)} TR  ·  ${n0(submissionCFM)} CFM`
         : hasTfa
-          ? `Chiller ${n2(plantRequiredTR)} TR (diversified)  +  separate TFA unit ${n2(projectTfaCoilTR)} TR  ·  ${n0(recCFM)} CFM`
-          : `${n2(plantRequiredTR > 0 ? plantRequiredTR : recTR)} TR  and  ${n0(recCFM)} CFM`],
+          ? `Chiller ${n2(plantRequiredTR)} TR (diversified)  +  separate TFA unit ${n2(projectTfaCoilTR)} TR  ·  ${n0(submissionCFM)} CFM`
+          : `${n2(plantRequiredTR > 0 ? plantRequiredTR : recTR)} TR  and  ${n0(submissionCFM)} CFM`],
       ...(hasTfa ? [['TFA / DOAS Coil Capacity', `${n2(projectTfaCoilTR)} TR  (outdoor-air coil, governing season)${chillerFedTfa ? ' — on main chiller plant' : ' — dedicated TFA unit'}`]] as [string,string][] : []),
       ['Total Installed IDU / FCU Capacity', totalIDUStr],
       ['Total Installed Plant / ODU Capacity', totalPlantStr],
@@ -2052,10 +2058,12 @@ export const generatePDFReport = (
         const panelRSHF = panelRoomTot > 0 ? m.ersh / panelRoomTot : 1;
 
         const panelCols = [
-          // When adpUnreachable, the indicated ADP value is just the closest match
-          // to actual GSHF — no real ADP intersection exists, so flag it so the
-          // engineer knows reheat (or chemical dehumidification) is required.
-          ['Indicated ADP', m.adpUnreachable ? `${n1(m.indicatedAdp)} °F (unreachable — reheat req.)` : `${n1(m.indicatedAdp)} °F`],
+          // When adpUnreachable, the indicated ADP is below the coil's achievable
+          // floor (no real saturation-curve intersection), so flag that it was
+          // clamped to the selected ADP. Whether reheat is actually needed is a
+          // separate RSHF-based determination — shown in the Reheat row above —
+          // so this annotation no longer asserts "reheat req." (avoids contradicting it).
+          ['Indicated ADP', m.adpUnreachable ? `${n1(m.indicatedAdp)} °F (below ${n0(m.selectedAdp)} °F coil floor — clamped)` : `${n1(m.indicatedAdp)} °F`],
           ['Selected ADP',  `${n0(m.selectedAdp)} °F`],
           ['RSHF',          n2(panelRSHF)],
           ['Design CFM',    `${n0(m.designCfm)} CFM`],
