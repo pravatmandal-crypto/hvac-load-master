@@ -3975,22 +3975,17 @@ export default function EquipmentSelection({
   // — when none exist, the chip explicitly says so (OA on primary).
   const projectDoasAggregate = useMemo(() => {
     const doasUnits = (equipSystems as any[]).filter(s => s?.type === 'DOAS');
-    // Linked IDs union: legacy system-links + Phase B+ zone-links.
-    const linkedIds = new Set<string>();
-    for (const d of doasUnits) {
-      for (const pid of ((d.doasLinkedSystemIds ?? []) as string[])) linkedIds.add(pid);
-      for (const zid of ((d.doasLinkedZoneIds ?? []) as string[])) linkedIds.add(zid);
-    }
-    // primaryCount = distinct primary system IDs touched (system-link OR via any zone-link's parent).
-    const linkedPrimaryIds = new Set<string>();
+    // Resolver-based served rooms (tfaMode primary, legacy link fallback) — matches
+    // doasServedRoomIds and the LC. A raw-link count missed rooms set to TFA via the
+    // LC dropdown (tfaMode), so this chip read "0 prim · 0 rooms".
+    const servedPrimaryIds = new Set<string>();
+    const servedRoomIds: string[] = [];
     for (const r of rooms as any[]) {
-      if ((r.systemId && linkedIds.has(r.systemId)) || (r.zoneId && linkedIds.has(r.zoneId))) {
-        if (r.systemId) linkedPrimaryIds.add(r.systemId);
-      }
+      if (!resolveRoomTfa(r, equipSystems, zoneDocs).doas) continue;
+      servedRoomIds.push(r.id);
+      if (r.systemId) servedPrimaryIds.add(r.systemId);
+      else if (r.zoneId) servedPrimaryIds.add(r.zoneId);
     }
-    const servedRoomIds = (rooms as any[])
-      .filter((r: any) => linkedIds.has(r.systemId) || linkedIds.has(r.zoneId))
-      .map((r: any) => r.id);
     const totalOACFM = servedRoomIds.reduce((sum, rid) => {
       const r = rooms.find((x: any) => x.id === rid) as any;
       if (!r) return sum;
@@ -3999,26 +3994,27 @@ export default function EquipmentSelection({
     return {
       hasDoas: doasUnits.length > 0,
       doasCount: doasUnits.length,
-      primaryCount: linkedPrimaryIds.size,
+      primaryCount: servedPrimaryIds.size,
       roomCount: servedRoomIds.length,
       totalOACFM,
       firstDoasId: doasUnits[0]?.id as string | undefined,
     };
-  }, [equipSystems, rooms]);
+  }, [equipSystems, rooms, zoneDocs]);
 
   // ── DOAS aggregation ────────────────────────────────────────────────────
   // DOAS systems have no rooms assigned directly — they serve rooms belonging
   // to the primary systems listed in doasLinkedSystemIds. Aggregate those.
   const doasServedRoomIds = useMemo(() => {
     if (!selectedSystem || selectedSystem.type !== 'DOAS') return [] as string[];
-    const sysLinks: string[] = (selectedSystem as any).doasLinkedSystemIds ?? [];
-    const zoneLinks: string[] = (selectedSystem as any).doasLinkedZoneIds ?? [];
-    if (sysLinks.length === 0 && zoneLinks.length === 0) return [] as string[];
-    const linked = new Set<string>([...sysLinks, ...zoneLinks]);
+    // Resolver-based (matches the LC): a room is served by this DOAS when its
+    // tfaMode resolves to it (primary path) — or, for unset/inherit rooms, when its
+    // zone/system is in this DOAS's legacy link arrays (fallback inside resolveRoomTfa).
+    // Using the raw links alone missed rooms set to "Central cold TFA" via the LC
+    // dropdown (tfaMode), so the tile showed 0 CFM / 0 TR / 0 rooms.
     return rooms
-      .filter((r: any) => linked.has(r.zoneId) || linked.has(r.systemId))
+      .filter((r: any) => resolveRoomTfa(r, equipSystems, zoneDocs).doas?.id === selectedSystem.id)
       .map((r: any) => r.id);
-  }, [selectedSystem, rooms]);
+  }, [selectedSystem, rooms, equipSystems, zoneDocs]);
 
   // Phase D — tfa-only rooms served by this DOAS whose sensible load exceeds the
   // TFA supply-air carrying capacity (1.08 × CFM × ΔT). Warning only; the engine
@@ -5298,7 +5294,7 @@ export default function EquipmentSelection({
                           <div className="rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 px-4 py-3">
                             <p className="text-xs font-bold uppercase tracking-wide text-slate-500 dark:text-slate-400">Rooms Served</p>
                             <p className="mt-1 font-mono text-xl font-bold text-slate-800 dark:text-slate-200">{doasServedRoomIds.length}</p>
-                            <p className="text-xs text-slate-400">via linked primaries</p>
+                            <p className="text-xs text-slate-400">TFA-served rooms</p>
                           </div>
                         </div>
 
