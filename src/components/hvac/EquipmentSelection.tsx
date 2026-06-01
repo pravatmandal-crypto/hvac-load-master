@@ -3776,10 +3776,11 @@ export default function EquipmentSelection({
     const totalACH   = Math.max(presetACH, rd.facph);
     const supplyCFM  = (calculateRoomVolume(rd) * totalACH) / 60;
     const coilParams = calculateCoilParameters(coilSen, coilLat, dc.indoorTemp, dc.indoorHumidity, dc.altitude || 0, bf, 35, 65, getMinAdp(systemType));
-    // Use minAdpSensibleCFM (fixed system ADP) — not dehumidifiedCFM (floating ADP),
-    // which inflates high-sensible rooms. Matches LC's computeZoneTotals so the
-    // picker dialog and LC card show the same Design CFM. See CLAUDE.md "Critical invariant".
-    const designCFM  = Math.max(coilParams.minAdpSensibleCFM, supplyCFM);
+    // TFA-served space coils are sized by thermal (sensible-at-ADP) airflow only — the
+    // recommended-ACH air-change duty belongs to the DOAS. tfa-only corridors keep the
+    // air-change airflow (≈ the TFA supply CFM). Use minAdpSensibleCFM (fixed ADP), not
+    // dehumidifiedCFM (floating ADP). Matches LC. See CLAUDE.md "Critical invariant".
+    const designCFM  = (isTFA && !isTfaOnly) ? coilParams.minAdpSensibleCFM : Math.max(coilParams.minAdpSensibleCFM, supplyCFM);
     const cfmTR      = designCFM / 400;
     // Plant TR is load-only (2026-05-20). cfmTR retained as sanity ratio.
     const governingTR = grandTotalTR;
@@ -3805,7 +3806,7 @@ export default function EquipmentSelection({
     const mCoilLat = isTfaOnly ? 0 : (isTFA ? Math.max(0, mErlh - mTfaOffLat) : mErlh + mOaLat);
     const mTotalTR = (mCoilSen + mCoilLat) / 12000;
     const mCoilP   = calculateCoilParameters(mCoilSen, mCoilLat, dc.indoorTemp, dc.indoorHumidity, dc.altitude || 0, bf, 35, 65, getMinAdp(systemType));
-    const mDesignCFM  = Math.max(mCoilP.minAdpSensibleCFM, supplyCFM);
+    const mDesignCFM  = (isTFA && !isTfaOnly) ? mCoilP.minAdpSensibleCFM : Math.max(mCoilP.minAdpSensibleCFM, supplyCFM);
     const mCfmTR      = mDesignCFM / 400;
     const monsoonGoverningTR = mTotalTR;
     const monsoonRequiredTR  = monsoonGoverningTR * (1 + ovlSafePct / 100);

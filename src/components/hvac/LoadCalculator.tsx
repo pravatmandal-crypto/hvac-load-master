@@ -592,7 +592,10 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
     const presetTotalACH = getRecommendedAch(roomSource.achProfile ?? roomSource.activityType);
     const totalSupplyACH = Math.max(presetTotalACH, rd.facph);
     const totalSupplyCFM = (calculateRoomVolume(rd) * totalSupplyACH) / 60;
-    const designSupplyCFM = Math.max(coil.minAdpSensibleCFM, totalSupplyCFM);
+    // TFA-served space coils are sized by their thermal (sensible-at-ADP) airflow only —
+    // the recommended-ACH air-change duty belongs to the DOAS. tfa-only corridors are fed
+    // by the DOAS supply, so they keep the air-change airflow (≈ the TFA supply CFM).
+    const designSupplyCFM = (isTFA && !isTfaOnly) ? coil.minAdpSensibleCFM : Math.max(coil.minAdpSensibleCFM, totalSupplyCFM);
     // Plant TR is load-only (2026-05-20). cfmTR retained as sanity ratio.
     const cfmTR = designSupplyCFM / 400;
     const governingTR = grandTotalTR;
@@ -628,7 +631,7 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
       dc.indoorTemp, dc.indoorHumidity, dc.altitude || 0,
       bf, 35, 65, getMinAdp(project?.systemType),
     );
-    const monsoonDesignCFM = Math.max(monsoonCoilParams.minAdpSensibleCFM, totalSupplyCFM);
+    const monsoonDesignCFM = (isTFA && !isTfaOnly) ? monsoonCoilParams.minAdpSensibleCFM : Math.max(monsoonCoilParams.minAdpSensibleCFM, totalSupplyCFM);
     const monsoonCfmTR = monsoonDesignCFM / 400;
     const monsoonGoverningTR = monsoonGrandTotalTR;
     const monsoonRequiredTR = monsoonGoverningTR * (1 + overallSafetyPct / 100);
@@ -946,7 +949,9 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
       const presetTotalACH = getRecommendedAch(room.achProfile ?? room.activityType);
       const totalSupplyACH = Math.max(presetTotalACH, rd.facph);
       const totalSupplyCFM = (calculateRoomVolume(rd) * totalSupplyACH) / 60;
-      const designSupplyCFM = Math.max(coilLocal.minAdpSensibleCFM, totalSupplyCFM);
+      // TFA-served: sized by thermal airflow only; recommended-ACH is the DOAS's duty.
+      // tfa-only corridors keep the air-change airflow (≈ the TFA supply CFM).
+      const designSupplyCFM = (isTFA && !isTfaOnly) ? coilLocal.minAdpSensibleCFM : Math.max(coilLocal.minAdpSensibleCFM, totalSupplyCFM);
 
       // Phase D: carrying capacity used by tfa-only rooms (and reported for
       // all TFA-served rooms as a sanity check). Deficit > 0 = undersized.

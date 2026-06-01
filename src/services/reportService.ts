@@ -745,7 +745,10 @@ const computeDetailed = (room: any, elements: any[], dc: DC, project: any): Deta
 
   const totalAch     = Math.max(getRecommendedAch(room?.achProfile ?? room?.activityType), asNum(room?.facph, 0));
   const totalSupplyCfm = (calculateRoomVolume(room) * totalAch) / 60;
-  const designCfm    = Math.max(coil.minAdpSensibleCFM, totalSupplyCfm);
+  // TFA-served space coils are sized by thermal (sensible-at-ADP) airflow only — the
+  // recommended-ACH air-change duty belongs to the DOAS. tfa-only corridors keep the
+  // air-change airflow (≈ the TFA supply CFM).
+  const designCfm    = (isTFA && !isTfaOnly) ? coil.minAdpSensibleCFM : Math.max(coil.minAdpSensibleCFM, totalSupplyCfm);
   const cfmTr        = designCfm / 400;
   // Plant TR is LOAD-ONLY (locked policy 2026-05-20). cfmTr is a sanity ratio only.
   const governingTr  = loadTr;

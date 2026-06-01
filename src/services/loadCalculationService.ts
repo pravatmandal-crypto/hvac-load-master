@@ -194,8 +194,10 @@ export async function calculateAndPersistRoom(
   const presetTotalACH = getRecommendedAch(room.achProfile ?? room.activityType);
   const totalSupplyACH = Math.max(presetTotalACH, rd.facph);
   const totalSupplyCFM = (calculateRoomVolume(rd) * totalSupplyACH) / 60;
-  // Methodology: DSCFM = CSH / (1.08 × ΔT_supply) — sensible-only per Carrier Manual.
-  const designSupplyCFM = Math.max(coil.minAdpSensibleCFM, totalSupplyCFM);
+  // TFA-served space coils are sized by their thermal (sensible-at-ADP) airflow only.
+  // The recommended-ACH air-change rate is a ventilation duty handled by the DOAS, so
+  // it imposes no supply floor on the space coil. (This pure path models tfa-served.)
+  const designSupplyCFM = isTFA ? coil.minAdpSensibleCFM : Math.max(coil.minAdpSensibleCFM, totalSupplyCFM);
   // cfmTR is a SANITY RATIO only — kept for display/warning. It does NOT
   // govern plant sizing. The 400 CFM/TR rule is rule-of-thumb air-system
   // sizing; OEM unit ratings already enforce the TR↔CFM coupling, and
@@ -239,7 +241,7 @@ export async function calculateAndPersistRoom(
     dc.indoorTemp, dc.indoorHumidity, dc.altitude || 0,
     bf, 35, 65, minAdp,
   );
-  const monsoonDesignCFM = Math.max(monsoonCoilParams.minAdpSensibleCFM, totalSupplyCFM);
+  const monsoonDesignCFM = isTFA ? monsoonCoilParams.minAdpSensibleCFM : Math.max(monsoonCoilParams.minAdpSensibleCFM, totalSupplyCFM);
   const monsoonCfmTR = monsoonDesignCFM / 400;
   const monsoonGoverningTR = monsoonGrandTotalTR;
   const monsoonRequiredTR = monsoonGrandTotalTR * (1 + overallSafetyPct / 100);

@@ -386,10 +386,11 @@ function useRoomCalc(room: any, elements: any[], designConditions: DesignConditi
     const presetTotalACH = getRecommendedAch(room.achProfile ?? room.activityType);
     const totalSupplyACH = Math.max(presetTotalACH, rd.facph);
     const totalSupplyCFM = (calculateRoomVolume(rd) * totalSupplyACH) / 60;
-    // Methodology: DSCFM = CSH / (1.08 × ΔT_supply) — sensible-only per Carrier Manual.
-    // dehumidifiedCFM (max with latent) is kept for diagnostic display only.
-    const designCFM = Math.max(coil.minAdpSensibleCFM, totalSupplyCFM);
-    const achGovernsAirflow = coil.minAdpSensibleCFM < totalSupplyCFM;
+    // TFA-served space coils are sized by thermal (sensible-at-ADP) airflow only — the
+    // recommended-ACH air-change duty is handled by the DOAS. tfa-only corridors keep
+    // the air-change airflow (≈ the TFA supply CFM).
+    const designCFM = (isTFA && !isTfaOnly) ? coil.minAdpSensibleCFM : Math.max(coil.minAdpSensibleCFM, totalSupplyCFM);
+    const achGovernsAirflow = !(isTFA && !isTfaOnly) && coil.minAdpSensibleCFM < totalSupplyCFM;
     // cfmTR is a SANITY RATIO only (display + warning). It does NOT govern plant
     // sizing — Plant TR = grand-total coil load only. (Decision: 2026-05-20.)
     const cfmTR = designCFM / 400;

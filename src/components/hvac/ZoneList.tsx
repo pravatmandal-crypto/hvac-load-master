@@ -150,9 +150,10 @@ function computeZoneTotals(
       const presetTotalACH = getRecommendedAch(room.achProfile ?? room.activityType);
       const effectiveTotalACH = Math.max(presetTotalACH, rd.facph);
       const totalSupplyCFM = (calculateRoomVolume(rd) * effectiveTotalACH) / 60;
-      // Use minAdpSensibleCFM (CFM at fixed system ADP) for the 400 CFM/TR checkpoint —
-      // not dehumidifiedCFM which uses floating indicated ADP and inflates high-sensible rooms.
-      const designCFM = Math.max(coil.minAdpSensibleCFM, totalSupplyCFM);
+      // TFA-served space coils are sized by thermal (sensible-at-ADP) airflow only — the
+      // recommended-ACH air-change duty belongs to the DOAS. tfa-only corridors keep the
+      // air-change airflow (≈ the TFA supply CFM). minAdpSensibleCFM = fixed-ADP airflow.
+      const designCFM = (isTFA && !isTfaOnly) ? coil.minAdpSensibleCFM : Math.max(coil.minAdpSensibleCFM, totalSupplyCFM);
 
       // Per-room required TR: load TR × (1 + overall safety %). Plant TR is LOAD-ONLY
       // (2026-05-20 decision, confirmed) — CFM/TR is a sanity ratio, never a governor.
