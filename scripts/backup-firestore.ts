@@ -4,11 +4,14 @@
  * READ-ONLY. Never writes to or deletes from Firestore.
  *
  * Backs up all project data covering every room-storage path:
- *   • projects/{id}/zones/{zoneId}/rooms                 (CAC / Package)
- *   • projects/{id}/systems/{sysId}/rooms                (VRF)
- *   • projects/{id}/systems/{sysId}/zones/{zoneId}/rooms (Hybrid)
+ *   • projects/{id}/rooms                                (CURRENT — flat rooms, since 2026-05-02)
+ *   • projects/{id}/zones/{zoneId}/rooms                 (legacy CAC / Package)
+ *   • projects/{id}/systems/{sysId}/rooms                (legacy VRF)
+ *   • projects/{id}/systems/{sysId}/zones/{zoneId}/rooms (legacy Hybrid)
  *   • projects/{id}/equipmentSystems                     (Equipment Selection)
  *   • users collection
+ *
+ * Each room's envelopeElements subcollection is captured inline.
  *
  * Usage:
  *   npx tsx scripts/backup-firestore.ts
@@ -104,6 +107,23 @@ async function backup() {
     const equipSystems = await readCollection(`projects/${project._id}/equipmentSystems`);
     projectData.equipmentSystems = equipSystems;
     log(`│  equipmentSystems: ${equipSystems.length}`);
+
+    // ── Flat rooms (CURRENT canonical path since the 2026-05-02 migration) ────
+    // All rooms now live at projects/{id}/rooms/{roomId} with their geometry,
+    // envelope, and _calc* results. The legacy zone/system sub-paths below are
+    // retained only for projects that predate the migration. This block is the
+    // one that actually captures live room data — do not remove it.
+    const flatRooms = await readCollection(`projects/${project._id}/rooms`);
+    if (flatRooms.length > 0) {
+      log(`│  rooms (flat): ${flatRooms.length}`);
+      for (const room of flatRooms) {
+        const elements = await readCollection(
+          `projects/${project._id}/rooms/${room._id}/envelopeElements`,
+        );
+        if (elements.length > 0) room.envelopeElements = elements;
+      }
+      projectData.rooms = flatRooms;
+    }
 
     // ── Standard zones → rooms (CAC / Package / DuctableSplit / AHU / Chiller)
     const zones = await readCollection(`projects/${project._id}/zones`);
