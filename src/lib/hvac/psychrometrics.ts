@@ -62,6 +62,39 @@ export const calculatePsychrometrics = (
 };
 
 /**
+ * Saturation (dew-point) temperature whose SATURATED humidity ratio equals the
+ * target W. This is the apparatus dew point a coil must reach to dry air down to
+ * humidity ratio `targetW` — you cannot dehumidify below a given W without
+ * cooling the air to that W's dew point (100 % RH). Mirrors the incremental
+ * saturation-curve search used by the ADP solver below.
+ *
+ * @param targetW - target humidity ratio (lb water / lb dry air)
+ * @param altitude - altitude in feet
+ * @param loF - lower search bound (°F)
+ * @param hiF - upper search bound (°F)
+ * @returns saturation temperature in °F (clamped to [loF, hiF])
+ */
+export const dewPointFromHumidityRatio = (
+  targetW: number,
+  altitude: number = 0,
+  loF: number = 32,
+  hiF: number = 80,
+): number => {
+  if (!Number.isFinite(targetW) || targetW <= 0) return loF;
+  let best = loF;
+  let bestDiff = Infinity;
+  for (let t = loF; t <= hiF; t += 0.1) {
+    const w = calculatePsychrometrics(t, 100, altitude).humidityRatio;
+    const diff = Math.abs(w - targetW);
+    if (diff < bestDiff) {
+      bestDiff = diff;
+      best = t;
+    }
+  }
+  return best;
+};
+
+/**
  * Calculate Apparatus Dew Point (ADP) and Dehumidified CFM
  * Based on Room Sensible Heat Factor (RSHF)
  * ASHRAE Fundamentals Chapter 6

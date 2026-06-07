@@ -58,7 +58,7 @@ export { calculateSolarGain } from './solar';
 export { calculateVentilationLoad, calculateHeatingLoad, calculateTFALoad } from './ventilation';
 
 // Psychrometric properties and coil parameters
-export { calculatePsychrometrics, calculateCoilParameters } from './psychrometrics';
+export { calculatePsychrometrics, calculateCoilParameters, dewPointFromHumidityRatio } from './psychrometrics';
 
 // Duct and pipe sizing
 export {
@@ -92,6 +92,14 @@ export {
   type ZoneVentilation62,
   type SystemVentilation62,
 } from './ventilation62';
+
+// Dehumidification strategy comparison (single-AHU subcool+reheat vs DOAS/TFA)
+export {
+  compareDehumidStrategies,
+  saturationTempFromW,
+  type DehumidStrategyInput,
+  type DehumidStrategyComparison,
+} from './dehumidStrategy';
 
 // TFA / DOAS shared resolver (single source of truth for room TFA serving + mode)
 export {

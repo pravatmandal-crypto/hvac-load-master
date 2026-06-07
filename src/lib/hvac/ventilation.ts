@@ -5,7 +5,7 @@
 
 import { RoomDetails, DesignConditions, VentilationLoadResult, HeatingLoadResult, TFALoadResult, ASHRAE_CONSTANTS } from './constants';
 import { calculateRoomVolume } from './geometry';
-import { calculatePsychrometrics } from './psychrometrics';
+import { calculatePsychrometrics, dewPointFromHumidityRatio } from './psychrometrics';
 import { EnvelopeElement } from './constants';
 
 /**
@@ -137,12 +137,34 @@ export const calculateTFALoad = (
   const indoor = calculatePsychrometrics(design.indoorTemp, design.indoorHumidity, altitude);
   const supply = calculatePsychrometrics(supplyTemp, supplyRH, altitude);
 
+  // ── Apparatus dew point + reheat split ──
+  // To strip OA moisture down to the supply humidity ratio, the coil must cool the
+  // air to its apparatus dew point (saturation temp whose Wsat = supply W). If the
+  // delivered supply is WARMER than that ADP (a neutral/warm-dry supply), the coil
+  // over-cools to the ADP and a reheat coil sensibly warms it back to the supply
+  // temp. If the supply is at/below the ADP (a cold supply), no overcool/reheat is
+  // needed and the coil simply leaves at the supply temp.
+  //   • Cold supply (e.g. 55°F/90%): ADP ≈ supply temp → reheat ≈ 0, coil → supply.
+  //   • Neutral/warm-dry supply (e.g. 79°F/60%): ADP ≈ 64°F → coil cools to 64°F,
+  //     then reheats 64→79°F. Sizing the coil only to the supply temp would understate
+  //     it by exactly the reheat (the moisture can't be removed without reaching ADP).
+  // Reheat is season-independent — it depends only on the supply setpoint. A small
+  // deadband absorbs the few °F a real coil's bypass factor delivers above its ADP.
+  const REHEAT_DEADBAND_F = 5;
+  const coilADP = dewPointFromHumidityRatio(supply.humidityRatio, altitude);
+  const needsReheat = supplyTemp - coilADP >= REHEAT_DEADBAND_F;
+  const coilLeavingTemp = needsReheat ? coilADP : supplyTemp;
+  const reheatCoilSensible = needsReheat
+    ? ASHRAE_CONSTANTS.SENSIBLE_COOLING_CONSTANT * cfm * (supplyTemp - coilADP)
+    : 0;
+
   // ── TFA coil load (DOAS sizes off this) ──
-  // Sensible: cool OA from outdoor to supply temp.
-  // Latent: remove moisture from OA W to supply W.
-  const deltaT_OAtoSupply = design.outdoorTemp - supplyTemp;
+  // Sensible: cool OA from outdoor down to the coil LEAVING temp (ADP when reheat is
+  // required, else the supply temp). Latent: remove moisture from OA W to supply W
+  // (which is the saturated W at the ADP — same value either way).
+  const deltaT_OAtoLeaving = design.outdoorTemp - coilLeavingTemp;
   const deltaW_OAtoSupply = outdoor.humidityRatio - supply.humidityRatio;
-  let coilSensible = ASHRAE_CONSTANTS.SENSIBLE_COOLING_CONSTANT * cfm * deltaT_OAtoSupply;
+  let coilSensible = ASHRAE_CONSTANTS.SENSIBLE_COOLING_CONSTANT * cfm * deltaT_OAtoLeaving;
   let coilLatent =
     ASHRAE_CONSTANTS.LATENT_COOLING_CONSTANT * cfm * (deltaW_OAtoSupply * ASHRAE_CONSTANTS.GRAINS_PER_LB);
 
@@ -216,6 +238,8 @@ export const calculateTFALoad = (
     supplyTemp,
     supplyHumidity: supplyRH,
     supplyHumidityRatio: supply.humidityRatio,
+    coilADP,
+    reheatCoilSensible,
     winterCoilSensible,
     warning,
   };

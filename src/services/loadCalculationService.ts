@@ -194,10 +194,15 @@ export async function calculateAndPersistRoom(
   const presetTotalACH = getRecommendedAch(room.achProfile ?? room.activityType);
   const totalSupplyACH = Math.max(presetTotalACH, rd.facph);
   const totalSupplyCFM = (calculateRoomVolume(rd) * totalSupplyACH) / 60;
-  // TFA-served space coils are sized by their thermal (sensible-at-ADP) airflow only.
-  // The recommended-ACH air-change rate is a ventilation duty handled by the DOAS, so
-  // it imposes no supply floor on the space coil. (This pure path models tfa-served.)
-  const designSupplyCFM = isTFA ? coil.minAdpSensibleCFM : Math.max(coil.minAdpSensibleCFM, totalSupplyCFM);
+  // TFA-served airflow (corrected 2026-06-07): the DOAS supplies only the OUTDOOR-AIR
+  // air change (oaCFM = tfa.cfm); the room's total air change still has to be delivered,
+  // so the space AHU must move the RECIRCULATION balance (totalSupplyCFM − oaCFM). The
+  // space coil airflow is therefore governed by that recirc floor, not the thermal-only
+  // minimum (which collapsed to absurd values like 19 CFM on high-ACH rooms). The coil
+  // TR stays small (load is small after the cold-DOAS credit); only the airflow grows.
+  const designSupplyCFM = isTFA
+    ? Math.max(coil.minAdpSensibleCFM, totalSupplyCFM - (tfa?.cfm ?? 0))
+    : Math.max(coil.minAdpSensibleCFM, totalSupplyCFM);
   // cfmTR is a SANITY RATIO only — kept for display/warning. It does NOT
   // govern plant sizing. The 400 CFM/TR rule is rule-of-thumb air-system
   // sizing; OEM unit ratings already enforce the TR↔CFM coupling, and
@@ -241,7 +246,9 @@ export async function calculateAndPersistRoom(
     dc.indoorTemp, dc.indoorHumidity, dc.altitude || 0,
     bf, 35, 65, minAdp,
   );
-  const monsoonDesignCFM = isTFA ? monsoonCoilParams.minAdpSensibleCFM : Math.max(monsoonCoilParams.minAdpSensibleCFM, totalSupplyCFM);
+  const monsoonDesignCFM = isTFA
+    ? Math.max(monsoonCoilParams.minAdpSensibleCFM, totalSupplyCFM - (monsoonTfa?.cfm ?? 0))
+    : Math.max(monsoonCoilParams.minAdpSensibleCFM, totalSupplyCFM);
   const monsoonCfmTR = monsoonDesignCFM / 400;
   const monsoonGoverningTR = monsoonGrandTotalTR;
   const monsoonRequiredTR = monsoonGrandTotalTR * (1 + overallSafetyPct / 100);
@@ -297,6 +304,11 @@ export async function calculateAndPersistRoom(
           governs: (monsoonTfa && monsoonTfa.coilSensible + monsoonTfa.coilLatent > tfa.coilSensible + tfa.coilLatent
             ? 'monsoon'
             : 'summer') as 'summer' | 'monsoon',
+          // Summer dehumidification reheat (cool-to-ADP then reheat to supply temp).
+          // Season-independent — depends only on the supply setpoint — so the summer
+          // value covers monsoon too. ADP reported for traceability on the spec sheet.
+          coilADP: tfa.coilADP,
+          reheatCoilBTUH: tfa.reheatCoilSensible,
         }
       : null,
     coil,
@@ -355,6 +367,10 @@ export async function calculateAndPersistRoom(
           _calcTfaWinterHeatingBTUH: parseFloat(
             ((tfa.winterCoilSensible || 0) * (1 + overallSafetyPct / 100)).toFixed(0),
           ),
+          // Summer dehumidification reheat coil (cool-to-ADP then reheat to supply).
+          // Persisted RAW (no overall safety) to match its sibling _calcTfaCoilBTUH —
+          // both are DOAS cooling-season duties sized off the same coil process.
+          _calcTfaReheatBTUH: parseFloat((tfa.reheatCoilSensible || 0).toFixed(0)),
           ...(monsoonTfa
             ? {
                 _calcMonsoonTfaCoilBTUH: parseFloat(

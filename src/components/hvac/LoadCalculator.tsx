@@ -188,6 +188,7 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
       _calcMonsoonTfaCoilBTUH: r._calcMonsoonTfaCoilBTUH ?? r.data?._calcMonsoonTfaCoilBTUH,
       _calcMonsoonTfaCoilTR: r._calcMonsoonTfaCoilTR ?? r.data?._calcMonsoonTfaCoilTR,
       _calcTfaWinterHeatingBTUH: r._calcTfaWinterHeatingBTUH ?? r.data?._calcTfaWinterHeatingBTUH,
+      _calcTfaReheatBTUH: r._calcTfaReheatBTUH ?? r.data?._calcTfaReheatBTUH,
       _calcTfaOnly: r._calcTfaOnly ?? r.data?._calcTfaOnly,
     };
   };
@@ -592,10 +593,13 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
     const presetTotalACH = getRecommendedAch(roomSource.achProfile ?? roomSource.activityType);
     const totalSupplyACH = Math.max(presetTotalACH, rd.facph);
     const totalSupplyCFM = (calculateRoomVolume(rd) * totalSupplyACH) / 60;
-    // TFA-served space coils are sized by their thermal (sensible-at-ADP) airflow only —
-    // the recommended-ACH air-change duty belongs to the DOAS. tfa-only corridors are fed
-    // by the DOAS supply, so they keep the air-change airflow (≈ the TFA supply CFM).
-    const designSupplyCFM = (isTFA && !isTfaOnly) ? coil.minAdpSensibleCFM : Math.max(coil.minAdpSensibleCFM, totalSupplyCFM);
+    // TFA-served airflow (corrected 2026-06-07): the DOAS supplies only the OA air change;
+    // the space AHU must still move the recirculation balance (totalSupplyCFM − oaCFM). So
+    // size by max(thermal-at-ADP, recirc CFM), not thermal-only (which dropped the room's
+    // air change). tfa-only corridors are fed entirely by the DOAS, so they keep total.
+    const designSupplyCFM = (isTFA && !isTfaOnly)
+      ? Math.max(coil.minAdpSensibleCFM, totalSupplyCFM - (tfa?.cfm ?? 0))
+      : Math.max(coil.minAdpSensibleCFM, totalSupplyCFM);
     // Plant TR is load-only (2026-05-20). cfmTR retained as sanity ratio.
     const cfmTR = designSupplyCFM / 400;
     const governingTR = grandTotalTR;
@@ -631,7 +635,9 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
       dc.indoorTemp, dc.indoorHumidity, dc.altitude || 0,
       bf, 35, 65, getMinAdp(project?.systemType),
     );
-    const monsoonDesignCFM = (isTFA && !isTfaOnly) ? monsoonCoilParams.minAdpSensibleCFM : Math.max(monsoonCoilParams.minAdpSensibleCFM, totalSupplyCFM);
+    const monsoonDesignCFM = (isTFA && !isTfaOnly)
+      ? Math.max(monsoonCoilParams.minAdpSensibleCFM, totalSupplyCFM - (monsoonTfa?.cfm ?? 0))
+      : Math.max(monsoonCoilParams.minAdpSensibleCFM, totalSupplyCFM);
     const monsoonCfmTR = monsoonDesignCFM / 400;
     const monsoonGoverningTR = monsoonGrandTotalTR;
     const monsoonRequiredTR = monsoonGoverningTR * (1 + overallSafetyPct / 100);
@@ -787,6 +793,13 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
       // `tfa` carries it. Overall safety applied to mirror _calcWinterHeatingBTUH.
       _calcTfaWinterHeatingBTUH: isTFA && tfa
         ? parseFloat(((tfa.winterCoilSensible || 0) * (1 + overallSafetyPct / 100)).toFixed(0))
+        : deleteField(),
+      // TFA/DOAS summer reheat coil — cools OA to its apparatus dew point (to dry it
+      // to supply W) then sensibly reheats to the supply temp. Season-independent
+      // (a property of the supply setpoint), so summer `tfa` carries it. Persisted
+      // RAW (no overall safety) to match its sibling _calcTfaCoilBTUH.
+      _calcTfaReheatBTUH: isTFA && tfa
+        ? parseFloat((tfa.reheatCoilSensible || 0).toFixed(0))
         : deleteField(),
       updatedAt: new Date(),
     });
@@ -949,9 +962,12 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
       const presetTotalACH = getRecommendedAch(room.achProfile ?? room.activityType);
       const totalSupplyACH = Math.max(presetTotalACH, rd.facph);
       const totalSupplyCFM = (calculateRoomVolume(rd) * totalSupplyACH) / 60;
-      // TFA-served: sized by thermal airflow only; recommended-ACH is the DOAS's duty.
-      // tfa-only corridors keep the air-change airflow (≈ the TFA supply CFM).
-      const designSupplyCFM = (isTFA && !isTfaOnly) ? coilLocal.minAdpSensibleCFM : Math.max(coilLocal.minAdpSensibleCFM, totalSupplyCFM);
+      // TFA-served airflow (corrected 2026-06-07): DOAS supplies the OA air change; the
+      // space AHU moves the recirc balance (totalSupplyCFM − oaCFM). Size by the recirc
+      // floor, not thermal-only. tfa-only corridors are DOAS-fed, so they keep total.
+      const designSupplyCFM = (isTFA && !isTfaOnly)
+        ? Math.max(coilLocal.minAdpSensibleCFM, totalSupplyCFM - (tfa?.cfm ?? 0))
+        : Math.max(coilLocal.minAdpSensibleCFM, totalSupplyCFM);
 
       // Phase D: carrying capacity used by tfa-only rooms (and reported for
       // all TFA-served rooms as a sanity check). Deficit > 0 = undersized.

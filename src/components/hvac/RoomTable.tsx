@@ -29,6 +29,7 @@ import {
   calcRoomVbz,
   resolveRoomTfa,
   calculateTFALoad,
+  compareDehumidStrategies,
   type WallColor,
   type DesignConditions,
   type RoomDetails,
@@ -386,11 +387,14 @@ function useRoomCalc(room: any, elements: any[], designConditions: DesignConditi
     const presetTotalACH = getRecommendedAch(room.achProfile ?? room.activityType);
     const totalSupplyACH = Math.max(presetTotalACH, rd.facph);
     const totalSupplyCFM = (calculateRoomVolume(rd) * totalSupplyACH) / 60;
-    // TFA-served space coils are sized by thermal (sensible-at-ADP) airflow only — the
-    // recommended-ACH air-change duty is handled by the DOAS. tfa-only corridors keep
-    // the air-change airflow (≈ the TFA supply CFM).
-    const designCFM = (isTFA && !isTfaOnly) ? coil.minAdpSensibleCFM : Math.max(coil.minAdpSensibleCFM, totalSupplyCFM);
-    const achGovernsAirflow = !(isTFA && !isTfaOnly) && coil.minAdpSensibleCFM < totalSupplyCFM;
+    // TFA-served airflow (corrected 2026-06-07): DOAS supplies only the OA air change;
+    // the space AHU moves the recirculation balance (totalSupplyCFM − oaCFM). tfa-only
+    // corridors are DOAS-fed, so they keep the full air-change airflow.
+    const airChangeFloorCFM = (isTFA && !isTfaOnly)
+      ? Math.max(0, totalSupplyCFM - (tfa?.cfm ?? 0))
+      : totalSupplyCFM;
+    const designCFM = Math.max(coil.minAdpSensibleCFM, airChangeFloorCFM);
+    const achGovernsAirflow = coil.minAdpSensibleCFM < airChangeFloorCFM;
     // cfmTR is a SANITY RATIO only (display + warning). It does NOT govern plant
     // sizing — Plant TR = grand-total coil load only. (Decision: 2026-05-20.)
     const cfmTR = designCFM / 400;
@@ -408,6 +412,22 @@ function useRoomCalc(room: any, elements: any[], designConditions: DesignConditi
 
     const baselineOutdoorPsych = calculatePsychrometrics(defaultOutdoorTemp, defaultOutdoorRh, defaultAltitude);
     const baselineIndoorPsych = calculatePsychrometrics(defaultIndoorTemp, defaultIndoorRh, defaultAltitude);
+
+    // ── Dehumidification strategy comparison (single-AHU subcool+reheat vs DOAS/TFA) ──
+    // Use the real OA load (vent × (1−BF)) regardless of the room's current TFA mode,
+    // so the A-vs-B contrast holds either way. Self-flags only on latent/OA-dominated
+    // rooms; returns flagged:false (panel hidden) on ordinary comfort rooms.
+    const dehumidCompare = compareDehumidStrategies({
+      spaceSensible: ersh,
+      spaceLatent: erlh,
+      oaSensible: vent.sensible * (1 - BF),
+      oaLatent: vent.latent * (1 - BF),
+      totalSupplyCFM: designCFM,
+      oaCFM: vent.cfm,
+      indoorTemp: designConditions.indoorTemp,
+      indoorRH: designConditions.indoorHumidity,
+      altitude: altFt,
+    });
 
     return {
       rd,
@@ -466,6 +486,7 @@ function useRoomCalc(room: any, elements: any[], designConditions: DesignConditi
       presetTotalACH,
       totalSupplyACH,
       totalSupplyCFM,
+      dehumidCompare,
     };
   }, [room, elements, designConditions, project]);
 }
@@ -2330,6 +2351,36 @@ function RoomDetail({
             </div>
           )}
         </div>
+
+        {/* Dehumidification strategy comparison — auto-shown only for latent/OA-dominated rooms */}
+        {c.dehumidCompare?.flagged && (
+          <details className="rounded-xl border border-teal-200 dark:border-teal-800 bg-teal-50/30 dark:bg-teal-950/20 p-4">
+            <summary className="cursor-pointer list-none flex items-center justify-between gap-2">
+              <span className="text-xs font-bold text-teal-700 dark:text-teal-300 uppercase tracking-widest">Dehumidification Strategy — Single AHU vs DOAS/TFA</span>
+              <span className="text-[10px] font-semibold text-teal-700 dark:text-teal-300 bg-teal-100 dark:bg-teal-900/40 rounded-full px-2 py-0.5 shrink-0">latent-dominated · RSHF {f1(c.dehumidCompare.rshf * 100)}%</span>
+            </summary>
+            <div className="mt-3">
+              <div className="grid grid-cols-2 gap-3">
+                <div className="bg-white dark:bg-slate-800 border border-teal-100 dark:border-teal-900 rounded-lg p-3">
+                  <p className="text-[11px] font-bold text-slate-700 dark:text-slate-200 mb-2">Single AHU (subcool + reheat)</p>
+                  <div className="flex justify-between text-xs py-0.5"><span className="text-slate-500 dark:text-slate-400">Cooling</span><span className="font-bold text-teal-800 dark:text-teal-300">{f1(c.dehumidCompare.schemeA.coolingTR)} TR</span></div>
+                  <div className="flex justify-between text-xs py-0.5"><span className="text-slate-500 dark:text-slate-400">Reheat</span><span className="font-semibold text-amber-700 dark:text-amber-400">{f1(c.dehumidCompare.schemeA.reheatTR)} TR</span></div>
+                </div>
+                <div className="bg-white dark:bg-slate-800 border border-teal-100 dark:border-teal-900 rounded-lg p-3">
+                  <p className="text-[11px] font-bold text-slate-700 dark:text-slate-200 mb-2">DOAS / TFA split</p>
+                  <div className="flex justify-between text-xs py-0.5"><span className="text-slate-500 dark:text-slate-400">Cooling (total)</span><span className="font-bold text-teal-800 dark:text-teal-300">{f1(c.dehumidCompare.schemeB.totalCoolingTR)} TR</span></div>
+                  <div className="flex justify-between text-[10px] py-0.5 text-slate-400"><span>· DOAS coil</span><span>{f1(c.dehumidCompare.schemeB.doasCoolingTR)} TR</span></div>
+                  <div className="flex justify-between text-[10px] py-0.5 text-slate-400"><span>· Recirc coil</span><span>{f1(c.dehumidCompare.schemeB.recircCoolingTR)} TR</span></div>
+                  <div className="flex justify-between text-xs py-0.5"><span className="text-slate-500 dark:text-slate-400">Reheat</span><span className="font-semibold text-amber-700 dark:text-amber-400">{f1(c.dehumidCompare.schemeB.reheatTR)} TR</span></div>
+                </div>
+              </div>
+              <div className="mt-3 p-2.5 rounded-lg bg-teal-100/60 dark:bg-teal-900/30 text-xs text-teal-800 dark:text-teal-200">
+                Treating only the ~{Math.round(c.vent.cfm)} CFM fresh-air stream cuts chiller load ≈ <strong>{f1(c.dehumidCompare.coolingSavingTR)} TR</strong> vs deep-cooling the full {Math.round(c.designCFM)} CFM (and ≈ {f1(c.dehumidCompare.reheatSavingTR)} TR less reheat).
+              </div>
+              <p className="mt-2 text-[10px] text-slate-400 dark:text-slate-500">Indicative sizing comparison — excludes energy recovery, part-load behaviour, and equipment selection.</p>
+            </div>
+          </details>
+        )}
       </div>
       )}
 

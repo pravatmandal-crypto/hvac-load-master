@@ -130,6 +130,10 @@ type DetailedMetrics = {
   tfaCfm: number;
   tfaSupplyOffsetSen: number;
   tfaSupplyOffsetLat: number;
+  // Summer dehumidification reheat (cool OA to ADP, then reheat to supply temp).
+  // Zero for a cold supply (within bypass of its ADP) — see lib/hvac/ventilation.ts.
+  tfaReheat: number;       // BTU/h
+  tfaCoilADP: number;      // °F — apparatus dew point at supply W
   // Coil parameters
   indicatedAdp: number;
   selectedAdp: number;
@@ -223,6 +227,11 @@ const n1  = (v: number) => v.toFixed(1);
 const n2  = (v: number) => v.toFixed(2);
 const n4  = (v: number) => v.toFixed(4);
 const dash = (v: number) => v > 0 ? n0(v) : '-';
+// Temperature helpers — report shows °F and °C side by side.
+const fToC   = (f: number) => (f - 32) * 5 / 9;
+const dualT0 = (f: number) => `${Math.round(f)} / ${fToC(f).toFixed(1)}`;        // cell value; unit (°F / °C) lives in the row label
+const dualT1 = (f: number) => `${f.toFixed(1)} / ${fToC(f).toFixed(1)}`;
+const dualTu = (f: number) => `${f.toFixed(1)}°F / ${fToC(f).toFixed(1)}°C`;      // inline, units inline
 
 // ─── Header / Footer ─────────────────────────────────────────────────────────
 
@@ -748,7 +757,12 @@ const computeDetailed = (room: any, elements: any[], dc: DC, project: any): Deta
   // TFA-served space coils are sized by thermal (sensible-at-ADP) airflow only — the
   // recommended-ACH air-change duty belongs to the DOAS. tfa-only corridors keep the
   // air-change airflow (≈ the TFA supply CFM).
-  const designCfm    = (isTFA && !isTfaOnly) ? coil.minAdpSensibleCFM : Math.max(coil.minAdpSensibleCFM, totalSupplyCfm);
+  // TFA-served airflow (corrected 2026-06-07): DOAS supplies only the OA air change;
+  // the space AHU moves the recirculation balance (totalSupplyCfm − oaCFM). Size by the
+  // recirc floor, not the thermal-only minimum (which dropped the room's air change).
+  const designCfm    = (isTFA && !isTfaOnly)
+    ? Math.max(coil.minAdpSensibleCFM, totalSupplyCfm - (tfa?.cfm ?? 0))
+    : Math.max(coil.minAdpSensibleCFM, totalSupplyCfm);
   const cfmTr        = designCfm / 400;
   // Plant TR is LOAD-ONLY (locked policy 2026-05-20). cfmTr is a sanity ratio only.
   const governingTr  = loadTr;
@@ -758,6 +772,9 @@ const computeDetailed = (room: any, elements: any[], dc: DC, project: any): Deta
   const tfaCoilLatent   = tfa ? tfa.coilLatent   : 0;
   const tfaCoilTr       = (tfaCoilSensible + tfaCoilLatent) / 12000;
   const tfaCfm          = tfa ? tfa.cfm : 0;
+  // Summer dehumidification reheat coil on the DOAS (cool-to-ADP then reheat to supply).
+  const tfaReheat       = tfa ? (tfa.reheatCoilSensible || 0) : 0;
+  const tfaCoilADP      = tfa ? tfa.coilADP : 0;
 
   // ── Heating safety + humidification (used when called with winter DC) ──────
   const heatingSafetyPct  = asNum(room?.heatingSafetyPercent, 10);
@@ -823,6 +840,7 @@ const computeDetailed = (room: any, elements: any[], dc: DC, project: any): Deta
     // TFA / DOAS — zero when the room isn't DOAS-served.
     isTFA, isTfaOnly,
     tfaCoilSensible, tfaCoilLatent, tfaCoilTr, tfaCfm,
+    tfaReheat, tfaCoilADP,
     tfaSupplyOffsetSen: tfaOffSen, tfaSupplyOffsetLat: tfaOffLat,
     indicatedAdp: coil.indicatedADP,
     selectedAdp:  coil.selectedADP,
@@ -1292,12 +1310,12 @@ export const generatePDFReport = (
 
   const condBody: (string | number)[][] = [
     ['OUTDOOR', ...seasons.map(() => '')],
-    ['  Dry Bulb (°F)',             ...seasonPsycho.map((sp) => n0(sp.season.outdoorTemp))],
+    ['  Dry Bulb (°F / °C)',        ...seasonPsycho.map((sp) => dualT0(sp.season.outdoorTemp))],
     ['  Relative Humidity (%)',     ...seasonPsycho.map((sp) => n0(sp.season.outdoorHumidity))],
     ['  Humidity Ratio (lb/lb)',    ...seasonPsycho.map((sp) => n4(sp.outdoor.humidityRatio))],
     ['  Enthalpy (BTU/lb dry air)', ...seasonPsycho.map((sp) => n2(sp.outdoor.enthalpy))],
     ['INDOOR (Design Space)', ...seasons.map(() => '')],
-    ['  Dry Bulb (°F)',             ...seasonPsycho.map((sp) => n0(sp.season.indoorTemp))],
+    ['  Dry Bulb (°F / °C)',        ...seasonPsycho.map((sp) => dualT0(sp.season.indoorTemp))],
     ['  Relative Humidity (%)',     ...seasonPsycho.map((sp) => n0(sp.season.indoorHumidity))],
     ['  Humidity Ratio (lb/lb)',    ...seasonPsycho.map((sp) => n4(sp.indoor.humidityRatio))],
     ['  Enthalpy (BTU/lb dry air)', ...seasonPsycho.map((sp) => n2(sp.indoor.enthalpy))],
@@ -1351,6 +1369,12 @@ export const generatePDFReport = (
   // TFA/DOAS fresh-air winter heating coil — project total (season-independent).
   const projectTfaWinterHeatingBTUH = entities.reduce(
     (s: number, e: any) => s + e.rooms.reduce((rs: number, r: any) => rs + (Number(r._calcTfaWinterHeatingBTUH) || 0), 0),
+    0,
+  );
+  // TFA/DOAS summer dehumidification reheat coil — project total (season-independent;
+  // a function of the supply setpoint). Zero unless a neutral/warm-dry supply is set.
+  const projectTfaReheatBTUH = entities.reduce(
+    (s: number, e: any) => s + e.rooms.reduce((rs: number, r: any) => rs + (Number(r._calcTfaReheatBTUH) || 0), 0),
     0,
   );
   // Is any DOAS fed by the main chiller plant? If so, its coil load is ON the plant
@@ -1431,6 +1455,7 @@ export const generatePDFReport = (
           ? `Chiller ${n2(plantRequiredTR)} TR (diversified)  +  separate TFA unit ${n2(projectTfaCoilTR)} TR  ·  ${n0(submissionCFM)} CFM`
           : `${n2(plantRequiredTR > 0 ? plantRequiredTR : recTR)} TR  and  ${n0(submissionCFM)} CFM`],
       ...(hasTfa ? [['TFA / DOAS Coil Capacity', `${n2(projectTfaCoilTR)} TR  (outdoor-air coil, governing season)${chillerFedTfa ? ' — on main chiller plant' : ' — dedicated TFA unit'}`]] as [string,string][] : []),
+      ...(hasTfa && projectTfaReheatBTUH > 0 ? [['TFA / DOAS Reheat Coil', `${n0(projectTfaReheatBTUH)} BTU/h  (${n2(projectTfaReheatBTUH / 12000)} TR · cool-to-ADP then reheat to supply temp)`]] as [string,string][] : []),
       ['Total Installed IDU / FCU Capacity', totalIDUStr],
       ['Total Installed Plant / ODU Capacity', totalPlantStr],
       ['Diversity Factor Applied',         diversityStr],
@@ -1773,10 +1798,15 @@ export const generatePDFReport = (
       const mm = monDcE ? computeDetailed(room, envelopeElements[room.id] || [], monDcE, project) : null;
       const wm = winDcE ? computeDetailed(room, envelopeElements[room.id] || [], winDcE, project) : null;
 
-      const sumTR  = num(room._calcGoverningTR)        ?? sm.governingTr;
-      const monTR  = num(room._calcMonsoonGoverningTR) ?? (mm?.governingTr ?? 0);
-      const govTR  = num(room._calcOverallGoverningTR) ?? Math.max(sumTR, monTR);
-      const cfm    = num(room._calcOverallDesignCFM)   ?? Math.max(sm.designCfm, mm?.designCfm ?? 0);
+      // Reconcile persisted with the live recompute (take the max), same as the
+      // TFA-coil column below — so a stale or partial persist (e.g. a tfa-served
+      // room whose cold-DOAS credit zeroed _calcGoverningTR while the live space
+      // coil is non-zero) can't make this schedule disagree with the per-room
+      // cooling breakdown / zone summary, which both recompute live.
+      const sumTR  = Math.max(num(room._calcGoverningTR)        ?? 0, sm.governingTr);
+      const monTR  = Math.max(num(room._calcMonsoonGoverningTR) ?? 0, mm?.governingTr ?? 0);
+      const govTR  = Math.max(num(room._calcOverallGoverningTR) ?? 0, sumTR, monTR);
+      const cfm    = Math.max(num(room._calcOverallDesignCFM)   ?? 0, sm.designCfm, mm?.designCfm ?? 0);
       // TFA coil duty — governing (summer/monsoon) persisted value, falling back to
       // the live recompute when the room object doesn't carry the persisted _calc
       // fields, so the schedule matches the per-room cooling breakdown.
@@ -2016,6 +2046,9 @@ export const generatePDFReport = (
                 ['  TFA Coil Sensible',  n0(m.tfaCoilSensible), '—'],
                 ['  TFA Coil Latent',    '—',                   n0(m.tfaCoilLatent)],
                 [{ content: `  TFA Coil Total   =   ${n0(m.tfaCoilSensible + m.tfaCoilLatent)} BTU/h   (${n2(m.tfaCoilTr)} TR · ${n0(m.tfaCfm)} CFM OA)`, colSpan: 3, styles: { fontStyle: 'bold', fillColor: C.total } }],
+                ...(m.tfaReheat > 0
+                  ? [[{ content: `  TFA Reheat Coil   =   ${n0(m.tfaReheat)} BTU/h   (cool OA to ADP ${dualTu(m.tfaCoilADP)} to dehumidify, then sensibly reheat to the DOAS supply temp)`, colSpan: 3, styles: { fontStyle: 'bold', fillColor: C.total } }]] as any[]
+                  : []),
                 ...((m.tfaSupplyOffsetSen > 0 || m.tfaSupplyOffsetLat > 0)
                   ? [['  Cold-DOAS supply credit to space', m.tfaSupplyOffsetSen > 0 ? `-${n0(m.tfaSupplyOffsetSen)}` : '—', m.tfaSupplyOffsetLat > 0 ? `-${n0(m.tfaSupplyOffsetLat)}` : '—']]
                   : []),
@@ -2137,11 +2170,11 @@ export const generatePDFReport = (
           startY: y,
           head: [['Parameter', 'Outdoor', 'Indoor', 'Supply Air', 'Coil / Notes']],
           body: isWinter ? [
-            ['Dry Bulb Temp (°F)',       n1(dc.outdoorTemp),                      n1(dc.indoorTemp),                      '—', '—'],
+            ['Dry Bulb Temp (°F / °C)',  dualT1(dc.outdoorTemp),                  dualT1(dc.indoorTemp),                  '—', '—'],
             ['Humidity Ratio (gr/lb)',   n1(outdoorPsycho.humidityRatio * 7000), n1(indoorPsycho.humidityRatio * 7000), '—', 'Winter — no coil dehumidification'],
             ['Enthalpy h (BTU/lb)',      n2(outdoorPsycho.enthalpy),             n2(indoorPsycho.enthalpy),              '—', '—'],
           ] : [
-            ['Dry Bulb Temp (°F)',       n1(dc.outdoorTemp),                      n1(dc.indoorTemp),                      n1(tSup),           `ADP ${n0(m.selectedAdp)} °F  (Ind. ${n1(m.indicatedAdp)} °F)`],
+            ['Dry Bulb Temp (°F / °C)',  dualT1(dc.outdoorTemp),                  dualT1(dc.indoorTemp),                  dualT1(tSup),       `ADP ${dualTu(m.selectedAdp)}  (Ind. ${dualTu(m.indicatedAdp)})`],
             ['Humidity Ratio (gr/lb)',   n1(outdoorPsycho.humidityRatio * 7000), n1(indoorPsycho.humidityRatio * 7000), n1(wSup * 7000),    `dW coil = ${n1(dwCoil)} gr/lb`],
             // RSHF (room) drives reheat sizing; GSHF (coil incl. OA + parasitic)
             // drives ADP. Show both since they answer different questions.
@@ -2432,8 +2465,8 @@ export const generatePDFReport = (
           doc.text('BTU/h  Design Heating Load', pieX + pieW / 2, chartY + chartRowH / 2 + 8, { align: 'center' });
           doc.setFontSize(6.5);
           doc.setTextColor(...C.ink);
-          doc.text(`Outdoor:  ${n0(dc.outdoorTemp)} °F / ${n0(dc.outdoorHumidity)}%`,   pieX + 6, chartY + chartRowH / 2 + 16);
-          doc.text(`Indoor:   ${n0(dc.indoorTemp)} °F / ${n0(dc.indoorHumidity)}%`,     pieX + 6, chartY + chartRowH / 2 + 22);
+          doc.text(`Outdoor:  ${n0(dc.outdoorTemp)}°F (${fToC(dc.outdoorTemp).toFixed(1)}°C) / ${n0(dc.outdoorHumidity)}% RH`,   pieX + 6, chartY + chartRowH / 2 + 16);
+          doc.text(`Indoor:   ${n0(dc.indoorTemp)}°F (${fToC(dc.indoorTemp).toFixed(1)}°C) / ${n0(dc.indoorHumidity)}% RH`,     pieX + 6, chartY + chartRowH / 2 + 22);
         }
 
         y = chartY + chartRowH + 6;
@@ -2530,8 +2563,8 @@ export const generatePDFReport = (
       y += 8;
 
       const humBody: string[][] = [
-        ['Outdoor Air',  `${winDcRoom.outdoorTemp}°F / ${winDcRoom.outdoorHumidity}% RH`, `W = ${wm.humWOutGr.toFixed(1)} gr/lb`],
-        ['Indoor Target', `${winDcRoom.indoorTemp}°F / ${winDcRoom.indoorHumidity}% RH`, `W = ${wm.humWInGr.toFixed(1)} gr/lb`],
+        ['Outdoor Air',  `${dualTu(winDcRoom.outdoorTemp)} / ${winDcRoom.outdoorHumidity}% RH`, `W = ${wm.humWOutGr.toFixed(1)} gr/lb`],
+        ['Indoor Target', `${dualTu(winDcRoom.indoorTemp)} / ${winDcRoom.indoorHumidity}% RH`, `W = ${wm.humWInGr.toFixed(1)} gr/lb`],
         ['Moisture Deficit dW', `${wm.humDeltaWGr.toFixed(1)} gr/lb`, wm.humNeeded ? 'Humidification needed' : 'Sufficient — no humidifier'],
         ['RH after heating (no humidifier)', `${wm.humRhAfterHeating}%`, wm.humRhAfterHeating < 30 ? '⚠ Below ASHRAE 55 min (30%)' : '✓ Within comfort range'],
       ];

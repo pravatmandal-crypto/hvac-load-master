@@ -247,6 +247,13 @@ export interface TFALoadResult {
   supplyTemp: number;          // °F
   supplyHumidity: number;      // % RH
   supplyHumidityRatio: number; // lb/lb (computed)
+  // Summer dehumidification REHEAT. To hit the supply humidity ratio the cooling
+  // coil must over-cool the OA to its apparatus dew point (saturation at supply W),
+  // then sensibly reheat it back up to the delivered supply temp. This is the
+  // classic cool-to-ADP-then-reheat duty (large for a neutral/warm-dry supply,
+  // near-zero for a cold supply that leaves the coil already near its dew point).
+  coilADP: number;             // °F — apparatus dew point (saturation temp at supply W)
+  reheatCoilSensible: number;  // BTU/h — sensible reheat from coilADP up to supplyTemp
   // Winter heating load on the TFA unit (heats OA from winter outdoor to supply).
   // Zero when winter inputs are missing.
   winterCoilSensible: number;  // BTU/h

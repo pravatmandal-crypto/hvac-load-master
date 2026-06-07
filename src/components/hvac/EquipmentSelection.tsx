@@ -24,7 +24,7 @@ import type { EquipmentModel } from '../../constants/equipment-catalog';
 import GlobalEquipmentLibrary from './GlobalEquipmentLibrary';
 import { getLibraryItemsByType, GLOBAL_LIB_COLLECTION } from '../../services/equipmentLibraryService';
 import { ComboboxInput } from '../ui/combobox-input';
-import { calculateCoilParameters, calculatePsychrometrics, EZ_OPTIONS, calcZoneVentilation, calcSystemVentilation62, calculateEnvelopeGain, calculateInternalGains, calculateVentilationLoad, calculateTFALoad, calculateParasiticGains, getRecommendedAch, getMinAdp, resolveRoomTfa } from '../../lib/hvac';
+import { calculateCoilParameters, calculatePsychrometrics, dewPointFromHumidityRatio, EZ_OPTIONS, calcZoneVentilation, calcSystemVentilation62, calculateEnvelopeGain, calculateInternalGains, calculateVentilationLoad, calculateTFALoad, calculateParasiticGains, getRecommendedAch, getMinAdp, resolveRoomTfa } from '../../lib/hvac';
 import { calculateRoomVolume } from '../../lib/hvac/geometry';
 import SpecSheet from './SpecSheet';
 import type {
@@ -3776,11 +3776,13 @@ export default function EquipmentSelection({
     const totalACH   = Math.max(presetACH, rd.facph);
     const supplyCFM  = (calculateRoomVolume(rd) * totalACH) / 60;
     const coilParams = calculateCoilParameters(coilSen, coilLat, dc.indoorTemp, dc.indoorHumidity, dc.altitude || 0, bf, 35, 65, getMinAdp(systemType));
-    // TFA-served space coils are sized by thermal (sensible-at-ADP) airflow only — the
-    // recommended-ACH air-change duty belongs to the DOAS. tfa-only corridors keep the
-    // air-change airflow (≈ the TFA supply CFM). Use minAdpSensibleCFM (fixed ADP), not
-    // dehumidifiedCFM (floating ADP). Matches LC. See CLAUDE.md "Critical invariant".
-    const designCFM  = (isTFA && !isTfaOnly) ? coilParams.minAdpSensibleCFM : Math.max(coilParams.minAdpSensibleCFM, supplyCFM);
+    // TFA-served airflow (corrected 2026-06-07): DOAS supplies only the OA air change;
+    // the space AHU moves the recirculation balance (supplyCFM − oaCFM). Size by the recirc
+    // floor, not thermal-only. tfa-only corridors are DOAS-fed, so they keep total. Use
+    // minAdpSensibleCFM (fixed ADP), not dehumidifiedCFM. See CLAUDE.md "Critical invariant".
+    const designCFM  = (isTFA && !isTfaOnly)
+      ? Math.max(coilParams.minAdpSensibleCFM, supplyCFM - (tfa?.cfm ?? 0))
+      : Math.max(coilParams.minAdpSensibleCFM, supplyCFM);
     const cfmTR      = designCFM / 400;
     // Plant TR is load-only (2026-05-20). cfmTR retained as sanity ratio.
     const governingTR = grandTotalTR;
@@ -3806,7 +3808,9 @@ export default function EquipmentSelection({
     const mCoilLat = isTfaOnly ? 0 : (isTFA ? Math.max(0, mErlh - mTfaOffLat) : mErlh + mOaLat);
     const mTotalTR = (mCoilSen + mCoilLat) / 12000;
     const mCoilP   = calculateCoilParameters(mCoilSen, mCoilLat, dc.indoorTemp, dc.indoorHumidity, dc.altitude || 0, bf, 35, 65, getMinAdp(systemType));
-    const mDesignCFM  = (isTFA && !isTfaOnly) ? mCoilP.minAdpSensibleCFM : Math.max(mCoilP.minAdpSensibleCFM, supplyCFM);
+    const mDesignCFM  = (isTFA && !isTfaOnly)
+      ? Math.max(mCoilP.minAdpSensibleCFM, supplyCFM - (mTfa?.cfm ?? 0))
+      : Math.max(mCoilP.minAdpSensibleCFM, supplyCFM);
     const mCfmTR      = mDesignCFM / 400;
     const monsoonGoverningTR = mTotalTR;
     const monsoonRequiredTR  = monsoonGoverningTR * (1 + ovlSafePct / 100);
@@ -4087,7 +4091,17 @@ export default function EquipmentSelection({
     const psyIn  = calculatePsychrometrics(indoorT, indoorRH, altitude);
     const psySup = calculatePsychrometrics(supplyT, supplyRH, altitude);
 
-    const sumSen = Math.max(0, 1.08 * doasOACFM * (outdoorT - supplyT)
+    // Cool OA to its apparatus dew point when the supply is warm enough to need
+    // reheat (mirrors calculateTFALoad): the coil leaves at the ADP, a reheat coil
+    // warms it to the supply temp. A cold supply leaves the coil at the supply temp
+    // (no overcool). Sizing the coil only to the supply temp would understate it by
+    // the reheat. Deadband (5°F) absorbs the bypass-delivered rise above ADP.
+    const coilADP = dewPointFromHumidityRatio(psySup.humidityRatio, altitude);
+    const needsReheat = supplyT - coilADP >= 5;
+    const coilLeavingT = needsReheat ? coilADP : supplyT;
+    const reheatBTUH = needsReheat ? 1.08 * doasOACFM * (supplyT - coilADP) : 0;
+
+    const sumSen = Math.max(0, 1.08 * doasOACFM * (outdoorT - coilLeavingT)
       - epsS * 1.08 * doasOACFM * (outdoorT - indoorT));
     const sumLat = Math.max(0, 0.68 * doasOACFM * (psyOut.humidityRatio - psySup.humidityRatio) * 7000
       - epsL * 0.68 * doasOACFM * (psyOut.humidityRatio - psyIn.humidityRatio) * 7000);
@@ -4096,18 +4110,22 @@ export default function EquipmentSelection({
     let monTotal = 0;
     if (incMonsoon) {
       const psyMon = calculatePsychrometrics(monsoonT, monsoonRH, altitude);
-      const monSen = Math.max(0, 1.08 * doasOACFM * (monsoonT - supplyT)
+      const monSen = Math.max(0, 1.08 * doasOACFM * (monsoonT - coilLeavingT)
         - epsS * 1.08 * doasOACFM * (monsoonT - indoorT));
       const monLat = Math.max(0, 0.68 * doasOACFM * (psyMon.humidityRatio - psySup.humidityRatio) * 7000
         - epsL * 0.68 * doasOACFM * (psyMon.humidityRatio - psyIn.humidityRatio) * 7000);
       monTotal = monSen + monLat;
     }
     const govTotal = Math.max(sumTotal, monTotal);
+
     return {
       summerCoilTR: sumTotal / 12000,
       monsoonCoilTR: monTotal / 12000,
       governingCoilTR: govTotal / 12000,
       governs: (monTotal > sumTotal ? 'monsoon' : 'summer') as 'summer' | 'monsoon',
+      coilADP,
+      reheatBTUH,
+      reheatTR: reheatBTUH / 12000,
       cfm: doasOACFM,
       source: 'live-supply' as const,
     };
@@ -5272,8 +5290,16 @@ export default function EquipmentSelection({
                             </p>
                           </div>
                         )}
-                        {/* OA CFM + TFA coil summary */}
-                        <div className={cn('grid grid-cols-1 gap-3', doasTfaWinterHeatingBTUH > 0 ? 'sm:grid-cols-4' : 'sm:grid-cols-3')}>
+                        {/* OA CFM + TFA coil summary. Reheat card only shows when the
+                            supply setpoint actually demands meaningful reheat (>500 BTU/h)
+                            — i.e. a neutral/warm-dry supply. Cold-TFA leaves the coil near
+                            its dew point, so reheat ≈ 0 and the card stays hidden. */}
+                        {(() => {
+                          const showReheat = doasTFAAggregate.reheatBTUH > 0;
+                          const cols = 3 + (doasTfaWinterHeatingBTUH > 0 ? 1 : 0) + (showReheat ? 1 : 0);
+                          const colClass = cols >= 5 ? 'sm:grid-cols-5' : cols === 4 ? 'sm:grid-cols-4' : 'sm:grid-cols-3';
+                          return (
+                        <div className={cn('grid grid-cols-1 gap-3', colClass)}>
                           <div className="rounded-lg border border-teal-200 dark:border-teal-800 bg-teal-50/60 dark:bg-teal-950/20 px-4 py-3">
                             <p className="text-xs font-bold uppercase tracking-wide text-teal-600 dark:text-teal-400">OA Flow Required</p>
                             <p className="mt-1 font-mono text-xl font-bold text-teal-900 dark:text-teal-200">{Math.round(doasOACFM).toLocaleString()}</p>
@@ -5284,6 +5310,16 @@ export default function EquipmentSelection({
                             <p className="mt-1 font-mono text-xl font-bold text-teal-900 dark:text-teal-200">{doasTFAAggregate.governingCoilTR.toFixed(1)}</p>
                             <p className="text-xs text-teal-500 dark:text-teal-400">TR · {doasTFAAggregate.governs} governs (cooling)</p>
                           </div>
+                          {showReheat && (
+                            <div
+                              className="rounded-lg border border-amber-200 dark:border-amber-800 bg-amber-50/60 dark:bg-amber-950/20 px-4 py-3"
+                              title={`Cool-to-ADP then reheat. The coil over-cools OA to its apparatus dew point (${doasTFAAggregate.coilADP.toFixed(0)}°F, saturated) to dry it to the supply humidity ratio, then a reheat coil sensibly warms it back up to ${Math.round((selectedSystem as any)?.tfaSupplyTemp ?? 55)}°F supply. Reheat = 1.08 × ${Math.round(doasOACFM).toLocaleString()} CFM × (supply − ADP).`}
+                            >
+                              <p className="text-xs font-bold uppercase tracking-wide text-amber-600 dark:text-amber-400">TFA Reheat Coil</p>
+                              <p className="mt-1 font-mono text-xl font-bold text-amber-900 dark:text-amber-200">{Math.round(doasTFAAggregate.reheatBTUH).toLocaleString()}</p>
+                              <p className="text-xs text-amber-500 dark:text-amber-400">BTU/h · ADP {doasTFAAggregate.coilADP.toFixed(0)}°F → supply</p>
+                            </div>
+                          )}
                           {doasTfaWinterHeatingBTUH > 0 && (
                             <div className="rounded-lg border border-sky-200 dark:border-sky-800 bg-sky-50/60 dark:bg-sky-950/20 px-4 py-3">
                               <p className="text-xs font-bold uppercase tracking-wide text-sky-600 dark:text-sky-400">TFA Heating Coil</p>
@@ -5297,6 +5333,8 @@ export default function EquipmentSelection({
                             <p className="text-xs text-slate-400">TFA-served rooms</p>
                           </div>
                         </div>
+                          );
+                        })()}
 
                         {/* Advanced TFA settings — collapsed by default. Fresh air is set
                             per-room in the Load Calculator; these are tuning / legacy controls. */}
