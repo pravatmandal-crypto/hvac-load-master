@@ -37,6 +37,7 @@ import {
   calculateReheat,
   getRecommendedAch,
   getMinAdp,
+  resolveSupplyCfm,
   resolveRoomTfa,
   getProjectDoas,
   pickCoolingSource,
@@ -155,6 +156,9 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
       peopleCount: r.peopleCount ?? r.data?.peopleCount ?? 0,
       activityType: r.activityType ?? r.data?.activityType ?? 'office',
       achProfile: r.achProfile ?? r.data?.achProfile ?? r.activityType ?? r.data?.activityType ?? 'office',
+      // Supply-air basis: left UNDEFINED for existing rooms (engine treats absent as 'ach',
+      // so saved CFMs don't silently change); new rooms are created with 'dscfm'.
+      supplyCfmBasis: r.supplyCfmBasis ?? r.data?.supplyCfmBasis,
       spaceType: r.spaceType ?? r.data?.spaceType ?? 'office_general',
       lightsWattsPerSqft: r.lightsWattsPerSqft ?? r.data?.lightsWattsPerSqft ?? 0,
       equipmentKW: r.equipmentKW ?? r.data?.equipmentKW ?? 0,
@@ -593,13 +597,19 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
     const presetTotalACH = getRecommendedAch(roomSource.achProfile ?? roomSource.activityType);
     const totalSupplyACH = Math.max(presetTotalACH, rd.facph);
     const totalSupplyCFM = (calculateRoomVolume(rd) * totalSupplyACH) / 60;
-    // TFA-served airflow (corrected 2026-06-07): the DOAS supplies only the OA air change;
-    // the space AHU must still move the recirculation balance (totalSupplyCFM − oaCFM). So
-    // size by max(thermal-at-ADP, recirc CFM), not thermal-only (which dropped the room's
-    // air change). tfa-only corridors are fed entirely by the DOAS, so they keep total.
-    const designSupplyCFM = (isTFA && !isTfaOnly)
-      ? Math.max(coil.minAdpSensibleCFM, totalSupplyCFM - (tfa?.cfm ?? 0))
-      : Math.max(coil.minAdpSensibleCFM, totalSupplyCFM);
+    const freshAirCFM = (calculateRoomVolume(rd) * rd.facph) / 60;
+    // Supply-air basis: 'dscfm' (default, dehumidified-air) vs 'ach' (legacy ACH-preset).
+    // The DOAS is independent of this — it always sizes off the OA FACPH. See lib/hvac/supplyCfm.
+    const supplyCfmBasis = roomSource.supplyCfmBasis === 'dscfm' ? 'dscfm' : 'ach';
+    const supply = resolveSupplyCfm({
+      basis: supplyCfmBasis,
+      isTFA, isTfaOnly,
+      dehumidifiedCFM: coil.dehumidifiedCFM,
+      minAdpSensibleCFM: coil.minAdpSensibleCFM,
+      totalSupplyCFM, freshAirCFM,
+      tfaCfm: tfa?.cfm ?? 0,
+    });
+    const designSupplyCFM = supply.designSupplyCFM;
     // Plant TR is load-only (2026-05-20). cfmTR retained as sanity ratio.
     const cfmTR = designSupplyCFM / 400;
     const governingTR = grandTotalTR;
@@ -635,9 +645,15 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
       dc.indoorTemp, dc.indoorHumidity, dc.altitude || 0,
       bf, 35, 65, getMinAdp(project?.systemType),
     );
-    const monsoonDesignCFM = (isTFA && !isTfaOnly)
-      ? Math.max(monsoonCoilParams.minAdpSensibleCFM, totalSupplyCFM - (monsoonTfa?.cfm ?? 0))
-      : Math.max(monsoonCoilParams.minAdpSensibleCFM, totalSupplyCFM);
+    const monsoonSupply = resolveSupplyCfm({
+      basis: supplyCfmBasis,
+      isTFA, isTfaOnly,
+      dehumidifiedCFM: monsoonCoilParams.dehumidifiedCFM,
+      minAdpSensibleCFM: monsoonCoilParams.minAdpSensibleCFM,
+      totalSupplyCFM, freshAirCFM,
+      tfaCfm: monsoonTfa?.cfm ?? 0,
+    });
+    const monsoonDesignCFM = monsoonSupply.designSupplyCFM;
     const monsoonCfmTR = monsoonDesignCFM / 400;
     const monsoonGoverningTR = monsoonGrandTotalTR;
     const monsoonRequiredTR = monsoonGoverningTR * (1 + overallSafetyPct / 100);
@@ -962,12 +978,16 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
       const presetTotalACH = getRecommendedAch(room.achProfile ?? room.activityType);
       const totalSupplyACH = Math.max(presetTotalACH, rd.facph);
       const totalSupplyCFM = (calculateRoomVolume(rd) * totalSupplyACH) / 60;
-      // TFA-served airflow (corrected 2026-06-07): DOAS supplies the OA air change; the
-      // space AHU moves the recirc balance (totalSupplyCFM − oaCFM). Size by the recirc
-      // floor, not thermal-only. tfa-only corridors are DOAS-fed, so they keep total.
-      const designSupplyCFM = (isTFA && !isTfaOnly)
-        ? Math.max(coilLocal.minAdpSensibleCFM, totalSupplyCFM - (tfa?.cfm ?? 0))
-        : Math.max(coilLocal.minAdpSensibleCFM, totalSupplyCFM);
+      const freshAirCFM = (calculateRoomVolume(rd) * rd.facph) / 60;
+      // Supply-air basis: 'dscfm' (default) vs 'ach' (legacy). See lib/hvac/supplyCfm.
+      const designSupplyCFM = resolveSupplyCfm({
+        basis: room.supplyCfmBasis === 'dscfm' ? 'dscfm' : 'ach',
+        isTFA, isTfaOnly,
+        dehumidifiedCFM: coilLocal.dehumidifiedCFM,
+        minAdpSensibleCFM: coilLocal.minAdpSensibleCFM,
+        totalSupplyCFM, freshAirCFM,
+        tfaCfm: tfa?.cfm ?? 0,
+      }).designSupplyCFM;
 
       // Phase D: carrying capacity used by tfa-only rooms (and reported for
       // all TFA-served rooms as a sanity check). Deficit > 0 = undersized.
@@ -1812,6 +1832,8 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
     activityType:      'office',
     applyAch:          false,
     achProfile:        'office',
+    applySupplyBasis:  false,
+    supplyCfmBasis:    'dscfm' as 'dscfm' | 'ach',
     applyLights:       false,
     lightsWattsPerSqft: 1.2,
     applyFacph:        false,
@@ -1836,6 +1858,7 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
     }
     if (g.applyActivity) fields.activityType = g.activityType;
     if (g.applyAch)      fields.achProfile   = g.achProfile;
+    if (g.applySupplyBasis) fields.supplyCfmBasis = g.supplyCfmBasis;
     if (g.applyLights)   fields.lightsWattsPerSqft = Math.max(0, Number(g.lightsWattsPerSqft) || 0);
     if (g.applyFacph) {
       // OA fresh-air ACH must be ≤ total supply ACH — outside air is part of the supply,
@@ -1888,6 +1911,32 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
     } catch (error) {
       console.error('[LoadCalculator] Global apply failed:', error);
       toast.error('Failed to apply global settings: ' + (error instanceof Error ? error.message : 'Unknown error'));
+    }
+  };
+
+  // Recompute & re-persist every room through the real engine (persistRoomAnalysisSnapshot).
+  // Use this to refresh persisted _calc* fields (e.g. after a supply-CFM-basis change) so the
+  // PDF / Excel / Equipment Selection — which read the persisted values — pick up the new numbers.
+  const [recomputingAll, setRecomputingAll] = useState(false);
+  const recomputeAllRooms = async () => {
+    if (totalRoomCount === 0) { toast.error('No rooms to recompute'); return; }
+    setRecomputingAll(true);
+    toast.info(`Recomputing ${totalRoomCount} room${totalRoomCount === 1 ? '' : 's'}…`);
+    let ok = 0;
+    try {
+      for (const [zoneId, list] of Object.entries(rooms)) {
+        for (const r of (list ?? []) as any[]) {
+          try {
+            await persistRoomAnalysisSnapshot(zoneId, r.id, r.systemId ?? zoneId, r, envelopeElements[r.id] ?? []);
+            ok += 1;
+          } catch (err) {
+            console.error('[LoadCalculator] Recompute failed for room', r.id, err);
+          }
+        }
+      }
+      toast.success(`Recomputed & saved ${ok} room${ok === 1 ? '' : 's'}`);
+    } finally {
+      setRecomputingAll(false);
     }
   };
 
@@ -2024,6 +2073,7 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
         falseCeilingHeight: 0,
         activityType: 'office',
         achProfile: 'office',
+        supplyCfmBasis: 'dscfm', // default new rooms to the Carrier/ASHRAE dehumidified-air basis
         facph: 1.5,
         peopleCount: 0,
         lightsWattsPerSqft: 0,
@@ -3369,6 +3419,27 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
                   </select>
                 </label>
 
+                {/* Supply-air basis — Dehumidified (DSCFM, default) vs ACH preset */}
+                <label className="flex items-center gap-2">
+                  <input
+                    type="checkbox"
+                    checked={globalDefaults.applySupplyBasis}
+                    onChange={e => setGlobalDefaults(g => ({ ...g, applySupplyBasis: e.target.checked }))}
+                    className="accent-orange-600"
+                  />
+                  <span className="font-medium text-slate-700 dark:text-slate-300 w-24">Supply Basis</span>
+                  <select
+                    value={globalDefaults.supplyCfmBasis}
+                    disabled={!globalDefaults.applySupplyBasis}
+                    onChange={e => setGlobalDefaults(g => ({ ...g, supplyCfmBasis: e.target.value as 'dscfm' | 'ach' }))}
+                    className="h-7 text-xs rounded border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 px-1.5 disabled:opacity-50 flex-1 min-w-0"
+                    title="Dehumidified (DSCFM) sizes the AHU on the Carrier/ASHRAE dehumidified-air load (recommended). ACH preset uses the air-change rule of thumb. DOAS always sizes off OA FACPH regardless."
+                  >
+                    <option value="dscfm">Dehumidified (DSCFM) — recommended</option>
+                    <option value="ach">Air changes (ACH preset)</option>
+                  </select>
+                </label>
+
                 {/* Lights */}
                 <label className="flex items-center gap-2">
                   <input
@@ -3448,6 +3519,15 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
                 >
                   Apply to All {totalRoomCount} Room{totalRoomCount === 1 ? '' : 's'}
                 </Button>
+                <button
+                  type="button"
+                  onClick={recomputeAllRooms}
+                  disabled={totalRoomCount === 0 || recomputingAll}
+                  title="Recompute & re-save every room through the load engine. Refreshes persisted CFM/TR so PDF, Excel & Equipment Selection match the live view (e.g. after changing the supply-air basis)."
+                  className="h-7 px-3 text-xs rounded-md border border-emerald-300 dark:border-emerald-700 text-emerald-700 dark:text-emerald-400 hover:bg-emerald-50 dark:hover:bg-emerald-950/40 disabled:opacity-50"
+                >
+                  {recomputingAll ? 'Recomputing…' : 'Recompute & save all'}
+                </button>
                 <button
                   type="button"
                   onClick={() => setGlobalSettingsOpen(false)}

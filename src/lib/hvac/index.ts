@@ -75,6 +75,9 @@ export { calculateMoistureManagement, calculateReheat } from './reheat';
 // Parasitic gains
 export { calculateParasiticGains } from './parasitic';
 
+// Supply-air CFM basis resolver (DSCFM vs ACH preset)
+export { resolveSupplyCfm, type SupplyCfmBasis, type SupplyCfmResult } from './supplyCfm';
+
 // ASHRAE 62.1 ventilation
 export {
   SPACE_TYPES_62,

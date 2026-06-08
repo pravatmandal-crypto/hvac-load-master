@@ -23,6 +23,7 @@ import {
   ACTIVITY_TYPES,
   ACTIVITY_ACH_RECOMMENDATIONS,
   getRecommendedAch,
+  resolveSupplyCfm,
   getMinAdp,
   SPACE_TYPES_62,
   getSpaceType,
@@ -387,14 +388,20 @@ function useRoomCalc(room: any, elements: any[], designConditions: DesignConditi
     const presetTotalACH = getRecommendedAch(room.achProfile ?? room.activityType);
     const totalSupplyACH = Math.max(presetTotalACH, rd.facph);
     const totalSupplyCFM = (calculateRoomVolume(rd) * totalSupplyACH) / 60;
-    // TFA-served airflow (corrected 2026-06-07): DOAS supplies only the OA air change;
-    // the space AHU moves the recirculation balance (totalSupplyCFM − oaCFM). tfa-only
-    // corridors are DOAS-fed, so they keep the full air-change airflow.
-    const airChangeFloorCFM = (isTFA && !isTfaOnly)
-      ? Math.max(0, totalSupplyCFM - (tfa?.cfm ?? 0))
-      : totalSupplyCFM;
-    const designCFM = Math.max(coil.minAdpSensibleCFM, airChangeFloorCFM);
-    const achGovernsAirflow = coil.minAdpSensibleCFM < airChangeFloorCFM;
+    const freshAirCFM = (calculateRoomVolume(rd) * rd.facph) / 60;
+    // Supply-air basis: 'dscfm' (default, dehumidified-air) vs 'ach' (legacy ACH-preset).
+    // The DOAS is independent — it always sizes off the OA FACPH. See lib/hvac/supplyCfm.
+    const supplyCfmBasis = room.supplyCfmBasis === 'dscfm' ? 'dscfm' : 'ach';
+    const supply = resolveSupplyCfm({
+      basis: supplyCfmBasis,
+      isTFA, isTfaOnly,
+      dehumidifiedCFM: coil.dehumidifiedCFM,
+      minAdpSensibleCFM: coil.minAdpSensibleCFM,
+      totalSupplyCFM, freshAirCFM,
+      tfaCfm: tfa?.cfm ?? 0,
+    });
+    const designCFM = supply.designSupplyCFM;
+    const achGovernsAirflow = supply.governedBy === 'ach' && coil.minAdpSensibleCFM < supply.achBasisCFM;
     // cfmTR is a SANITY RATIO only (display + warning). It does NOT govern plant
     // sizing — Plant TR = grand-total coil load only. (Decision: 2026-05-20.)
     const cfmTR = designCFM / 400;
@@ -486,6 +493,11 @@ function useRoomCalc(room: any, elements: any[], designConditions: DesignConditi
       presetTotalACH,
       totalSupplyACH,
       totalSupplyCFM,
+      // Supply-air basis read-out (selected basis + both candidate CFMs + fresh-air floor)
+      supplyCfmBasis,
+      dscfmBasisCFM: supply.dscfmBasisCFM,
+      achBasisCFM: supply.achBasisCFM,
+      freshAirCFM,
       dehumidCompare,
     };
   }, [room, elements, designConditions, project]);
@@ -1164,6 +1176,31 @@ function RoomDetail({
         <div className="bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-2 text-center">
           <p className="text-[10px] text-gray-500 dark:text-slate-400 uppercase tracking-wide">Area</p>
           <p className="text-sm font-bold text-slate-800 dark:text-slate-100">{calc.rd.length * calc.rd.width} ft²</p>
+        </div>
+      </div>
+
+      {/* Supply-air basis read-out — shows both candidates and which one governs the AHU CFM */}
+      <div className="mt-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900/40 px-3 py-2 text-xs">
+        <div className="flex items-center justify-between mb-1">
+          <span className="font-semibold text-slate-600 dark:text-slate-300 uppercase tracking-wide text-[10px]">Supply-Air Basis</span>
+          <span className={`font-semibold ${calc.supplyCfmBasis === 'dscfm' ? 'text-emerald-700 dark:text-emerald-400' : 'text-sky-700 dark:text-sky-400'}`}>
+            {calc.supplyCfmBasis === 'dscfm' ? 'Dehumidified (DSCFM)' : 'Air changes (ACH)'}
+          </span>
+        </div>
+        <div className="grid grid-cols-3 gap-2 font-mono text-slate-700 dark:text-slate-300">
+          <div className={calc.supplyCfmBasis === 'dscfm' ? 'font-bold text-emerald-700 dark:text-emerald-400' : ''}>
+            <span className="block text-[10px] font-sans text-gray-400">Dehumidified</span>{Math.round(calc.dscfmBasisCFM).toLocaleString()}
+          </div>
+          <div className={calc.supplyCfmBasis === 'ach' ? 'font-bold text-sky-700 dark:text-sky-400' : ''}>
+            <span className="block text-[10px] font-sans text-gray-400">ACH preset</span>{Math.round(calc.achBasisCFM).toLocaleString()}
+          </div>
+          <div>
+            <span className="block text-[10px] font-sans text-gray-400">Fresh-air min</span>{Math.round(calc.freshAirCFM).toLocaleString()}
+          </div>
+        </div>
+        <div className="mt-1 pt-1 border-t border-slate-100 dark:border-slate-800 flex justify-between">
+          <span className="text-gray-400">Governing →</span>
+          <span className="font-bold text-slate-800 dark:text-slate-100 font-mono">{Math.round(calc.designCFM).toLocaleString()} CFM</span>
         </div>
       </div>
 

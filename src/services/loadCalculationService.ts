@@ -23,6 +23,8 @@ import {
   calculateTFALoad,
   getRecommendedAch,
   getMinAdp,
+  resolveSupplyCfm,
+  type SupplyCfmBasis,
   type RoomDetails,
 } from '../lib/hvac';
 import { EnvelopeElement } from '../lib/hvac/constants';
@@ -75,6 +77,11 @@ export interface RoomCalcResult {
   _calcOverallGoverningTR: number;
   _calcOverallRequiredTR: number;
   _calcOverallDesignCFM: number;
+  // Supply-air basis read-out
+  _calcSupplyCfmBasis: SupplyCfmBasis;
+  _calcDscfmBasisCFM: number;
+  _calcAchBasisCFM: number;
+  _calcFreshAirCFM: number;
   // TFA / DOAS — populated only when ventilationStrategy === 'tfa-cold'.
   // Primary numbers above reflect the post-offset primary load. These fields
   // are sized off the separate TFA/DOAS coil.
@@ -194,15 +201,22 @@ export async function calculateAndPersistRoom(
   const presetTotalACH = getRecommendedAch(room.achProfile ?? room.activityType);
   const totalSupplyACH = Math.max(presetTotalACH, rd.facph);
   const totalSupplyCFM = (calculateRoomVolume(rd) * totalSupplyACH) / 60;
-  // TFA-served airflow (corrected 2026-06-07): the DOAS supplies only the OUTDOOR-AIR
-  // air change (oaCFM = tfa.cfm); the room's total air change still has to be delivered,
-  // so the space AHU must move the RECIRCULATION balance (totalSupplyCFM − oaCFM). The
-  // space coil airflow is therefore governed by that recirc floor, not the thermal-only
-  // minimum (which collapsed to absurd values like 19 CFM on high-ACH rooms). The coil
-  // TR stays small (load is small after the cold-DOAS credit); only the airflow grows.
-  const designSupplyCFM = isTFA
-    ? Math.max(coil.minAdpSensibleCFM, totalSupplyCFM - (tfa?.cfm ?? 0))
-    : Math.max(coil.minAdpSensibleCFM, totalSupplyCFM);
+  // Fresh-air (OA) the room introduces — used to floor the space AHU under the DSCFM basis.
+  const freshAirCFM = (calculateRoomVolume(rd) * rd.facph) / 60;
+  // Supply-air basis: 'dscfm' (default, Carrier/ASHRAE dehumidified-air) vs 'ach' (legacy
+  // ACH-preset). The DOAS is independent of this — it always sizes off the OA FACPH.
+  const supplyCfmBasis: SupplyCfmBasis = room.supplyCfmBasis === 'dscfm' ? 'dscfm' : 'ach';
+  const supply = resolveSupplyCfm({
+    basis: supplyCfmBasis,
+    isTFA,
+    isTfaOnly: false,
+    dehumidifiedCFM: coil.dehumidifiedCFM,
+    minAdpSensibleCFM: coil.minAdpSensibleCFM,
+    totalSupplyCFM,
+    freshAirCFM,
+    tfaCfm: tfa?.cfm ?? 0,
+  });
+  const designSupplyCFM = supply.designSupplyCFM;
   // cfmTR is a SANITY RATIO only — kept for display/warning. It does NOT
   // govern plant sizing. The 400 CFM/TR rule is rule-of-thumb air-system
   // sizing; OEM unit ratings already enforce the TR↔CFM coupling, and
@@ -246,9 +260,17 @@ export async function calculateAndPersistRoom(
     dc.indoorTemp, dc.indoorHumidity, dc.altitude || 0,
     bf, 35, 65, minAdp,
   );
-  const monsoonDesignCFM = isTFA
-    ? Math.max(monsoonCoilParams.minAdpSensibleCFM, totalSupplyCFM - (monsoonTfa?.cfm ?? 0))
-    : Math.max(monsoonCoilParams.minAdpSensibleCFM, totalSupplyCFM);
+  const monsoonSupply = resolveSupplyCfm({
+    basis: supplyCfmBasis,
+    isTFA,
+    isTfaOnly: false,
+    dehumidifiedCFM: monsoonCoilParams.dehumidifiedCFM,
+    minAdpSensibleCFM: monsoonCoilParams.minAdpSensibleCFM,
+    totalSupplyCFM,
+    freshAirCFM,
+    tfaCfm: monsoonTfa?.cfm ?? 0,
+  });
+  const monsoonDesignCFM = monsoonSupply.designSupplyCFM;
   const monsoonCfmTR = monsoonDesignCFM / 400;
   const monsoonGoverningTR = monsoonGrandTotalTR;
   const monsoonRequiredTR = monsoonGrandTotalTR * (1 + overallSafetyPct / 100);
@@ -256,6 +278,13 @@ export async function calculateAndPersistRoom(
   const overallGoverningTR = hasMonsoon ? Math.max(governingTR, monsoonGoverningTR) : governingTR;
   const overallRequiredTR = hasMonsoon ? Math.max(requiredTR, monsoonRequiredTR) : requiredTR;
   const overallDesignCFM = hasMonsoon ? Math.max(designSupplyCFM, monsoonDesignCFM) : designSupplyCFM;
+  // Governing candidates for each basis (max across cooling seasons) — feed the UI read-out.
+  const dscfmBasisCFM = hasMonsoon
+    ? Math.max(supply.dscfmBasisCFM, monsoonSupply.dscfmBasisCFM)
+    : supply.dscfmBasisCFM;
+  const achBasisCFM = hasMonsoon
+    ? Math.max(supply.achBasisCFM, monsoonSupply.achBasisCFM)
+    : supply.achBasisCFM;
 
   // ── Analysis snapshot ────────────────────────────────────────────────────
   const outdoorPsych = calculatePsychrometrics(dc.outdoorTemp, dc.outdoorHumidity, dc.altitude || 0);
@@ -357,6 +386,12 @@ export async function calculateAndPersistRoom(
     _calcOverallGoverningTR: parseFloat(overallGoverningTR.toFixed(3)),
     _calcOverallRequiredTR: parseFloat(overallRequiredTR.toFixed(3)),
     _calcOverallDesignCFM: parseFloat(overallDesignCFM.toFixed(0)),
+    // Supply-air basis read-out (Basis selector UI): the selected basis + both candidate
+    // CFMs (governing across cooling seasons) + the fresh-air floor.
+    _calcSupplyCfmBasis: supplyCfmBasis,
+    _calcDscfmBasisCFM: parseFloat(dscfmBasisCFM.toFixed(0)),
+    _calcAchBasisCFM: parseFloat(achBasisCFM.toFixed(0)),
+    _calcFreshAirCFM: parseFloat(freshAirCFM.toFixed(0)),
     ...(isTFA && tfa
       ? {
           _calcTfaCoilBTUH: parseFloat((tfa.coilSensible + tfa.coilLatent).toFixed(0)),
