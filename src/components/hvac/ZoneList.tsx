@@ -152,10 +152,11 @@ function computeZoneTotals(
       const effectiveTotalACH = Math.max(presetTotalACH, rd.facph);
       const totalSupplyCFM = (calculateRoomVolume(rd) * effectiveTotalACH) / 60;
       const freshAirCFM = (calculateRoomVolume(rd) * rd.facph) / 60;
-      // Supply-air basis: 'dscfm' (default, dehumidified-air) vs 'ach' (legacy ACH-preset).
-      // The DOAS is independent — it always sizes off the OA FACPH. See lib/hvac/supplyCfm.
+      // Supply-air basis: 'dscfm' (DEFAULT, dehumidified-air) vs 'ach' (legacy ACH-preset).
+      // DSCFM is the default — only an explicit 'ach' opts out. The DOAS is independent — it
+      // always sizes off the OA FACPH. See lib/hvac/supplyCfm.
       const designCFM = resolveSupplyCfm({
-        basis: room.supplyCfmBasis === 'dscfm' ? 'dscfm' : 'ach',
+        basis: room.supplyCfmBasis === 'ach' ? 'ach' : 'dscfm',
         isTFA, isTfaOnly,
         dehumidifiedCFM: coil.dehumidifiedCFM,
         minAdpSensibleCFM: coil.minAdpSensibleCFM,

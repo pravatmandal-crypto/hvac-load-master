@@ -203,9 +203,10 @@ export async function calculateAndPersistRoom(
   const totalSupplyCFM = (calculateRoomVolume(rd) * totalSupplyACH) / 60;
   // Fresh-air (OA) the room introduces — used to floor the space AHU under the DSCFM basis.
   const freshAirCFM = (calculateRoomVolume(rd) * rd.facph) / 60;
-  // Supply-air basis: 'dscfm' (default, Carrier/ASHRAE dehumidified-air) vs 'ach' (legacy
-  // ACH-preset). The DOAS is independent of this — it always sizes off the OA FACPH.
-  const supplyCfmBasis: SupplyCfmBasis = room.supplyCfmBasis === 'dscfm' ? 'dscfm' : 'ach';
+  // Supply-air basis: 'dscfm' (DEFAULT, Carrier/ASHRAE dehumidified-air) vs 'ach' (legacy
+  // ACH-preset). DSCFM is the default — only an explicit 'ach' opts out. The DOAS is
+  // independent of this — it always sizes off the OA FACPH.
+  const supplyCfmBasis: SupplyCfmBasis = room.supplyCfmBasis === 'ach' ? 'ach' : 'dscfm';
   const supply = resolveSupplyCfm({
     basis: supplyCfmBasis,
     isTFA,

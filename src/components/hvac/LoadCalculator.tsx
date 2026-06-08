@@ -598,9 +598,10 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
     const totalSupplyACH = Math.max(presetTotalACH, rd.facph);
     const totalSupplyCFM = (calculateRoomVolume(rd) * totalSupplyACH) / 60;
     const freshAirCFM = (calculateRoomVolume(rd) * rd.facph) / 60;
-    // Supply-air basis: 'dscfm' (default, dehumidified-air) vs 'ach' (legacy ACH-preset).
-    // The DOAS is independent of this — it always sizes off the OA FACPH. See lib/hvac/supplyCfm.
-    const supplyCfmBasis = roomSource.supplyCfmBasis === 'dscfm' ? 'dscfm' : 'ach';
+    // Supply-air basis: 'dscfm' (DEFAULT, dehumidified-air) vs 'ach' (legacy ACH-preset).
+    // DSCFM is the default — only an explicit 'ach' opts out. The DOAS is independent of this
+    // — it always sizes off the OA FACPH. See lib/hvac/supplyCfm.
+    const supplyCfmBasis = roomSource.supplyCfmBasis === 'ach' ? 'ach' : 'dscfm';
     const supply = resolveSupplyCfm({
       basis: supplyCfmBasis,
       isTFA, isTfaOnly,
@@ -979,9 +980,9 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
       const totalSupplyACH = Math.max(presetTotalACH, rd.facph);
       const totalSupplyCFM = (calculateRoomVolume(rd) * totalSupplyACH) / 60;
       const freshAirCFM = (calculateRoomVolume(rd) * rd.facph) / 60;
-      // Supply-air basis: 'dscfm' (default) vs 'ach' (legacy). See lib/hvac/supplyCfm.
+      // Supply-air basis: 'dscfm' (DEFAULT) vs 'ach' (legacy). See lib/hvac/supplyCfm.
       const designSupplyCFM = resolveSupplyCfm({
-        basis: room.supplyCfmBasis === 'dscfm' ? 'dscfm' : 'ach',
+        basis: room.supplyCfmBasis === 'ach' ? 'ach' : 'dscfm',
         isTFA, isTfaOnly,
         dehumidifiedCFM: coilLocal.dehumidifiedCFM,
         minAdpSensibleCFM: coilLocal.minAdpSensibleCFM,

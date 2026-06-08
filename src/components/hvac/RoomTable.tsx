@@ -93,6 +93,7 @@ type RoomParameterState = {
   peopleCount: number;
   activityType: string;
   achProfile: string;
+  supplyCfmBasis: 'dscfm' | 'ach';
   spaceType: string;
   lightsWattsPerSqft: number;
   equipmentKW: number;
@@ -120,6 +121,8 @@ function getRoomParameterState(room: any): RoomParameterState {
     peopleCount: Number(room?.peopleCount) || 0,
     activityType: room?.activityType ?? 'office',
     achProfile: room?.achProfile ?? room?.activityType ?? 'office',
+    // DSCFM is the default — only an explicit 'ach' opts out (mirrors the engine).
+    supplyCfmBasis: room?.supplyCfmBasis === 'ach' ? 'ach' : 'dscfm',
     spaceType: room?.spaceType ?? 'office_general',
     lightsWattsPerSqft: Number(room?.lightsWattsPerSqft) || 0,
     equipmentKW: Number(room?.equipmentKW) || 0,
@@ -148,6 +151,7 @@ function areRoomParameterStatesEqual(left: RoomParameterState, right: RoomParame
     left.peopleCount === right.peopleCount &&
     left.activityType === right.activityType &&
     left.achProfile === right.achProfile &&
+    left.supplyCfmBasis === right.supplyCfmBasis &&
     left.spaceType === right.spaceType &&
     left.lightsWattsPerSqft === right.lightsWattsPerSqft &&
     left.equipmentKW === right.equipmentKW &&
@@ -389,9 +393,10 @@ function useRoomCalc(room: any, elements: any[], designConditions: DesignConditi
     const totalSupplyACH = Math.max(presetTotalACH, rd.facph);
     const totalSupplyCFM = (calculateRoomVolume(rd) * totalSupplyACH) / 60;
     const freshAirCFM = (calculateRoomVolume(rd) * rd.facph) / 60;
-    // Supply-air basis: 'dscfm' (default, dehumidified-air) vs 'ach' (legacy ACH-preset).
-    // The DOAS is independent — it always sizes off the OA FACPH. See lib/hvac/supplyCfm.
-    const supplyCfmBasis = room.supplyCfmBasis === 'dscfm' ? 'dscfm' : 'ach';
+    // Supply-air basis: 'dscfm' (DEFAULT, dehumidified-air) vs 'ach' (legacy ACH-preset).
+    // DSCFM is the default — only an explicit 'ach' opts out. The DOAS is independent — it
+    // always sizes off the OA FACPH. See lib/hvac/supplyCfm.
+    const supplyCfmBasis = room.supplyCfmBasis === 'ach' ? 'ach' : 'dscfm';
     const supply = resolveSupplyCfm({
       basis: supplyCfmBasis,
       isTFA, isTfaOnly,
@@ -1549,6 +1554,7 @@ function RoomDetail({
           <Field label="Occupancy Type">
             <Select
               value={roomDraft.activityType}
+              items={ACTIVITY_TYPES.map(a => ({ label: a.label, value: a.id }))}
               onValueChange={v => {
                 const nextActivity = v ?? 'office';
                 patchRoomDraft({
@@ -1565,19 +1571,43 @@ function RoomDetail({
               </SelectContent>
             </Select>
           </Field>
-          <Field label="ACH Preset">
+          <Field label="Supply Basis">
             <Select
-              value={roomDraft.achProfile}
-              onValueChange={v => patchRoomDraft({ achProfile: v ?? roomDraft.activityType ?? 'office' })}
+              value={roomDraft.supplyCfmBasis}
+              items={[
+                { label: 'Dehumidified (DSCFM)', value: 'dscfm' },
+                { label: 'Air changes (ACH)', value: 'ach' },
+              ]}
+              onValueChange={v => patchRoomDraft({ supplyCfmBasis: (v === 'ach' ? 'ach' : 'dscfm') })}
             >
               <SelectTrigger className="h-8 text-xs min-w-max"><SelectValue /></SelectTrigger>
               <SelectContent>
-                {ACTIVITY_ACH_RECOMMENDATIONS.map(a => (
-                  <SelectItem key={a.id} value={a.id} className="text-xs">{a.label} ({a.ach} Total ACH)</SelectItem>
-                ))}
+                <SelectItem value="dscfm" className="text-xs">Dehumidified (DSCFM) — recommended</SelectItem>
+                <SelectItem value="ach" className="text-xs">Air changes (ACH preset)</SelectItem>
               </SelectContent>
             </Select>
+            <p className="mt-1 text-[10px] text-slate-500">
+              {roomDraft.supplyCfmBasis === 'ach'
+                ? 'Sizes supply air on the ACH preset →'
+                : 'Sizes supply air on the dehumidified-air load (Carrier/ASHRAE).'}
+            </p>
           </Field>
+          {roomDraft.supplyCfmBasis === 'ach' && (
+            <Field label="ACH Preset">
+              <Select
+                value={roomDraft.achProfile}
+                items={ACTIVITY_ACH_RECOMMENDATIONS.map(a => ({ label: `${a.label} (${a.ach} Total ACH)`, value: a.id }))}
+                onValueChange={v => patchRoomDraft({ achProfile: v ?? roomDraft.activityType ?? 'office' })}
+              >
+                <SelectTrigger className="h-8 text-xs w-full ring-1 ring-sky-300 dark:ring-sky-700"><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  {ACTIVITY_ACH_RECOMMENDATIONS.map(a => (
+                    <SelectItem key={a.id} value={a.id} className="text-xs">{a.label} ({a.ach} Total ACH)</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </Field>
+          )}
           <Field label="Lights (W/ft²)">
             <BufferedNumberInput committersRef={draftCommittersRef} draftKey={`${id}-lights`} value={roomDraft.lightsWattsPerSqft} onDraftChange={(draft, parsed) => handleNumericDraftChange('lightsWattsPerSqft', draft, parsed)} onCommit={next => patchRoomDraft({ lightsWattsPerSqft: next })} className="h-8 text-sm" />
           </Field>
