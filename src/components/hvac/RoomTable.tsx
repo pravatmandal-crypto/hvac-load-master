@@ -24,6 +24,7 @@ import {
   ACTIVITY_ACH_RECOMMENDATIONS,
   getRecommendedAch,
   resolveSupplyCfm,
+  resolveRoomSupplyBasis,
   getMinAdp,
   SPACE_TYPES_62,
   getSpaceType,
@@ -109,7 +110,7 @@ type RoomParameterState = {
   includeHumidifier: boolean;
 };
 
-function getRoomParameterState(room: any): RoomParameterState {
+function getRoomParameterState(room: any, projectSupplyBasis?: string): RoomParameterState {
   return {
     name: room?.name ?? '',
     floor: room?.floor ?? 'Ground',
@@ -121,8 +122,8 @@ function getRoomParameterState(room: any): RoomParameterState {
     peopleCount: Number(room?.peopleCount) || 0,
     activityType: room?.activityType ?? 'office',
     achProfile: room?.achProfile ?? room?.activityType ?? 'office',
-    // DSCFM is the default — only an explicit 'ach' opts out (mirrors the engine).
-    supplyCfmBasis: room?.supplyCfmBasis === 'ach' ? 'ach' : 'dscfm',
+    // Room override wins; otherwise inherit the project Design Mode default (mirrors the engine).
+    supplyCfmBasis: resolveRoomSupplyBasis(room?.supplyCfmBasis, projectSupplyBasis),
     spaceType: room?.spaceType ?? 'office_general',
     lightsWattsPerSqft: Number(room?.lightsWattsPerSqft) || 0,
     equipmentKW: Number(room?.equipmentKW) || 0,
@@ -289,7 +290,7 @@ function useRoomCalc(room: any, elements: any[], designConditions: DesignConditi
       BF,
       35,
       65,
-      getMinAdp(project?.systemType),
+      getMinAdp(project?.systemType, project?.adpBasis),
     );
 
     // Supply air conditions at AHU discharge — mix of coil-saturated outlet and bypass air
@@ -396,7 +397,7 @@ function useRoomCalc(room: any, elements: any[], designConditions: DesignConditi
     // Supply-air basis: 'dscfm' (DEFAULT, dehumidified-air) vs 'ach' (legacy ACH-preset).
     // DSCFM is the default — only an explicit 'ach' opts out. The DOAS is independent — it
     // always sizes off the OA FACPH. See lib/hvac/supplyCfm.
-    const supplyCfmBasis = room.supplyCfmBasis === 'ach' ? 'ach' : 'dscfm';
+    const supplyCfmBasis = resolveRoomSupplyBasis(room.supplyCfmBasis, project?.supplyBasis);
     const supply = resolveSupplyCfm({
       basis: supplyCfmBasis,
       isTFA, isTfaOnly,
@@ -749,10 +750,10 @@ function RoomDetail({
   const [coolingPanelsOpen, setCoolingPanelsOpen] = useState({ summer: true, monsoon: false });
   const [moisturePanelsOpen, setMoisturePanelsOpen] = useState({ summer: true, monsoon: false });
   const [psychroChartsOpen, setPsychroChartsOpen] = useState({ summer: true, monsoon: false });
-  const [roomDraft, setRoomDraft] = useState<RoomParameterState>(() => getRoomParameterState(room));
+  const [roomDraft, setRoomDraft] = useState<RoomParameterState>(() => getRoomParameterState(room, project?.supplyBasis));
   const [isUpdating, setIsUpdating] = useState(false);
   const roomDraftRef = useRef<RoomParameterState>(roomDraft);
-  const committedRoomState = useMemo(() => getRoomParameterState(room), [room]);
+  const committedRoomState = useMemo(() => getRoomParameterState(room, project?.supplyBasis), [room, project?.supplyBasis]);
   const liveRoom = useMemo(() => ({ ...room, ...roomDraft }), [room, roomDraft]);
   const isRoomDirty = useMemo(
     () => !areRoomParameterStatesEqual(roomDraft, committedRoomState),
@@ -1194,7 +1195,7 @@ function RoomDetail({
         </div>
         <div className="grid grid-cols-3 gap-2 font-mono text-slate-700 dark:text-slate-300">
           <div className={calc.supplyCfmBasis === 'dscfm' ? 'font-bold text-emerald-700 dark:text-emerald-400' : ''}>
-            <span className="block text-[10px] font-sans text-gray-400">Dehumidified</span>{Math.round(calc.dscfmBasisCFM).toLocaleString()}
+            <span className="block text-[10px] font-sans text-gray-400">Dehumid. (sensible)</span>{Math.round(calc.coil.dehumidifiedCFM).toLocaleString()}
           </div>
           <div className={calc.supplyCfmBasis === 'ach' ? 'font-bold text-sky-700 dark:text-sky-400' : ''}>
             <span className="block text-[10px] font-sans text-gray-400">ACH preset</span>{Math.round(calc.achBasisCFM).toLocaleString()}
@@ -1207,6 +1208,24 @@ function RoomDetail({
           <span className="text-gray-400">Governing →</span>
           <span className="font-bold text-slate-800 dark:text-slate-100 font-mono">{Math.round(calc.designCFM).toLocaleString()} CFM</span>
         </div>
+        {calc.coil.latentShortfallCFM > 1 && (
+          <div className="mt-1 pt-1 border-t border-amber-200 dark:border-amber-900/60 text-[11px] leading-snug text-amber-700 dark:text-amber-400">
+            <span className="font-semibold">Latent not met at ADP {Math.round(calc.coil.selectedADP)}°F.</span>{' '}
+            The {Math.round(calc.coil.selectedADP)}°F coil can't dry this room — moisture removal would need
+            {' '}{Math.round(calc.coil.latentCFM).toLocaleString()} CFM of dehumidified air (vs {Math.round(calc.designCFM).toLocaleString()} supplied).
+            Add reheat ≈ {Math.round(calc.coil.reheatRequiredBTU).toLocaleString()} BTU/h, or decouple latent to a DOAS / desiccant.
+          </div>
+        )}
+        {calc.supplyCfmBasis === 'dscfm' && calc.designCFM < calc.achBasisCFM - 1 && (
+          <div className="mt-1 pt-1 border-t border-sky-200 dark:border-sky-900/60 text-[11px] leading-snug text-sky-700 dark:text-sky-400">
+            <span className="font-semibold">Air-change / OA check:</span> DSCFM supply ({Math.round(calc.designCFM).toLocaleString()} CFM) is
+            below the ACH-preset airflow ({Math.round(calc.achBasisCFM).toLocaleString()} CFM), so the fixed OA FACPH is now
+            {' '}{Math.round((calc.freshAirCFM / Math.max(1, calc.designCFM)) * 100)}% of supply.
+            {calc.freshAirCFM >= calc.coil.dehumidifiedCFM
+              ? ' Fresh-air OA is governing — supply ≈ 100% outdoor air. Verify this is intended.'
+              : ' Verify ventilation rate / air distribution is still adequate, or switch this room to the ACH basis.'}
+          </div>
+        )}
       </div>
 
       <div className="mt-3 rounded-xl border border-indigo-100 dark:border-indigo-900 bg-indigo-50/20 dark:bg-indigo-950/20 p-4">
@@ -2548,7 +2567,7 @@ function calculateRoomStripMetrics(room: any, elements: any[], dc: DesignConditi
       BF,
       35,
       65,
-      getMinAdp(project?.systemType),
+      getMinAdp(project?.systemType, project?.adpBasis),
     );
     // Fixed-system-ADP basis — matches Step-3 panel and ZoneList; see CLAUDE.md invariant.
     const designSupplyCFM = Math.max(coil.minAdpSensibleCFM, achCFM);

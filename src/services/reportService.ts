@@ -15,6 +15,7 @@ import {
   getMinAdp,
   calculateSingleElementGain,
 } from '../lib/hvac-logic';
+import { resolveSupplyCfm, resolveRoomSupplyBasis } from '../lib/hvac/supplyCfm';
 
 // DOAS/TFA systems for the report currently being built. Set once at the top of
 // each (synchronous) report-generation entry point; read by computeDetailed to
@@ -139,6 +140,10 @@ type DetailedMetrics = {
   selectedAdp: number;
   rshf: number;
   adpUnreachable: boolean;
+  dehumidSensibleCfm: number;
+  latentCfm: number;
+  latentShortfallCfm: number;
+  reheatRequiredBtu: number;
   // Heating with safety factors (populated for winter DC calls)
   heatingSafetyPct: number;
   heatingPickupPct: number;
@@ -750,19 +755,25 @@ const computeDetailed = (room: any, elements: any[], dc: DC, project: any): Deta
   const loadTr        = grandTotal / 12000;
 
   // Coil recomputed from the (TFA-reduced) loads — drives ADP / RSHF / supply air.
-  const coil = calculateCoilParameters(coilSensible, coilLatent, dcEff.indoorTemp, dcEff.indoorHumidity, dcEff.altitude, BF, 35, 65, getMinAdp(project?.systemType));
+  const coil = calculateCoilParameters(coilSensible, coilLatent, dcEff.indoorTemp, dcEff.indoorHumidity, dcEff.altitude, BF, 35, 65, getMinAdp(project?.systemType, project?.adpBasis));
 
   const totalAch     = Math.max(getRecommendedAch(room?.achProfile ?? room?.activityType), asNum(room?.facph, 0));
   const totalSupplyCfm = (calculateRoomVolume(room) * totalAch) / 60;
   // TFA-served space coils are sized by thermal (sensible-at-ADP) airflow only — the
   // recommended-ACH air-change duty belongs to the DOAS. tfa-only corridors keep the
   // air-change airflow (≈ the TFA supply CFM).
-  // TFA-served airflow (corrected 2026-06-07): DOAS supplies only the OA air change;
-  // the space AHU moves the recirculation balance (totalSupplyCfm − oaCFM). Size by the
-  // recirc floor, not the thermal-only minimum (which dropped the room's air change).
-  const designCfm    = (isTFA && !isTfaOnly)
-    ? Math.max(coil.minAdpSensibleCFM, totalSupplyCfm - (tfa?.cfm ?? 0))
-    : Math.max(coil.minAdpSensibleCFM, totalSupplyCfm);
+  // Supply-air basis: 'dscfm' (DEFAULT, dehumidified-air) vs 'ach' (legacy ACH-preset).
+  // DSCFM is the default — only an explicit 'ach' opts out. The DOAS is independent — it
+  // always sizes off the OA FACPH. Mirrors lib/hvac/supplyCfm + the LC/RoomTable/ZoneList paths.
+  const designCfm    = resolveSupplyCfm({
+    basis: resolveRoomSupplyBasis(room?.supplyCfmBasis, project?.supplyBasis),
+    isTFA, isTfaOnly,
+    dehumidifiedCFM: coil.dehumidifiedCFM,
+    minAdpSensibleCFM: coil.minAdpSensibleCFM,
+    totalSupplyCFM: totalSupplyCfm,
+    freshAirCFM: faCfm,
+    tfaCfm: tfa?.cfm ?? 0,
+  }).designSupplyCFM;
   const cfmTr        = designCfm / 400;
   // Plant TR is LOAD-ONLY (locked policy 2026-05-20). cfmTr is a sanity ratio only.
   const governingTr  = loadTr;
@@ -846,6 +857,12 @@ const computeDetailed = (room: any, elements: any[], dc: DC, project: any): Deta
     selectedAdp:  coil.selectedADP,
     rshf:         coil.rshf,
     adpUnreachable: coil.adpUnreachable,
+    // Latent / reheat diagnostics (2026-06-10) — the dehumidified-air sized on sensible vs the
+    // airflow the latent would need, and the implied reheat duty if the coil can't dry the room.
+    dehumidSensibleCfm: coil.dehumidifiedCFM,
+    latentCfm:          coil.latentCFM,
+    latentShortfallCfm: coil.latentShortfallCFM,
+    reheatRequiredBtu:  coil.reheatRequiredBTU,
     // Heating with safety
     heatingSafetyPct, heatingPickupPct, includeHumidifier,
     hTransRaw, hVentRaw, hTransSafe, hVentSafe, hSlabRaw, hSlabSafe,
@@ -1947,7 +1964,17 @@ export const generatePDFReport = (
             ['Length × Width × Height',    dims,             'False Ceiling Height', fcNote],
             ['Floor Area',                 `${n0(m.area)} ft²`,  'Room Volume', `${n0(calculateRoomVolume(room))} ft³`],
             ['People / Activity',          `${n0(asNum(room.peopleCount, 0))} persons  /  ${String(room.activityType || '—')}`, 'FACPH / FA CFM', `${n1(asNum(room.facph, 0))} ACH  /  ${n0(m.faCfm)} CFM`],
-            ['Lighting / Equip / Others',  `${asNum(room.lightsWattsPerSqft, 0)} W/ft²  /  ${asNum(room.equipmentKW, 0)} kW  /  ${asNum(room.othersKW, 0)} kW`, 'ACH / Total Supply CFM', `${n1(m.totalAch)} ACH  /  ${n0(m.totalSupplyCfm)} CFM`],
+            ['Lighting / Equip / Others',  `${asNum(room.lightsWattsPerSqft, 0)} W/ft²  /  ${asNum(room.equipmentKW, 0)} kW  /  ${asNum(room.othersKW, 0)} kW`,
+              resolveRoomSupplyBasis(room.supplyCfmBasis, project?.supplyBasis) === 'ach' ? 'ACH / Total Supply CFM' : 'Supply Basis / Design CFM',
+              resolveRoomSupplyBasis(room.supplyCfmBasis, project?.supplyBasis) === 'ach'
+                ? `${n1(m.totalAch)} ACH  /  ${n0(m.totalSupplyCfm)} CFM`
+                : `Dehumidified (DSCFM)  /  ${n0(m.designCfm)} CFM`],
+            ...(m.latentShortfallCfm > 1
+              ? [['Latent / Reheat',
+                  `Coil @ ${n0(m.selectedAdp)}°F can't fully dry this room — add reheat ≈ ${n0(m.reheatRequiredBtu)} BTU/h, or decouple latent to a DOAS / desiccant`,
+                  'Dehumid (sens.) / Latent need',
+                  `${n0(m.dehumidSensibleCfm)} / ${n0(m.latentCfm)} CFM`]]
+              : []),
           ],
           theme: 'grid',
           styles: { fontSize: 7.5, cellPadding: 1.8, textColor: C.ink },

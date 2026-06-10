@@ -606,8 +606,77 @@ Q_vl × BF          ─┘
             </table>
             <p className="text-[10px] text-cyan-700 mt-1">
               The <em>indicated ADP</em> is computed from the GSHF / saturation-curve intersection and may fall anywhere in the 35–65 °F search range.
-              The <em>selected ADP</em> = max(indicated ADP, min ADP for system type). If the selected ADP rises significantly above the indicated ADP,
+              The <em>selected ADP</em> = max(indicated ADP, min ADP <strong>floor</strong>). If the selected ADP rises significantly above the indicated ADP,
               the latent load may not be fully removed — consider upgrading to a lower-ADP system or adding a dedicated dehumidifier.
+            </p>
+          </div>
+
+          {/* Design Mode + Supply-air basis — added 2026-06-10 */}
+          <div className="p-3 bg-indigo-50 border border-indigo-200 rounded-lg text-[11px] text-indigo-900 space-y-2">
+            <p className="font-bold text-indigo-800 text-[12px]">Design Mode — one project choice that sets the ADP floor AND the default airflow basis</p>
+            <p>
+              Each project picks a single <strong>Design Mode</strong> (Project ▸ Edit dialog). It fixes both how cold the coil runs
+              (the selected-ADP floor) and how each room's supply airflow is sized by default. Any individual room can still override
+              its supply basis (DSCFM ⇄ ACH).
+            </p>
+            <table className="w-full text-[10.5px] border border-indigo-200 rounded overflow-hidden mt-1">
+              <thead>
+                <tr className="bg-indigo-100 text-indigo-900">
+                  <th className="text-left px-2 py-1 font-bold">Design Mode</th>
+                  <th className="text-center px-2 py-1 font-bold">ADP floor</th>
+                  <th className="text-center px-2 py-1 font-bold">Default airflow</th>
+                  <th className="text-left px-2 py-1 font-bold">Use for</th>
+                </tr>
+              </thead>
+              <tbody>
+                {[
+                  ['Comfort', '54 °F', 'DSCFM', 'Offices / hotels / normal comfort — 7 °C CHW, ~55 °F supply, ~400 CFM/TR (standard Indian practice)'],
+                  ['Dehumidification', '44 / 42 °F', 'DSCFM', 'Humid / latent-driven / process spaces that must chase a cold coil'],
+                  ['Air-change', '54 °F', 'ACH', 'Spaces sized by ventilation / air-change rate rather than thermal load'],
+                ].map(([m, adp, air, use]) => (
+                  <tr key={m} className="border-t border-indigo-100">
+                    <td className="px-2 py-1 font-semibold">{m}</td>
+                    <td className="px-2 py-1 text-center font-mono font-bold text-indigo-800">{adp}</td>
+                    <td className="px-2 py-1 text-center font-mono font-bold text-indigo-800">{air}</td>
+                    <td className="px-2 py-1 text-gray-700">{use}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            <p className="text-[10px] text-indigo-700">
+              <strong>Comfort vs Dehumidification — why 54 °F:</strong> a conventional 7 °C (44.6 °F) chilled-water plant, after coil
+              approach, realistically delivers an ADP of ~52–55 °F and a ~55 °F supply (no diffuser sweat / draught). The 44/42 °F
+              physical floors only apply when the project is explicitly in Dehumidification mode. Legacy projects (no Design Mode set)
+              keep the physical floor + DSCFM.
+            </p>
+          </div>
+
+          {/* Supply basis either/or + flags */}
+          <div className="p-3 bg-emerald-50 border border-emerald-200 rounded-lg text-[11px] text-emerald-900 space-y-2">
+            <p className="font-bold text-emerald-800 text-[12px]">Supply-air basis is EITHER/OR — not a max floor</p>
+            <p>
+              <strong>DSCFM (Dehumidified):</strong> sizes airflow on the <em>sensible</em> Carrier quantity
+              <code> ERSH / (1.08 × (1−BF) × (T_room − T_ADP)) </code>, floored only at the fresh-air OA so supply ≥ outdoor air.
+              The ACH preset is a <em>reference</em> here, NOT a floor — the dehumidified figure governs even when it is below the
+              air-change number.
+            </p>
+            <p>
+              <strong>ACH (Air-change):</strong> sizes airflow on <code>max(sensible-at-fixed-ADP, ACH × Volume / 60)</code>.
+            </p>
+            <p className="text-[10px]">
+              On a normal coil (ADP on the GSHF line) the sensible and latent airflows coincide, so DSCFM <em>is</em> the whole answer.
+              They only diverge when the ADP is forced off the line (low-SHF / humid room).
+            </p>
+            <p className="pt-1 border-t border-emerald-200">
+              <strong>⚠ Latent / DOAS flag</strong> (shown on both bases): when the coil at the selected ADP cannot remove the moisture,
+              the room read-out shows the dehumidified airflow the latent <em>would</em> need and the implied
+              <strong> reheat duty</strong>. That signals a deep-latent space — handle it with <strong>reheat</strong> or a
+              <strong> DOAS / desiccant</strong>, never by inflating the airflow.
+            </p>
+            <p>
+              <strong>⚠ Air-change / OA check</strong> (DSCFM only): if the dehumidified airflow falls below the ACH-preset airflow, the
+              fixed OA FACPH becomes a larger % of a smaller supply (e.g. 25% → 43%). The read-out flags this so you can verify
+              ventilation / air distribution, or switch that room to the ACH basis.
             </p>
           </div>
         </CardContent>
@@ -628,8 +697,8 @@ Q_vl × BF          ─┘
           <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
             <FBlock label="Plant Cooling Capacity (from Grand Total Heat)" color="text-amber-600"
               code={'plantTR = GTH / 12 000  [tons refrigeration]\n1 TR = 12 000 BTU/h\n\nThe chiller / DX plant is sized on COIL LOAD only.\nAirflow is a separate exercise (see Design CFM).'} />
-            <FBlock label="Design Airflow (from dehumidified CFM)" color="text-amber-600"
-              code={'DSCFM = max(CSH / (1.08 × (1−BF) × ΔT), ACH·CFM)\n  ΔT is supply ΔT at fixed system ADP.\n\nDrives: AHU fan, duct sizing, diffuser count.\nDoes NOT inflate plant TR.'} />
+            <FBlock label="Design Airflow — EITHER/OR basis (2026-06-10)" color="text-amber-600"
+              code={'Per-room supply basis (set by project Design Mode,\n room-overridable). NOT a max between the two:\n\n DSCFM basis = max( CSH/(1.08·(1−BF)·ΔT) , freshAir OA )\n   → the SENSIBLE dehumidified-air quantity,\n     floored ONLY at the outdoor-air the room introduces.\n ACH basis   = max( sensible-at-fixed-ADP , ACH·Volume/60 )\n\nDrives: AHU fan, duct sizing, diffuser count.\nThe ACH preset is a REFERENCE under DSCFM, not a floor —\nthe latent excess is surfaced as reheat/DOAS, not airflow.\nDoes NOT inflate plant TR.'} />
             <FBlock label="CFM/TR — sanity ratio (display only)" color="text-amber-600"
               code={'cfmPerTR = DSCFM / plantTR  [CFM per TR]\n\nTypical comfort cooling: 350 – 450 CFM/TR\nHigh-sensible spaces (IT, storage): 500 – 1000\nLow-SHF (kitchens, pool): 250 – 350\n\nNo longer used as a governing input — it is a\nCROSS-CHECK to verify duct sizing is consistent.'} />
             <FBlock label="Required TR with overall safety factor" color="text-amber-600"

@@ -14,6 +14,9 @@ interface Project {
   location: string;
   userId?: string;
   systemType: string;
+  designMode?: 'comfort' | 'dehumidification' | 'air-change';
+  adpBasis?: 'comfort' | 'dehumidification';
+  supplyBasis?: 'dscfm' | 'ach';
   summerDesignTemp: number;
   summerDesignHumidity: number;
   winterDesignTemp?: number;
@@ -72,6 +75,9 @@ export default function Dashboard({ currentUser, onProjectOpen, onPageChange, us
           location: np.location ?? '',
           userId: np.userId,
           systemType: np.systemType || 'CAC',
+          designMode: np.designMode ?? npData.designMode,
+          adpBasis: np.adpBasis ?? npData.adpBasis,
+          supplyBasis: np.supplyBasis ?? npData.supplyBasis,
           summerDesignTemp: npData.summerDesignTemp ?? 95,
           summerDesignHumidity: npData.summerDesignHumidity ?? 50,
           winterDesignTemp: npData.winterDesignTemp,

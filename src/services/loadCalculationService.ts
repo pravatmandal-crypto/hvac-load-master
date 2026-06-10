@@ -24,6 +24,7 @@ import {
   getRecommendedAch,
   getMinAdp,
   resolveSupplyCfm,
+  resolveRoomSupplyBasis,
   type SupplyCfmBasis,
   type RoomDetails,
 } from '../lib/hvac';
@@ -107,6 +108,7 @@ export interface RoomCalcResult {
  * @param elements   Envelope elements for this room
  * @param dc         Resolved design conditions (summer + winter + optional monsoon)
  * @param systemType System type string used for ADP selection ('Chiller', 'VRF', etc.)
+ * @param adpBasis   Project ADP-floor basis ('comfort' | 'dehumidification'); see getMinAdp.
  * @returns          All computed metrics — caller merges into local state as needed
  */
 export async function calculateAndPersistRoom(
@@ -116,6 +118,8 @@ export async function calculateAndPersistRoom(
   elements: EnvelopeElement[],
   dc: RoomCalcDesignConditions,
   systemType?: string,
+  adpBasis?: string,
+  projectSupplyBasis?: string,
 ): Promise<RoomCalcResult> {
   const rd: RoomDetails = {
     id: room.id,
@@ -143,7 +147,7 @@ export async function calculateAndPersistRoom(
   const sensibleSafetyPct = Number(room.sensibleSafetyPercent ?? room.sensibleSafetyFactor ?? 10);
   const latentSafetyPct = Number(room.latentSafetyPercent ?? room.latentSafetyFactor ?? 5);
   const overallSafetyPct = Number(room.overallSafetyPercent ?? room.grandTotalSafetyFactor ?? 3);
-  const minAdp = getMinAdp(systemType);
+  const minAdp = getMinAdp(systemType, adpBasis);
 
   // ── Strategy: primary (default, current behavior) vs tfa-cold ────────────
   // When TFA/DOAS is active, OA is conditioned by a separate unit. The
@@ -206,7 +210,7 @@ export async function calculateAndPersistRoom(
   // Supply-air basis: 'dscfm' (DEFAULT, Carrier/ASHRAE dehumidified-air) vs 'ach' (legacy
   // ACH-preset). DSCFM is the default — only an explicit 'ach' opts out. The DOAS is
   // independent of this — it always sizes off the OA FACPH.
-  const supplyCfmBasis: SupplyCfmBasis = room.supplyCfmBasis === 'ach' ? 'ach' : 'dscfm';
+  const supplyCfmBasis: SupplyCfmBasis = resolveRoomSupplyBasis(room.supplyCfmBasis, projectSupplyBasis);
   const supply = resolveSupplyCfm({
     basis: supplyCfmBasis,
     isTFA,

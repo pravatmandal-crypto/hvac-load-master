@@ -199,7 +199,14 @@ export interface CoilParameters {
   selectedADP: number;
   sensibleCFM: number;
   minAdpSensibleCFM: number;
+  /** Carrier/ASHRAE dehumidified-air quantity = ERSH / (1.08 × (1−BF) × (t_room − t_adp)). Sensible-based. */
   dehumidifiedCFM: number;
+  /** Air quantity the LATENT load would demand at the selected ADP. Equals dehumidifiedCFM on a properly selected coil. */
+  latentCFM: number;
+  /** max(0, latentCFM − dehumidifiedCFM). >0 means the ADP is off the ESHF line — moisture cannot be met by cold air alone. */
+  latentShortfallCFM: number;
+  /** Reheat duty (BTU/h) implied by holding setpoint while the coil over-cools to wring out the shortfall moisture. */
+  reheatRequiredBTU: number;
   bypassFactor: number;
   // True when actual GSHF lies below the minimum SHF achievable on the saturation
   // curve in the search range — meaning no real ADP intersection exists and
@@ -207,15 +214,23 @@ export interface CoilParameters {
   adpUnreachable: boolean;
 }
 
-// Minimum apparatus dew point (selected ADP floor) by system type.
-// Single source of truth — was previously duplicated across 6 files with
-// inconsistent values (42/44/50 for chiller, 38/42/54 for VRF). Canonical
-// values match standard practice: 44°F chilled-water coils, 42°F DX/VRF.
-export function getMinAdp(systemType?: string): number {
+// Standard comfort apparatus dew point floor. Anchored to conventional 7°C (44.6°F) CHW
+// plants: with a finite coil approach the achievable ADP lands ~52–55°F, giving ~55°F supply
+// air (no draft / no diffuser sweat) and ~400 CFM/TR — the textbook Indian comfort design point.
+export const COMFORT_ADP_FLOOR_F = 54;
+
+// Minimum apparatus dew point (selected ADP floor).
+//  • adpBasis 'comfort' (DEFAULT for new projects, 2026-06-10) → COMFORT_ADP_FLOOR_F, never below
+//    the system's physical minimum. Matches standard comfort practice (7°C CHW, ~55°F supply).
+//  • adpBasis 'dehumidification' → the physical coil minimum (44°F CHW, 42°F DX/VRF). Use for
+//    genuinely latent-driven / humid / process spaces that must chase a cold coil.
+//  • adpBasis undefined → physical minimum (legacy behaviour, keeps existing projects unchanged).
+// Single source of truth — was previously duplicated across 6 files.
+export function getMinAdp(systemType?: string, adpBasis?: string): number {
   const st = String(systemType || '').toLowerCase();
-  if (st === 'chiller' || st === 'hydronic') return 44;
-  if (st === 'vrf' || st === 'hybrid') return 42;
-  return 44; // CAC, VAV, Package, Split, AHU, unknown — standard DX floor
+  const physicalMin = (st === 'chiller' || st === 'hydronic') ? 44 : (st === 'vrf' || st === 'hybrid') ? 42 : 44;
+  if (String(adpBasis || '').toLowerCase() === 'comfort') return Math.max(physicalMin, COMFORT_ADP_FLOOR_F);
+  return physicalMin; // 'dehumidification' or undefined (legacy) → physical coil floor
 }
 
 export interface VentilationLoadResult {

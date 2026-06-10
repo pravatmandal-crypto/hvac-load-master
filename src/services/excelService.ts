@@ -24,6 +24,8 @@ import {
   calculateVentilationLoad,
   getRecommendedAch,
   getMinAdp,
+  resolveSupplyCfm,
+  resolveRoomSupplyBasis,
   type DesignConditions,
   type EnvelopeElement,
 } from '../lib/hvac';
@@ -40,6 +42,8 @@ type SeasonResult = {
   coilSensible: number; coilLatent: number;
   grandTotal: number; totalTR: number;
   totalSupplyCFM: number; designSupplyCFM: number;
+  selectedAdp: number; dehumidSensibleCfm: number; latentCfm: number;
+  latentShortfallCfm: number; reheatRequiredBtu: number;
   heatingLoad: number;
 };
 
@@ -357,10 +361,19 @@ function calcSeason(project: any, zos: any, room: any, elements: EnvelopeElement
   const coilL  = erlh + vent.latent   * (1 - BF);
   const grand  = (coilS + coilL) * (1 + oPct / 100);
 
-  const coil = calculateCoilParameters(coilS, coilL, dc.indoorTemp, dc.indoorHumidity, asNum(project?.altitude), BF, 35, 65, getMinAdp(project?.systemType));
+  const coil = calculateCoilParameters(coilS, coilL, dc.indoorTemp, dc.indoorHumidity, asNum(project?.altitude), BF, 35, 65, getMinAdp(project?.systemType, project?.adpBasis));
   const ach  = Math.max(getRecommendedAch(room.activityType ?? room.achProfile), asNum(room.facph));
   const totCFM = (volume * ach) / 60;
-  const desCFM = Math.max(coil.dehumidifiedCFM, totCFM);
+  const freshAirCFM = (volume * asNum(room.facph)) / 60;
+  // Either/or supply basis (matches the app + PDF) — no longer max(dehumidified, ACH).
+  const supply = resolveSupplyCfm({
+    basis: resolveRoomSupplyBasis(room.supplyCfmBasis, project?.supplyBasis),
+    isTFA: false, isTfaOnly: false,
+    dehumidifiedCFM: coil.dehumidifiedCFM,
+    minAdpSensibleCFM: coil.minAdpSensibleCFM,
+    totalSupplyCFM: totCFM, freshAirCFM, tfaCfm: 0,
+  });
+  const desCFM = supply.designSupplyCFM;
   const heating = calculateHeatingLoad(rd, elements, dc);
 
   return {
@@ -371,6 +384,11 @@ function calcSeason(project: any, zos: any, room: any, elements: EnvelopeElement
     ersh, erlh, coilSensible: coilS, coilLatent: coilL,
     grandTotal: grand, totalTR: grand / 12000,
     totalSupplyCFM: totCFM, designSupplyCFM: desCFM,
+    selectedAdp: coil.selectedADP,
+    dehumidSensibleCfm: coil.dehumidifiedCFM,
+    latentCfm: coil.latentCFM,
+    latentShortfallCfm: coil.latentShortfallCFM,
+    reheatRequiredBtu: coil.reheatRequiredBTU,
     heatingLoad: heating.totalHeatingLoad,
   };
 }
@@ -1397,6 +1415,18 @@ function buildRoomSheet(
   putV(ws, row, 5, incMon && monCFM !== null ? monCFM : '—', S.total);
   putV(ws, row, 6, incMon ? 'CFM' : '', S.total);
   row++;
+
+  // Latent / reheat diagnostic — flagged when the coil can't dry the room at its selected ADP.
+  const sLatShort = record.summer.latentShortfallCfm > 1;
+  const mLatShort = !!record.monsoon && record.monsoon.latentShortfallCfm > 1;
+  if (sLatShort || mLatShort) {
+    const src = sLatShort ? record.summer : record.monsoon!;
+    putV(ws, row, 1, 'Latent / Reheat', S.label);
+    putV(ws, row, 2, r0(src.reheatRequiredBtu), S.calc); putV(ws, row, 3, 'BTU/h', S.calc);
+    putV(ws, row, 4, '');
+    putV(ws, row, 5, `Coil @ ${r0(src.selectedAdp)}°F can't fully dry — add reheat or decouple latent to a DOAS (latent needs ${r0(src.latentCfm)} CFM vs ${r0(src.dehumidSensibleCfm)} on sensible)`, S.calc);
+    row++;
+  }
 
   // Governing TR (key result — typed as value, not formula, to guarantee correctness)
   const govTRcell = rc(row, 2);

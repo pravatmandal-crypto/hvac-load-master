@@ -15,6 +15,7 @@ import {
   calculateHeatingLoad,
   getRecommendedAch,
   resolveSupplyCfm,
+  resolveRoomSupplyBasis,
   getMinAdp,
   type DesignConditions,
   type RoomDetails,
@@ -46,6 +47,8 @@ function computeZoneTotals(
   dc: DesignConditions,
   isChiller: boolean,
   equipSystems: any[] = [],
+  projectSupplyBasis?: string,
+  adpBasis?: string,
 ) {
   // DOAS/TFA awareness via the shared resolver (room.tfaMode-driven, legacy link
   // fallback) so the zone strip shows the REDUCED post-TFA space coil, consistent
@@ -134,7 +137,7 @@ function computeZoneTotals(
       // Pass derived system type to centralized helper. Preserves the previous
       // 44/42 split for chiller vs VRF; non-chiller types now use the canonical
       // 42°F per getMinAdp (matches old isChiller=false behavior).
-      const minAdp = getMinAdp(isChiller ? 'chiller' : 'vrf');
+      const minAdp = getMinAdp(isChiller ? 'chiller' : 'vrf', adpBasis);
       const coil = calculateCoilParameters(
         coilSensible,
         coilLatent,
@@ -156,7 +159,7 @@ function computeZoneTotals(
       // DSCFM is the default — only an explicit 'ach' opts out. The DOAS is independent — it
       // always sizes off the OA FACPH. See lib/hvac/supplyCfm.
       const designCFM = resolveSupplyCfm({
-        basis: room.supplyCfmBasis === 'ach' ? 'ach' : 'dscfm',
+        basis: resolveRoomSupplyBasis(room.supplyCfmBasis, projectSupplyBasis),
         isTFA, isTfaOnly,
         dehumidifiedCFM: coil.dehumidifiedCFM,
         minAdpSensibleCFM: coil.minAdpSensibleCFM,
@@ -290,12 +293,12 @@ function ZoneSummaryBar({
   }), [dc, project]);
 
   const summerTotals = useMemo(
-    () => computeZoneTotals(zoneRooms, envelopeElements, dc, isChiller, equipSystems),
-    [zoneRooms, envelopeElements, dc, isChiller, equipSystems],
+    () => computeZoneTotals(zoneRooms, envelopeElements, dc, isChiller, equipSystems, project?.supplyBasis, project?.adpBasis),
+    [zoneRooms, envelopeElements, dc, isChiller, equipSystems, project?.supplyBasis, project?.adpBasis],
   );
   const monsoonTotals = useMemo(
-    () => (includeMonsoon ? computeZoneTotals(zoneRooms, envelopeElements, monsoonDc, isChiller, equipSystems) : null),
-    [zoneRooms, envelopeElements, monsoonDc, isChiller, includeMonsoon, equipSystems],
+    () => (includeMonsoon ? computeZoneTotals(zoneRooms, envelopeElements, monsoonDc, isChiller, equipSystems, project?.supplyBasis, project?.adpBasis) : null),
+    [zoneRooms, envelopeElements, monsoonDc, isChiller, includeMonsoon, equipSystems, project?.supplyBasis, project?.adpBasis],
   );
   const summerGoverningRoom = useMemo(
     () => computeGoverningRoom(zoneRooms, envelopeElements, dc, isChiller),
@@ -503,12 +506,12 @@ function ZoneCollapsedBadge({
   }), [dc, project]);
 
   const summer = useMemo(
-    () => computeZoneTotals(zoneRooms, envelopeElements, dc, isChiller, equipSystems),
-    [zoneRooms, envelopeElements, dc, isChiller, equipSystems],
+    () => computeZoneTotals(zoneRooms, envelopeElements, dc, isChiller, equipSystems, project?.supplyBasis, project?.adpBasis),
+    [zoneRooms, envelopeElements, dc, isChiller, equipSystems, project?.supplyBasis, project?.adpBasis],
   );
   const monsoon = useMemo(
-    () => (includeMonsoon ? computeZoneTotals(zoneRooms, envelopeElements, monsoonDc, isChiller, equipSystems) : null),
-    [zoneRooms, envelopeElements, monsoonDc, isChiller, includeMonsoon, equipSystems],
+    () => (includeMonsoon ? computeZoneTotals(zoneRooms, envelopeElements, monsoonDc, isChiller, equipSystems, project?.supplyBasis, project?.adpBasis) : null),
+    [zoneRooms, envelopeElements, monsoonDc, isChiller, includeMonsoon, equipSystems, project?.supplyBasis, project?.adpBasis],
   );
 
   if (zoneRooms.length === 0) return null;

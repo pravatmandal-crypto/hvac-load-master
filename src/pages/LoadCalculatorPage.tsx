@@ -19,6 +19,7 @@ import {
   MapPin, Thermometer, Droplets, ArrowLeft, Loader2,
 } from 'lucide-react';
 import LoadCalculator, { type LoadCalculatorHandle } from '../components/hvac/LoadCalculator';
+import { resolveDesignMode, type DesignMode } from '../lib/hvac/supplyCfm';
 import { fetchLocationData } from '../services/geminiService';
 
 // ─── Psychrometric helpers ────────────────────────────────────────────────────
@@ -55,6 +56,12 @@ interface Project {
   latitude?: number;
   altitude?: number;
   systemType: string;
+  /** Unified project Design Mode (single selector). Derives adpBasis + default supplyBasis. */
+  designMode?: DesignMode;
+  /** Derived from designMode (denormalized for getMinAdp): 'comfort' (54°F) vs 'dehumidification' (44/42°F). */
+  adpBasis?: 'comfort' | 'dehumidification';
+  /** Derived from designMode (denormalized): the default room supply-air basis. */
+  supplyBasis?: 'dscfm' | 'ach';
   includeMonsoon: boolean;
   includeWinter: boolean;
   // Outside
@@ -93,6 +100,7 @@ const EMPTY_FORM = {
   latitude: '',
   longitude: '',
   altitude: '',
+  designMode: 'comfort' as DesignMode,
   includeMonsoon: false,
   includeWinter: false,
   // Outside
@@ -222,6 +230,9 @@ export default function LoadCalculatorPage({ currentUser, initialProjectId, user
           latitude: data.latitude,
           altitude: data.altitude,
           systemType: p.systemType || 'CAC',
+          designMode: p.designMode ?? data.designMode,
+          adpBasis: p.adpBasis ?? data.adpBasis,
+          supplyBasis: p.supplyBasis ?? data.supplyBasis,
           includeMonsoon: p.includeMonsoon ?? false,
           includeWinter: p.includeWinter ?? true,
           summerDesignTemp: data.summerDesignTemp ?? 95,
@@ -314,6 +325,7 @@ export default function LoadCalculatorPage({ currentUser, initialProjectId, user
       latitude: project.latitude != null ? String(project.latitude) : '',
       longitude: project.longitude != null ? String(project.longitude) : '',
       altitude: project.altitude != null ? String(project.altitude) : '',
+      designMode: (project.designMode ?? 'comfort') as DesignMode,
       includeMonsoon: project.includeMonsoon ?? false,
       includeWinter: project.includeWinter ?? false,
       summerTemp: String(project.summerDesignTemp ?? p.summerDesignTemp ?? 95),
@@ -486,6 +498,9 @@ export default function LoadCalculatorPage({ currentUser, initialProjectId, user
       name: form.name.trim(),
       location: (form.location ?? '').trim(),
       systemType: editingProject?.systemType || 'CAC',
+      designMode: form.designMode,
+      adpBasis: resolveDesignMode(form.designMode).adpBasis ?? 'comfort',
+      supplyBasis: resolveDesignMode(form.designMode).supplyBasis,
       includeMonsoon: form.includeMonsoon,
       includeWinter: form.includeWinter,
       userId: editingProject ? (editingProject.userId ?? currentUser.uid) : currentUser.uid,
@@ -1050,6 +1065,33 @@ function ProjectDialog({
                 <Input type="text" inputMode="decimal" step="1" placeholder="e.g. 745"
                   value={form.altitude} onChange={(e) => setField('altitude', e.target.value)} className="h-9" />
               </div>
+            </div>
+          </div>
+
+          <Separator className="dark:bg-slate-700" />
+
+          {/* ── Design Mode (unified: coil ADP + default airflow basis) ── */}
+          <div className="space-y-2">
+            <div className="flex items-center gap-2">
+              <Thermometer className="h-4 w-4 text-sky-500" />
+              <h3 className="text-sm font-semibold text-slate-700 dark:text-slate-200">Design Mode</h3>
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 items-start">
+              <select
+                value={form.designMode}
+                onChange={(e) => setField('designMode', e.target.value)}
+                className="h-9 rounded-md border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 px-2 text-sm"
+              >
+                <option value="comfort">Comfort — DSCFM @ 54°F ADP (7°C CHW, ~55°F supply)</option>
+                <option value="dehumidification">Dehumidification — DSCFM @ 44/42°F ADP (chase a cold coil)</option>
+                <option value="air-change">Air-change — ACH airflow @ 54°F ADP</option>
+              </select>
+              <p className="text-[11px] leading-snug text-slate-500 dark:text-slate-400">
+                Sets the coil ADP floor <em>and</em> the default room airflow basis in one choice.
+                <span className="font-semibold"> Comfort</span> = standard Indian practice (~400 CFM/TR).
+                <span className="font-semibold"> Dehumidification</span> = humid / latent-driven / process spaces.
+                <span className="font-semibold"> Air-change</span> = size on ACH. Any room can still override its supply basis (DSCFM/ACH) individually.
+              </p>
             </div>
           </div>
 

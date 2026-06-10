@@ -183,9 +183,21 @@ export const calculateCoilParameters = (
   const latentCFM = roomLatent / (
     ASHRAE_CONSTANTS.LATENT_COOLING_CONSTANT * deltaWToAdpGrains * contactFactor
   );
-  // dehumidifiedCFM keeps max(sensible, latent) for diagnostic display.
-  // For equipment sizing use sensibleCFM — per methodology DSCFM = CSH / (1.08 × ΔT_supply).
-  const dehumidifiedCFM = Math.max(sensibleCFM, latentCFM);
+  // Dehumidified-air quantity = the Carrier/ASHRAE sensible formula at the selected ADP:
+  //   cfm_da = ERSH / (1.08 × (1 − BF) × (t_room − t_adp))
+  // When the ADP sits ON the ESHF line, sensibleCFM and latentCFM coincide and this IS the
+  // whole answer (so max() would be a no-op). When the ADP is forced off the line — a low-SHF
+  // room pinned to the ADP floor — the latent-air requirement exceeds it. That gap CANNOT be met
+  // by more cold air alone; it needs reheat or a decoupled latent device (DOAS / desiccant). So we
+  // size on the sensible figure and surface the shortfall explicitly instead of silently inflating
+  // the airflow with max(sensible, latent), which over-sizes the AHU/duct/fan and hides the reheat.
+  const dehumidifiedCFM = sensibleCFM;
+  const latentShortfallCFM = Math.max(0, latentCFM - sensibleCFM);
+  const dehumidRise = deltaTToAdp * contactFactor; // (1 − BF)(t_room − t_adp)
+  // Excess sensible cooling the latent-governed airflow would over-deliver = the reheat duty needed
+  // to hold the room at setpoint while the coil keeps wringing out moisture. (= 0 on a normal coil.)
+  const reheatRequiredBTU =
+    latentShortfallCFM * ASHRAE_CONSTANTS.SENSIBLE_COOLING_CONSTANT * dehumidRise;
 
   // minAdpSensibleCFM: DSCFM computed at the FIXED system design ADP (selectedAdpMinF).
   // The 400 CFM/TR rule is calibrated for this ADP. When indicatedADP floats above
@@ -212,6 +224,9 @@ export const calculateCoilParameters = (
     sensibleCFM,
     minAdpSensibleCFM,
     dehumidifiedCFM,
+    latentCFM,
+    latentShortfallCFM,
+    reheatRequiredBTU,
     bypassFactor,
     adpUnreachable,
   };

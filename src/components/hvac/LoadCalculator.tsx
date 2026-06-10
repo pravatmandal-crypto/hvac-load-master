@@ -38,6 +38,7 @@ import {
   getRecommendedAch,
   getMinAdp,
   resolveSupplyCfm,
+  resolveRoomSupplyBasis,
   resolveRoomTfa,
   getProjectDoas,
   pickCoolingSource,
@@ -592,7 +593,7 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
       bf,
       35,
       65,
-      getMinAdp(project?.systemType),
+      getMinAdp(project?.systemType, project?.adpBasis),
     );
     const presetTotalACH = getRecommendedAch(roomSource.achProfile ?? roomSource.activityType);
     const totalSupplyACH = Math.max(presetTotalACH, rd.facph);
@@ -601,7 +602,7 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
     // Supply-air basis: 'dscfm' (DEFAULT, dehumidified-air) vs 'ach' (legacy ACH-preset).
     // DSCFM is the default — only an explicit 'ach' opts out. The DOAS is independent of this
     // — it always sizes off the OA FACPH. See lib/hvac/supplyCfm.
-    const supplyCfmBasis = roomSource.supplyCfmBasis === 'ach' ? 'ach' : 'dscfm';
+    const supplyCfmBasis = resolveRoomSupplyBasis(roomSource.supplyCfmBasis, project?.supplyBasis);
     const supply = resolveSupplyCfm({
       basis: supplyCfmBasis,
       isTFA, isTfaOnly,
@@ -644,7 +645,7 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
     const monsoonCoilParams = calculateCoilParameters(
       monsoonCoilSen, monsoonCoilLat,
       dc.indoorTemp, dc.indoorHumidity, dc.altitude || 0,
-      bf, 35, 65, getMinAdp(project?.systemType),
+      bf, 35, 65, getMinAdp(project?.systemType, project?.adpBasis),
     );
     const monsoonSupply = resolveSupplyCfm({
       basis: supplyCfmBasis,
@@ -974,7 +975,7 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
         BF_LOCAL,
         35,
         65,
-        getMinAdp(project?.systemType),
+        getMinAdp(project?.systemType, project?.adpBasis),
       );
       const presetTotalACH = getRecommendedAch(room.achProfile ?? room.activityType);
       const totalSupplyACH = Math.max(presetTotalACH, rd.facph);
@@ -982,7 +983,7 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
       const freshAirCFM = (calculateRoomVolume(rd) * rd.facph) / 60;
       // Supply-air basis: 'dscfm' (DEFAULT) vs 'ach' (legacy). See lib/hvac/supplyCfm.
       const designSupplyCFM = resolveSupplyCfm({
-        basis: room.supplyCfmBasis === 'ach' ? 'ach' : 'dscfm',
+        basis: resolveRoomSupplyBasis(room.supplyCfmBasis, project?.supplyBasis),
         isTFA, isTfaOnly,
         dehumidifiedCFM: coilLocal.dehumidifiedCFM,
         minAdpSensibleCFM: coilLocal.minAdpSensibleCFM,
@@ -1284,9 +1285,17 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
     const stale: string[] = [];
     for (const zoneRooms of Object.values(rooms)) {
       for (const r of zoneRooms as any[]) {
-        const loadTR = Number(r._calcLoadTR) || 0;
-        const cfmTR = Number(r._calcCfmTR) || 0;
-        if (loadTR > 0 && cfmTR > loadTR + 0.01) stale.push(r.id);
+        // A room was sized under OLD governance iff its STORED required TR was inflated by
+        // cfmTR, i.e. requiredTR = max(loadTR, cfmTR) × safety instead of load-only loadTR ×
+        // safety. Detect that directly (not the permanent "cfmTR > loadTR" property), so:
+        //   • a fresh recompute writes load-only required TR → banner clears, and
+        //   • a monsoon-governed room (load > cfm) or a trivial cfmTR≈loadTR margin → no false flag.
+        const loadTR = Math.max(Number(r._calcLoadTR) || 0, Number(r._calcMonsoonLoadTR) || 0);
+        const requiredTR = Number(r._calcOverallRequiredTR ?? r._calcRequiredTR) || 0;
+        if (loadTR <= 0 || requiredTR <= 0) continue;
+        const safety = (Number(r.overallSafetyPercent ?? r.grandTotalSafetyFactor) || 3) / 100;
+        const loadOnlyRequiredTR = loadTR * (1 + safety);
+        if (requiredTR > loadOnlyRequiredTR * 1.01) stale.push(r.id); // >1% inflation = old governance
       }
     }
     return stale;

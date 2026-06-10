@@ -146,6 +146,7 @@ function ResultTable({ rows }: { rows: [string, string, string][] }) {
 export default function UserManual() {
   const toc = [
     { id: 'quick-start',   label: 'Quick Start Workflow' },
+    { id: 'design-mode',   label: 'Design Mode & Supply Basis' },
     { id: 'equip-library', label: 'Equipment Library' },
     { id: 'equip-guide',   label: 'Equipment Selection Guide' },
     { id: 'vrf',          label: 'VRF System' },
@@ -228,6 +229,85 @@ export default function UserManual() {
           <Note>The HVAC Systems page is the master for System→Zone→Room hierarchy. Rooms assigned there are automatically visible in Load Calculator and Equipment Selection.</Note>
         </div>
       </div>
+
+      {/* ════════════════════════════════════════════════════════════════════════
+          DESIGN MODE & SUPPLY-AIR BASIS  (added 2026-06-10)
+      ════════════════════════════════════════════════════════════════════════ */}
+      <SectionCard
+        id="design-mode"
+        title="Design Mode & Supply-Air Basis"
+        badge="SIZING"
+        badgeColor="bg-sky-100 text-sky-700"
+        icon={Wind}
+        defaultOpen={false}
+      >
+        <p className="text-sm text-gray-600">
+          One project-level <strong>Design Mode</strong> controls two things at once: how cold the cooling coil runs
+          (the apparatus dew-point / ADP floor) and how each room's supply airflow is sized by default. You set it in
+          <strong> Load Calculator → (pick a project) → Edit ✏️ → "Design Mode"</strong>.
+        </p>
+
+        <div className="overflow-x-auto rounded-lg border border-gray-200">
+          <table className="w-full text-xs">
+            <thead>
+              <tr className="bg-gray-100">
+                <th className="px-3 py-2 text-left font-semibold text-gray-600">Design Mode</th>
+                <th className="px-3 py-2 text-center font-semibold text-gray-600">Coil ADP floor</th>
+                <th className="px-3 py-2 text-center font-semibold text-gray-600">Default airflow</th>
+                <th className="px-3 py-2 text-left font-semibold text-gray-600">Pick it for</th>
+              </tr>
+            </thead>
+            <tbody>
+              {[
+                ['Comfort', '54 °F', 'DSCFM', 'Offices, hotels, normal comfort spaces (7 °C CHW, ~55 °F supply, ~400 CFM/TR).'],
+                ['Dehumidification', '44 / 42 °F', 'DSCFM', 'Humid / latent-heavy / process rooms that need a cold coil.'],
+                ['Air-change', '54 °F', 'ACH', 'Rooms sized by ventilation / air-change rate, not cooling load.'],
+              ].map(([m, adp, air, use], i) => (
+                <tr key={m} className={i % 2 === 0 ? 'bg-white' : 'bg-gray-50'}>
+                  <td className="px-3 py-1.5 font-semibold text-gray-800">{m}</td>
+                  <td className="px-3 py-1.5 text-center font-mono font-bold text-sky-700">{adp}</td>
+                  <td className="px-3 py-1.5 text-center font-mono font-bold text-sky-700">{air}</td>
+                  <td className="px-3 py-1.5 text-gray-600">{use}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+
+        <p className="text-xs font-bold text-gray-700 uppercase tracking-wide mt-2">DSCFM vs ACH — the two airflow bases</p>
+        <ul className="list-disc list-inside text-sm text-gray-600 space-y-1">
+          <li><strong>Dehumidified (DSCFM)</strong> — sizes airflow on the cooling/dehumidification load
+            (<span className="font-mono text-xs">CSH ÷ (1.08 × (1−BF) × ΔT)</span>), floored only at the fresh-air OA. The ACH preset is a
+            <em> reference</em>, not a floor — the dehumidified figure governs even if it is smaller.</li>
+          <li><strong>Air changes (ACH)</strong> — sizes airflow on the air-change preset (e.g. 10 ACH) for the activity type.</li>
+        </ul>
+        <Note>It is EITHER/OR — the app does <strong>not</strong> take the larger of the two. Whichever basis the room is on is the airflow it gets (never below the fresh-air OA).</Note>
+
+        <p className="text-xs font-bold text-gray-700 uppercase tracking-wide mt-2">Per-room override</p>
+        <p className="text-sm text-gray-600">
+          Every room inherits the project Design Mode's airflow basis, but you can override one room in
+          <strong> Load Calculator → room → Step 1 Inputs → "Supply Basis"</strong> (DSCFM ⇄ Air changes). Example: a
+          Comfort project (54 °F coil) with one warehouse room flipped to ACH — that room keeps the 54 °F coil but gets
+          the air-change airflow.
+        </p>
+
+        <p className="text-xs font-bold text-gray-700 uppercase tracking-wide mt-2">Two warnings you may see (Supply-Air Basis box)</p>
+        <div className="space-y-2">
+          <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-xs text-amber-900">
+            <strong>⚠ "Latent not met at ADP X °F"</strong> — the coil at that temperature can't dry the room. It shows the airflow the
+            moisture <em>would</em> need and the implied reheat duty. Action: add <strong>reheat</strong> or a <strong>DOAS / desiccant</strong>;
+            do not just raise the airflow. (Shows on both DSCFM and ACH.)
+          </div>
+          <div className="rounded-lg border border-sky-200 bg-sky-50 p-3 text-xs text-sky-900">
+            <strong>⚠ "Air-change / OA check"</strong> (DSCFM only) — the dehumidified airflow dropped below the ACH-preset airflow, so the
+            fixed fresh-air (OA FACPH) is now a bigger % of a smaller supply. Action: confirm ventilation / air distribution is still OK, or
+            switch that room to the ACH basis.
+          </div>
+        </div>
+
+        <Warn>Changing Design Mode (or a room's basis) only updates the live view. Click <strong>"Recompute &amp; save all"</strong> (Global Settings) so the saved numbers used by PDF, Excel and Equipment Selection match. Take a <strong>backup</strong> first.</Warn>
+        <Tip>Legacy projects created before this feature keep their original behaviour until you open Edit and pick a Design Mode.</Tip>
+      </SectionCard>
 
       {/* ════════════════════════════════════════════════════════════════════════
           GLOBAL EQUIPMENT LIBRARY
@@ -1247,7 +1327,7 @@ export default function UserManual() {
         ]} />
 
         <Tip>For Chiller Plants, the Monsoon season typically governs in humid coastal cities. Always enable Monsoon for projects in Mumbai, Chennai, Kochi, Singapore, etc.</Tip>
-        <Note>Chiller ADP is fixed at 44 °F in this tool (standard for chilled-water systems). VRF/Hybrid systems use 42 °F ADP for slightly higher dehumidification capacity.</Note>
+        <Note>The coil ADP floor follows the project <strong>Design Mode</strong> (see the <em>Design Mode &amp; Supply-Air Basis</em> section): <strong>Comfort</strong> = 54 °F, <strong>Dehumidification</strong> = 44 °F for chilled-water / 42 °F for VRF-Hybrid. Use Dehumidification mode for humid / latent-heavy chiller projects.</Note>
       </SectionCard>
 
       {/* ════════════════════════════════════════════════════════════════════════

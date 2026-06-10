@@ -3775,7 +3775,7 @@ export default function EquipmentSelection({
     const presetACH  = getRecommendedAch(room.achProfile ?? room.activityType);
     const totalACH   = Math.max(presetACH, rd.facph);
     const supplyCFM  = (calculateRoomVolume(rd) * totalACH) / 60;
-    const coilParams = calculateCoilParameters(coilSen, coilLat, dc.indoorTemp, dc.indoorHumidity, dc.altitude || 0, bf, 35, 65, getMinAdp(systemType));
+    const coilParams = calculateCoilParameters(coilSen, coilLat, dc.indoorTemp, dc.indoorHumidity, dc.altitude || 0, bf, 35, 65, getMinAdp(systemType, project?.adpBasis ?? project?.data?.adpBasis));
     // TFA-served airflow (corrected 2026-06-07): DOAS supplies only the OA air change;
     // the space AHU moves the recirculation balance (supplyCFM − oaCFM). Size by the recirc
     // floor, not thermal-only. tfa-only corridors are DOAS-fed, so they keep total. Use
@@ -3807,7 +3807,7 @@ export default function EquipmentSelection({
     const mCoilSen = isTfaOnly ? 0 : (isTFA ? Math.max(0, mErsh - mTfaOffSen) : mErsh + mOaSen);
     const mCoilLat = isTfaOnly ? 0 : (isTFA ? Math.max(0, mErlh - mTfaOffLat) : mErlh + mOaLat);
     const mTotalTR = (mCoilSen + mCoilLat) / 12000;
-    const mCoilP   = calculateCoilParameters(mCoilSen, mCoilLat, dc.indoorTemp, dc.indoorHumidity, dc.altitude || 0, bf, 35, 65, getMinAdp(systemType));
+    const mCoilP   = calculateCoilParameters(mCoilSen, mCoilLat, dc.indoorTemp, dc.indoorHumidity, dc.altitude || 0, bf, 35, 65, getMinAdp(systemType, project?.adpBasis ?? project?.data?.adpBasis));
     const mDesignCFM  = (isTFA && !isTfaOnly)
       ? Math.max(mCoilP.minAdpSensibleCFM, supplyCFM - (mTfa?.cfm ?? 0))
       : Math.max(mCoilP.minAdpSensibleCFM, supplyCFM);
@@ -4348,8 +4348,7 @@ export default function EquipmentSelection({
     const indoorTemp = Number(project?.insideSummerTemp ?? project?.data?.insideSummerTemp ?? 75);
     const indoorRH   = Number(project?.insideSummerHumidity ?? project?.data?.insideSummerHumidity ?? 50);
     const altitude   = Number(project?.altitude ?? project?.data?.altitude ?? 0);
-    const sysType    = String(project?.systemType ?? '').toLowerCase();
-    const minAdp     = sysType === 'chiller' ? 44 : sysType === 'vrf' ? 42 : 44;
+    const minAdp     = getMinAdp(project?.systemType, project?.adpBasis ?? project?.data?.adpBasis);
 
     let coil = null;
     if (totalSen > 0 && totalLat > 0) {

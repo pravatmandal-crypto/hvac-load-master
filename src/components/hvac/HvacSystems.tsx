@@ -242,6 +242,8 @@ function RoomEditPanel({ room, projectId, zone, project, onClose, onSaved }: Roo
         elements,
         dc,
         project.systemType,
+        (project as any).adpBasis,
+        (project as any).supplyBasis,
       );
 
       const updated: RoomDoc = { ...form, ...result };
