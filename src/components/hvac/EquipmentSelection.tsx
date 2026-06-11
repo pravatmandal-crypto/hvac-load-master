@@ -4546,17 +4546,18 @@ export default function EquipmentSelection({
     if (idu) Object.values(idu).forEach((val: any) => normalizeIDUList(val).forEach((u: any) => { tr += (u.trCapacity ?? 0) * (u.quantity ?? 1); }));
     return tr;
   }, [selectedSystem]);
-  const chillerDesignDF = selectedSystem?.diversityFactor ?? 0.75;
   // Carve the chiller-fed TFA coil OUT of the plant first — diversity is NOT applied to
   // TFA. Only the SPACE AHUs (chillerInstalledIduTR, which excludes the separate TFA unit)
   // vs the remaining plant get the diversity ratio. (Decision 2026-06-11.)
   const chillerPlantSpaceTR = Math.max(0, chillerWorkingTR - chillerTfaCoilTR);
+  // Diversity = Indoor (connected IDU) capacity ÷ Plant capacity (after TFA carve-out).
+  // Up to 25% diversity is acceptable — i.e. connected indoor may exceed the plant by 25%
+  // (a 125% ratio). Not a hard industry rule; just the practical upper guideline.
   const chillerDiversityDisplayPct = chillerPlantSpaceTR > 0 ? (chillerInstalledIduTR / chillerPlantSpaceTR) * 100 : 0;
-  // Achieved diversity = space plant ÷ connected IDU, compared to the design DF.
-  const chillerAchievedDiversity = chillerInstalledIduTR > 0 ? chillerPlantSpaceTR / chillerInstalledIduTR : 0;
   // Only meaningful once both the indoor units AND the (space) plant are present.
   const chillerDiversityActive = selectedSystem?.type === 'Chiller' && chillerInstalledIduTR > 0 && chillerPlantSpaceTR > 0;
-  const chillerDiversityUndersized = chillerDiversityActive && chillerAchievedDiversity < chillerDesignDF - 0.005;
+  // Flag only when diversity goes beyond 25% (ratio > 125%) — plant small for the IDU.
+  const chillerOverDiversityLimit = chillerDiversityActive && chillerDiversityDisplayPct > 125.05;
 
   // Effective cooling tower units — merges new ctUnits[] with legacy ctSelection
   const effectiveCTUnits = useMemo((): ODUCombinationUnit[] => {
@@ -6799,8 +6800,8 @@ export default function EquipmentSelection({
                         {chillerDiversityActive && (
                           <div className={cn(
                             'flex flex-wrap items-center gap-x-3 gap-y-1 text-xs mt-1.5 px-2.5 py-1.5 rounded-md border',
-                            chillerDiversityUndersized
-                              ? 'border-red-300 dark:border-red-800 bg-red-50 dark:bg-red-950/20 text-red-700 dark:text-red-300'
+                            chillerOverDiversityLimit
+                              ? 'border-amber-300 dark:border-amber-800 bg-amber-50 dark:bg-amber-950/20 text-amber-700 dark:text-amber-300'
                               : 'border-emerald-200 dark:border-emerald-800 bg-emerald-50 dark:bg-emerald-950/20 text-emerald-700 dark:text-emerald-300',
                           )}>
                             <span className="font-semibold uppercase tracking-wide text-[10px]">Diversity Applied</span>
@@ -6809,9 +6810,9 @@ export default function EquipmentSelection({
                               ? <span>/ Plant (working): <strong>{chillerPlantSpaceTR.toFixed(1)} TR</strong> ({chillerWorkingTR.toFixed(1)} − {chillerTfaCoilTR.toFixed(1)} TFA)</span>
                               : <span>/ Plant (working): <strong>{chillerPlantSpaceTR.toFixed(1)} TR</strong></span>}
                             <span>= Diversity <strong>{chillerDiversityDisplayPct.toFixed(0)}%</strong></span>
-                            {chillerDiversityUndersized
-                              ? <span className="inline-flex items-center gap-1 font-semibold"><AlertTriangle className="w-3.5 h-3.5" /> Plant undersized (below {(chillerDesignDF * 100).toFixed(0)}% design DF) — add plant TR or reduce IDU</span>
-                              : <span className="inline-flex items-center gap-1 font-semibold"><CheckCircle2 className="w-3.5 h-3.5" /> OK</span>}
+                            {chillerOverDiversityLimit
+                              ? <span className="inline-flex items-center gap-1 font-semibold"><AlertTriangle className="w-3.5 h-3.5" /> Exceeds 125% diversity limit</span>
+                              : <span className="inline-flex items-center gap-1 font-semibold"><CheckCircle2 className="w-3.5 h-3.5" /> Within 125% limit</span>}
                           </div>
                         )}
 

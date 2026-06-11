@@ -704,19 +704,16 @@ const formatPlantDiversityCheck = (
     const plantSpace = Math.max(0, plantTR - tfaOnPlant);  // plant left for the space AHUs
 
     if (iduTR <= 0 || plantSpace <= 0) continue;
-    const df = Math.max(0, Math.min(1, Number(sys.diversityFactor ?? 0.75)));
-    const spaceOverIdu = plantSpace / iduTR;            // space plant ÷ connected — compared against design DF
-    const ok = spaceOverIdu >= df - 0.005;
     // Displayed "Diversity %" = connected IDU ÷ space plant (IDU 148 / Plant 144 = 103%;
     // IDU 80 / Plant 84 = 95%). Above 100% = connected exceeds plant (diversity in use);
-    // below 100% = plant exceeds connected (slightly oversized).
+    // below 100% = plant exceeds connected (slightly oversized). The undersize warning is
+    // intentionally NOT written to the PDF (client-facing) — it lives on the on-screen chip only.
     const diversityPct = (iduTR / plantSpace) * 100;
     const name = sys.name ?? sys.id;
     const plantStr = tfaOnPlant > 0.005
       ? `Plant ${n2(plantSpace)} TR (${n2(plantTR)} - ${n2(tfaOnPlant)} TFA)`
       : `Plant ${n2(plantSpace)} TR`;
-    const warn = ok ? '' : `  ·  plant undersized (below ${(df * 100).toFixed(0)}% design DF — add plant TR or reduce IDU)`;
-    parts.push(`${name}: Installed IDU ${n2(iduTR)} TR / ${plantStr} = Diversity ${diversityPct.toFixed(0)}%${warn}`);
+    parts.push(`${name}: Installed IDU ${n2(iduTR)} TR / ${plantStr} = Diversity ${diversityPct.toFixed(0)}%`);
   }
   return parts.length > 0 ? parts.join('  |  ') : '—';
 };
