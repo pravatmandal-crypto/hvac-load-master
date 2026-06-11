@@ -16,7 +16,7 @@ import { Badge } from '../components/ui/badge';
 import { toast } from 'sonner';
 import {
   Plus, Search, Pencil, Trash2, ChevronRight,
-  MapPin, Thermometer, Droplets, ArrowLeft, Loader2,
+  MapPin, Thermometer, Droplets, ArrowLeft, Loader2, FileText,
 } from 'lucide-react';
 import LoadCalculator, { type LoadCalculatorHandle } from '../components/hvac/LoadCalculator';
 import { resolveDesignMode, type DesignMode } from '../lib/hvac/supplyCfm';
@@ -62,6 +62,12 @@ interface Project {
   adpBasis?: 'comfort' | 'dehumidification';
   /** Derived from designMode (denormalized): the default room supply-air basis. */
   supplyBasis?: 'dscfm' | 'ach';
+  /** Stable report identity — auto-assigned once, carried on every report to flag duplicates. */
+  reportId?: string;
+  /** Report revision integer (0,1,2…); printed as R0/R1/… */
+  reportRev?: number;
+  /** Engineer-controlled report date as 'YYYY-MM-DD'; falls back to today when unset. */
+  reportDate?: string;
   includeMonsoon: boolean;
   includeWinter: boolean;
   // Outside
@@ -101,6 +107,10 @@ const EMPTY_FORM = {
   longitude: '',
   altitude: '',
   designMode: 'comfort' as DesignMode,
+  // Report identity — stable ID auto-assigned on first save; date + revision engineer-controlled.
+  reportId: '',
+  reportDate: '',     // 'YYYY-MM-DD'; blank = today on save
+  reportRev: '0',
   includeMonsoon: false,
   includeWinter: false,
   // Outside
@@ -120,6 +130,22 @@ const EMPTY_FORM = {
 };
 
 type FormState = typeof EMPTY_FORM;
+
+// Local date as 'YYYY-MM-DD' (no UTC shift — matches the <input type="date"> value).
+function todayISO(): string {
+  const d = new Date();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${d.getFullYear()}-${m}-${day}`;
+}
+
+// Stable per-project report number: HLM-<up to 3 name letters>-<4-char base36>.
+// Generated once on first save and reused forever so a re-issue keeps the same No.
+function genReportId(name: string): string {
+  const letters = (name.match(/[A-Za-z]/g) || []).slice(0, 3).join('').toUpperCase().padEnd(3, 'X');
+  const suffix = (Math.random().toString(36) + '0000').slice(2, 6).toUpperCase();
+  return `HLM-${letters}-${suffix}`;
+}
 
 // ─── Geocoding ────────────────────────────────────────────────────────────────
 
@@ -233,6 +259,9 @@ export default function LoadCalculatorPage({ currentUser, initialProjectId, user
           designMode: p.designMode ?? data.designMode,
           adpBasis: p.adpBasis ?? data.adpBasis,
           supplyBasis: p.supplyBasis ?? data.supplyBasis,
+          reportId: p.reportId ?? data.reportId,
+          reportRev: p.reportRev ?? data.reportRev,
+          reportDate: p.reportDate ?? data.reportDate,
           includeMonsoon: p.includeMonsoon ?? false,
           includeWinter: p.includeWinter ?? true,
           summerDesignTemp: data.summerDesignTemp ?? 95,
@@ -326,6 +355,9 @@ export default function LoadCalculatorPage({ currentUser, initialProjectId, user
       longitude: project.longitude != null ? String(project.longitude) : '',
       altitude: project.altitude != null ? String(project.altitude) : '',
       designMode: (project.designMode ?? 'comfort') as DesignMode,
+      reportId: project.reportId ?? '',
+      reportDate: project.reportDate ?? todayISO(),
+      reportRev: String(project.reportRev ?? 0),
       includeMonsoon: project.includeMonsoon ?? false,
       includeWinter: project.includeWinter ?? false,
       summerTemp: String(project.summerDesignTemp ?? p.summerDesignTemp ?? 95),
@@ -501,6 +533,10 @@ export default function LoadCalculatorPage({ currentUser, initialProjectId, user
       designMode: form.designMode,
       adpBasis: resolveDesignMode(form.designMode).adpBasis ?? 'comfort',
       supplyBasis: resolveDesignMode(form.designMode).supplyBasis,
+      // Report identity: keep the existing No. (stable), else mint one now.
+      reportId: editingProject?.reportId || form.reportId || genReportId(form.name),
+      reportDate: form.reportDate || todayISO(),
+      reportRev: parseInt(form.reportRev, 10) || 0,
       includeMonsoon: form.includeMonsoon,
       includeWinter: form.includeWinter,
       userId: editingProject ? (editingProject.userId ?? currentUser.uid) : currentUser.uid,
@@ -1093,6 +1129,55 @@ function ProjectDialog({
                 <span className="font-semibold"> Air-change</span> = size on ACH. Any room can still override its supply basis (DSCFM/ACH) individually.
               </p>
             </div>
+          </div>
+
+          <Separator className="dark:bg-slate-700" />
+
+          {/* ── Report identity (date + stable No. + revision) ── */}
+          <div className="space-y-2">
+            <div className="flex items-center gap-2">
+              <FileText className="h-4 w-4 text-indigo-500" />
+              <h3 className="text-sm font-semibold text-slate-700 dark:text-slate-200">Report Identity</h3>
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 items-start">
+              <div className="space-y-1.5">
+                <Label className="text-sm font-medium">Report Date</Label>
+                <Input
+                  type="date"
+                  value={form.reportDate}
+                  onChange={(e) => setField('reportDate', e.target.value)}
+                  className="h-9"
+                />
+              </div>
+              <div className="space-y-1.5">
+                <Label className="text-sm font-medium">Report No.</Label>
+                <Input
+                  type="text"
+                  value={form.reportId}
+                  readOnly
+                  placeholder="auto-assigned on save"
+                  title="Stable per-project report number. Assigned automatically on first save and reused on every re-issue."
+                  className="h-9 bg-slate-50 dark:bg-slate-800/60 text-slate-500 dark:text-slate-400 cursor-default"
+                />
+              </div>
+              <div className="space-y-1.5">
+                <Label className="text-sm font-medium">Revision (R#)</Label>
+                <Input
+                  type="number"
+                  min={0}
+                  step={1}
+                  value={form.reportRev}
+                  onChange={(e) => setField('reportRev', e.target.value)}
+                  className="h-9"
+                />
+              </div>
+            </div>
+            <p className="text-[11px] leading-snug text-slate-500 dark:text-slate-400">
+              The <span className="font-semibold">Report No.</span> stays fixed for this project; bump the
+              <span className="font-semibold"> Revision</span> each time you re-issue. Both, plus the
+              <span className="font-semibold"> Report Date</span> you set here, print on every page so duplicate
+              copies are easy to tell apart.
+            </p>
           </div>
 
           <Separator className="dark:bg-slate-700" />

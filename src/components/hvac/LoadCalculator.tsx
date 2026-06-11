@@ -211,6 +211,15 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
   const [editModalOpen, setEditModalOpen] = useState(false);
   // Met Data Importer modal — opened from inside the Edit dialog
   const [metDataDialogOpen, setMetDataDialogOpen] = useState(false);
+  // Export-time report stamp prompt — lets the engineer confirm/override the report
+  // date + revision for THIS export without editing the project. Prefilled from the
+  // project's saved Report Identity. The override is one-off (not saved back).
+  const [exportPrompt, setExportPrompt] = useState<{
+    title: string;
+    date: string;
+    rev: string;
+    run: (o: { reportDate: string; reportRev: number }) => void;
+  } | null>(null);
   const [editData, setEditData] = useState({
     name: '',
     location: '',
@@ -2871,6 +2880,19 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
     }
   };
 
+  // Open the date/revision prompt before running an export. Prefills from the project's
+  // saved Report Identity; the chosen values override just this one export.
+  const promptExport = (title: string, run: (o: { reportDate: string; reportRev: number }) => void) => {
+    const d = new Date();
+    const iso = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+    setExportPrompt({
+      title,
+      date: (project as any)?.reportDate || iso,
+      rev: String((project as any)?.reportRev ?? 0),
+      run,
+    });
+  };
+
   return (
     <DndContext
       sensors={sensors}
@@ -2901,22 +2923,23 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
                   toast.error('Data is still loading or incomplete. Please try again.');
                   return;
                 }
-                generateExcelReport(project, systems, zones, liveRooms, liveEnvelopeElements, equipSystems, userProfile);
+                promptExport('Excel Report', ({ reportDate, reportRev }) =>
+                  generateExcelReport({ ...project, reportDate, reportRev }, systems, zones, liveRooms, liveEnvelopeElements, equipSystems, userProfile));
               }}
               className="gap-1 bg-green-50 dark:bg-green-950/20 text-green-700 dark:text-green-400 border-green-200 dark:border-green-800 hover:bg-green-100 dark:hover:bg-green-900/30 shadow-sm"
             >
               <Download className="w-3.5 h-3.5" /> Excel
             </Button>
-            <Button variant="outline" size="sm" onClick={() => generatePDFReport(project, systems, zones, liveRooms, liveEnvelopeElements, equipSystems)} className="gap-1 bg-orange-50 dark:bg-orange-950/20 text-orange-700 dark:text-orange-400 border-orange-200 dark:border-orange-800 hover:bg-orange-100 dark:hover:bg-orange-900/30 shadow-sm">
+            <Button variant="outline" size="sm" onClick={() => promptExport('PDF Report', ({ reportDate, reportRev }) => generatePDFReport({ ...project, reportDate, reportRev }, systems, zones, liveRooms, liveEnvelopeElements, equipSystems))} className="gap-1 bg-orange-50 dark:bg-orange-950/20 text-orange-700 dark:text-orange-400 border-orange-200 dark:border-orange-800 hover:bg-orange-100 dark:hover:bg-orange-900/30 shadow-sm">
               <Download className="w-3.5 h-3.5" /> PDF
             </Button>
-            <Button variant="outline" size="sm" onClick={() => generatePDFReport(project, systems, zones, liveRooms, liveEnvelopeElements, equipSystems, undefined, true)} className="gap-1 bg-gray-50 dark:bg-slate-800 text-gray-600 dark:text-slate-400 border-gray-200 dark:border-slate-600 hover:bg-gray-100 dark:hover:bg-slate-700 shadow-sm" title="Print-friendly PDF (greyscale, no colour backgrounds)">
+            <Button variant="outline" size="sm" onClick={() => promptExport('PDF Eco (greyscale)', ({ reportDate, reportRev }) => generatePDFReport({ ...project, reportDate, reportRev }, systems, zones, liveRooms, liveEnvelopeElements, equipSystems, undefined, true))} className="gap-1 bg-gray-50 dark:bg-slate-800 text-gray-600 dark:text-slate-400 border-gray-200 dark:border-slate-600 hover:bg-gray-100 dark:hover:bg-slate-700 shadow-sm" title="Print-friendly PDF (greyscale, no colour backgrounds)">
               <Download className="w-3.5 h-3.5" /> PDF Eco
             </Button>
-            <Button variant="outline" size="sm" onClick={() => generateEquipmentSchedulePDF(project, equipSystems, liveRooms)} className="gap-1 bg-teal-50 dark:bg-teal-950/20 text-teal-700 dark:text-teal-400 border-teal-200 dark:border-teal-800 hover:bg-teal-100 dark:hover:bg-teal-900/30 shadow-sm" title="Download Equipment Schedule as separate PDF">
+            <Button variant="outline" size="sm" onClick={() => promptExport('Equipment Schedule', ({ reportDate, reportRev }) => generateEquipmentSchedulePDF({ ...project, reportDate, reportRev }, equipSystems, liveRooms))} className="gap-1 bg-teal-50 dark:bg-teal-950/20 text-teal-700 dark:text-teal-400 border-teal-200 dark:border-teal-800 hover:bg-teal-100 dark:hover:bg-teal-900/30 shadow-sm" title="Download Equipment Schedule as separate PDF">
               <Download className="w-3.5 h-3.5" /> Equip. Schedule
             </Button>
-            <Button variant="outline" size="sm" onClick={() => generateEngineeringReviewPDF(project, systems, zones, liveRooms, liveEnvelopeElements, equipSystems)} className="gap-1 bg-amber-50 dark:bg-amber-950/20 text-amber-700 dark:text-amber-400 border-amber-200 dark:border-amber-800 hover:bg-amber-100 dark:hover:bg-amber-900/30 shadow-sm" title="Internal QA review — auto-detected design findings. Not part of the client load-calculation submission.">
+            <Button variant="outline" size="sm" onClick={() => promptExport('Engineering Review', ({ reportDate, reportRev }) => generateEngineeringReviewPDF({ ...project, reportDate, reportRev }, systems, zones, liveRooms, liveEnvelopeElements, equipSystems))} className="gap-1 bg-amber-50 dark:bg-amber-950/20 text-amber-700 dark:text-amber-400 border-amber-200 dark:border-amber-800 hover:bg-amber-100 dark:hover:bg-amber-900/30 shadow-sm" title="Internal QA review — auto-detected design findings. Not part of the client load-calculation submission.">
               <Download className="w-3.5 h-3.5" /> Eng. Review
             </Button>
             <Button variant="outline" size="sm" onClick={() => {
@@ -3973,6 +3996,60 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
           1% or 4% basis, and shows results with copy buttons. User pastes values back into
           the design-condition fields above. No schema change. */}
       <MetDataImporterDialog open={metDataDialogOpen} onClose={() => setMetDataDialogOpen(false)} />
+
+      {/* Export-time report date + revision prompt. Prefilled from the saved Report
+          Identity; the chosen values stamp THIS export only (not saved to the project). */}
+      <Dialog open={!!exportPrompt} onOpenChange={(o) => { if (!o) setExportPrompt(null); }}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>{exportPrompt?.title ?? 'Report'} — date & revision</DialogTitle>
+            <DialogDescription>
+              Confirm the date and revision for this report. These stamp this export only;
+              the project's saved defaults are unchanged.
+            </DialogDescription>
+          </DialogHeader>
+          {exportPrompt && (
+            <div className="grid grid-cols-2 gap-3 py-1">
+              <div className="space-y-1.5">
+                <Label className="text-sm font-medium">Report Date</Label>
+                <Input
+                  type="date"
+                  value={exportPrompt.date}
+                  onChange={(e) => setExportPrompt((p) => (p ? { ...p, date: e.target.value } : p))}
+                  className="h-9"
+                />
+              </div>
+              <div className="space-y-1.5">
+                <Label className="text-sm font-medium">Revision (R#)</Label>
+                <Input
+                  type="number"
+                  min={0}
+                  step={1}
+                  value={exportPrompt.rev}
+                  onChange={(e) => setExportPrompt((p) => (p ? { ...p, rev: e.target.value } : p))}
+                  className="h-9"
+                />
+              </div>
+            </div>
+          )}
+          <DialogFooter>
+            <Button variant="outline" size="sm" onClick={() => setExportPrompt(null)}>Cancel</Button>
+            <Button
+              size="sm"
+              className="bg-orange-600 hover:bg-orange-700 text-white"
+              onClick={() => {
+                if (!exportPrompt) return;
+                const reportDate = exportPrompt.date || undefined as any;
+                const reportRev = parseInt(exportPrompt.rev, 10) || 0;
+                exportPrompt.run({ reportDate, reportRev });
+                setExportPrompt(null);
+              }}
+            >
+              Generate
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </DndContext>
   );
 });

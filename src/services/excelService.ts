@@ -107,9 +107,23 @@ const asNum = (v: any, fb = 0): number => { const n = Number(v); return isFinite
 const r2 = (v: number) => Math.round(v * 100) / 100;
 const r0 = (v: number) => Math.round(v);
 const safeStr = (v: any, fb = ''): string => (v == null || v === '' ? fb : String(v));
-const fmtDate = (d = new Date()) =>
+
+// Report identity stamp — engineer-controlled date + stable No./revision, set per export.
+// Keeps the Excel workbook consistent with the PDF and makes duplicate copies identifiable.
+let excelStamp: { date: Date; id: string; rev: string } = { date: new Date(), id: '', rev: '' };
+const buildExcelStamp = (project: any) => {
+  const raw = project?.reportDate;
+  const parsed = raw ? new Date(`${raw}T00:00:00`) : null;
+  excelStamp = {
+    date: parsed && !isNaN(parsed.getTime()) ? parsed : new Date(),
+    id: safeStr(project?.reportId),
+    rev: project?.reportRev != null ? `R${project.reportRev}` : '',
+  };
+};
+
+const fmtDate = (d = excelStamp.date) =>
   `${String(d.getDate()).padStart(2, '0')}-${String(d.getMonth() + 1).padStart(2, '0')}-${d.getFullYear()}`;
-const fmtDateFile = (d = new Date()) =>
+const fmtDateFile = (d = excelStamp.date) =>
   `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 const toGR = (hr: number) => hr * 7000;
 
@@ -510,6 +524,8 @@ function buildCoverSheet(project: any, records: RoomRecord[], equipSystems: any[
     ['Peak Load Period',  safeStr(project?.peakLoadTime, 'April — 16:00 hrs')],
     ['Design Standard',  'ASHRAE 2017 HoF — CLTD / CSHGF / CLF Method'],
     ['Prepared By',      engName],
+    ['Report No.',       excelStamp.id || '—'],
+    ['Revision',         excelStamp.rev || 'R0'],
     ['Report Date',      fmtDate()],
   ];
   const detailStart = row;
@@ -1577,6 +1593,7 @@ export const generateExcelReport = (
   equipSystems?: any[],
   userProfile?: any,
 ) => {
+  buildExcelStamp(project);
   const wb = XLSX.utils.book_new();
   const eq = equipSystems ?? [];
   const records = toRoomRecords(project, systems, zones, rooms, envelopeElements);
@@ -1623,7 +1640,9 @@ export const generateExcelReport = (
   })();
 
   const projSlug = safeStr(project?.name, 'Project').trim().replace(/\s+/g, '_').replace(/[^A-Za-z0-9_-]/g, '');
-  const fileName = `${sysLabel}_HEAT_LOAD_${projSlug}_${fmtDateFile()}.xlsx`;
+  const revTag = excelStamp.rev ? `_${excelStamp.rev}` : '';
+  const idTag = excelStamp.id ? `${excelStamp.id}_` : '';
+  const fileName = `${idTag}${sysLabel}_HEAT_LOAD_${projSlug}${revTag}_${fmtDateFile()}.xlsx`;
 
   const buf  = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
   const blob = new Blob([buf], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });

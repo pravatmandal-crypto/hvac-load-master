@@ -22,6 +22,26 @@ import { resolveSupplyCfm, resolveRoomSupplyBasis } from '../lib/hvac/supplyCfm'
 // make the whole report TFA-aware. Synchronous render = no concurrency concern.
 let reportEquipSystems: any[] = [];
 
+// Report identity stamp — set once per report build, read by drawFooter + headers.
+// Lets the engineer control the printed Report Date and carry a stable Report No.
+// + Revision so re-issues are identifiable and accidental duplicates are obvious.
+let reportStamp: { id: string; rev: string; dateShort: string; dateLong: string } = {
+  id: '', rev: '', dateShort: '', dateLong: '',
+};
+const buildReportStamp = (project: any) => {
+  const raw = project?.reportDate;                       // 'YYYY-MM-DD' or undefined
+  const parsed = raw ? new Date(`${raw}T00:00:00`) : null;
+  const d = parsed && !isNaN(parsed.getTime()) ? parsed : new Date();   // fall back to today
+  reportStamp = {
+    id: String(project?.reportId || ''),
+    rev: project?.reportRev != null ? `R${project.reportRev}` : '',
+    dateShort: d.toLocaleDateString('en-GB', { day: '2-digit', month: 'short',  year: 'numeric' }),
+    dateLong:  d.toLocaleDateString('en-GB', { day: '2-digit', month: 'long',   year: 'numeric' }),
+  };
+};
+// Filename prefix so saved PDFs sort/identify by report No. + revision (blank when no ID yet).
+const reportFileTag = () => (reportStamp.id ? `${reportStamp.id}_${reportStamp.rev || 'R0'}_` : '');
+
 // DOAS/TFA system serving a room — delegates to the shared resolver (room.tfaMode
 // primary, legacy link fallback) against the report's equip systems.
 const findReportDoasForRoom = (room: any): any | null =>
@@ -272,7 +292,9 @@ const drawFooter = (doc: jsPDF, C: Theme = DEFAULT_THEME) => {
   doc.setFont('helvetica', 'normal');
   doc.text('© CREATIVE CONCEPT', w / 2, h - PAGE.bottom + 6, { align: 'center' });
   doc.setFont('helvetica', 'italic');
-  doc.text(new Date().toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' }), w - PAGE.right, h - PAGE.bottom + 6, { align: 'right' });
+  const ds = reportStamp.dateShort || new Date().toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' });
+  const idTag = reportStamp.id ? `${reportStamp.id}${reportStamp.rev ? ' ' + reportStamp.rev : ''}   ·   ` : '';
+  doc.text(`${idTag}${ds}`, w - PAGE.right, h - PAGE.bottom + 6, { align: 'right' });
 };
 
 const sectionBanner = (doc: jsPDF, text: string, y: number, C: Theme = DEFAULT_THEME) => {
@@ -1228,6 +1250,7 @@ export const generatePDFReport = (
     : equipSystems;
   // Make computeDetailed TFA-aware for this report build.
   reportEquipSystems = effectiveEquipSystems ?? [];
+  buildReportStamp(project);
 
   const doc      = new jsPDF({ unit: 'mm', format: 'a4' });
   const pageW    = doc.internal.pageSize.getWidth();
@@ -1282,7 +1305,9 @@ export const generatePDFReport = (
         ...(includeMonsoon ? ['Monsoon'] : []),
         ...(includeWinter  ? ['Winter']  : []),
       ].join(' + ')],
-      ['Report Date',    new Date().toLocaleDateString('en-GB', { day: '2-digit', month: 'long', year: 'numeric' })],
+      ['Report No.',     reportStamp.id || '—'],
+      ['Revision',       reportStamp.rev || 'R0'],
+      ['Report Date',    reportStamp.dateLong],
       ['Prepared By',    'HVAC Load Master – Automated Calculation Engine'],
     ],
     theme: 'grid',
@@ -2682,7 +2707,7 @@ export const generatePDFReport = (
     drawFooter(doc, C);
   }
 
-  const fileName = `${String(project?.name || 'HVAC_Report').replace(/[^a-zA-Z0-9_]/g, '_')}_Load_Report.pdf`;
+  const fileName = `${reportFileTag()}${String(project?.name || 'HVAC_Report').replace(/[^a-zA-Z0-9_]/g, '_')}_Load_Report.pdf`;
   doc.save(fileName);
 };
 
@@ -3087,6 +3112,7 @@ export const generateEquipmentSchedulePDF = (
   const effectiveEquipSystems = hvacHierarchy && equipSystems.length === 0
     ? hvacHierarchy.systems : equipSystems;
   if (effectiveEquipSystems.length === 0) return;
+  buildReportStamp(project);
 
   const flatRooms = Object.values(hvacHierarchy ? hvacHierarchy.rooms : rooms).flat();
 
@@ -3111,7 +3137,7 @@ export const generateEquipmentSchedulePDF = (
   doc.setFont('helvetica', 'normal');
   doc.setFontSize(9);
   doc.setTextColor(...C.coverText);
-  doc.text(`${String(project?.name || 'Project')}  ·  ${new Date().toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' })}`, PAGE.left, 38);
+  doc.text(`${String(project?.name || 'Project')}  ·  ${reportStamp.dateShort}`, PAGE.left, 38);
 
   // ── Project info table ────────────────────────────────────────────────────
   let y = 52;
@@ -3160,7 +3186,7 @@ export const generateEquipmentSchedulePDF = (
     drawFooter(doc, C);
   }
 
-  const fileName = `${String(project?.name || 'Equipment').replace(/[^a-zA-Z0-9_]/g, '_')}_Equipment_Schedule.pdf`;
+  const fileName = `${reportFileTag()}${String(project?.name || 'Equipment').replace(/[^a-zA-Z0-9_]/g, '_')}_Equipment_Schedule.pdf`;
   doc.save(fileName);
 };
 
@@ -3182,6 +3208,7 @@ export const generateEngineeringReviewPDF = (
   const effectiveRooms       = hvacHierarchy ? hvacHierarchy.rooms : rooms;
   const effectiveEquipSystems = hvacHierarchy && equipSystems.length === 0 ? hvacHierarchy.systems : equipSystems;
   reportEquipSystems = effectiveEquipSystems ?? [];
+  buildReportStamp(project);
 
   const seasons = getSeasonProfiles(project);
   const summer  = seasons.find((s) => s.key === 'summer')!;
@@ -3213,7 +3240,7 @@ export const generateEngineeringReviewPDF = (
   doc.setFontSize(9);
   doc.setTextColor(...C.coverText);
   doc.text(
-    `${String(project?.name || 'Project')}  ·  ${new Date().toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' })}`,
+    `${String(project?.name || 'Project')}  ·  ${reportStamp.dateShort}`,
     PAGE.left, 38,
   );
 
@@ -3269,6 +3296,6 @@ export const generateEngineeringReviewPDF = (
     drawFooter(doc, C);
   }
 
-  const fileName = `${String(project?.name || 'Project').replace(/[^a-zA-Z0-9_]/g, '_')}_Engineering_Review.pdf`;
+  const fileName = `${reportFileTag()}${String(project?.name || 'Project').replace(/[^a-zA-Z0-9_]/g, '_')}_Engineering_Review.pdf`;
   doc.save(fileName);
 };
