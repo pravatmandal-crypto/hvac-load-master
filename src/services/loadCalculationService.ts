@@ -70,6 +70,11 @@ export interface RoomCalcResult {
   _calcDesignCFM: number;
   _calcSensibleBTUH: number;
   _calcLatentBTUH: number;
+  // Outdoor-air (fresh-air / ventilation) tonnage carried inside the room load TR.
+  // Used by plant diversity: indoor = loadTR − oaTR is diversified; OA is added back
+  // un-diversified (fresh air is continuous). Zero for DOAS-served (TFA) rooms.
+  _calcOaTR: number;
+  _calcMonsoonOaTR: number;
   _calcMonsoonLoadTR: number;
   _calcMonsoonCfmTR: number;
   _calcMonsoonGoverningTR: number;
@@ -383,6 +388,8 @@ export async function calculateAndPersistRoom(
     _calcDesignCFM: parseFloat(designSupplyCFM.toFixed(0)),
     _calcSensibleBTUH: parseFloat(ersh.toFixed(0)),
     _calcLatentBTUH: parseFloat(erlh.toFixed(0)),
+    _calcOaTR: parseFloat((oaTotal / 12000).toFixed(3)),
+    _calcMonsoonOaTR: parseFloat(((monsoonOaSensible + monsoonOaLatent) / 12000).toFixed(3)),
     _calcMonsoonLoadTR: parseFloat(monsoonGrandTotalTR.toFixed(3)),
     _calcMonsoonCfmTR: parseFloat(monsoonCfmTR.toFixed(3)),
     _calcMonsoonGoverningTR: parseFloat(monsoonGoverningTR.toFixed(3)),

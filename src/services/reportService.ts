@@ -566,16 +566,16 @@ const computeZoneCoilDuty = (zone: any, flatRooms: any[]): { coilTR: number; des
   return foundAny ? { coilTR: trSum, designCFM: cfmSum } : null;
 };
 
-// Returns a per-system summary of the EFFECTIVE diversity actually achieved by
-// the installed plant — installed working TR / sum of zone governing TR for
-// rooms feeding the plant. This is the truth-on-the-ground number; the design
-// DF the engineer typed during selection is intentionally not shown here.
-//   Example: "Chiller Plant: 89% (164.00 / 184.30 TR)"
+// Returns a per-system diversity line: indoor space load × design DF + non-diverse
+// outdoor-air load (room fresh air + chiller-fed TFA), versus installed plant TR.
+// Diversity is applied to the INDOOR calc only — fresh air is continuous and carried
+// in full — then the install margin is shown.
+//   Example: "Chiller Plant: diversity 75% -> 110.00×0.75 + OA 25.50 = 108.00 TR req'd; installed 144.00 TR (133%)"
 const formatDiversitySummary = (
   systems: any[],
   flatRooms: any[],
-  roomGovTR: Map<string, number>,
-  roomTfaGovTR?: Map<string, number>,
+  roomIndoorTR: Map<string, number>,
+  roomNonDiverseTR?: Map<string, number>,
 ): string => {
   const parts: string[] = [];
   for (const sys of systems) {
@@ -598,57 +598,127 @@ const formatDiversitySummary = (
       if (odu) installedTR = odu.effectiveTR ?? ((odu.trCapacity ?? 0) * (odu.modules ?? 1));
     }
 
-    // Sum of room governing TR for rooms tied to this system — space and chiller-fed TFA.
-    let sumSpaceTR = 0, sumTfaTR = 0;
+    // Sum of room TR for rooms tied to this system — indoor (diversifiable) and the
+    // non-diverse outdoor-air load (room fresh air + any chiller-fed TFA coil).
+    let sumIndoorTR = 0, sumOaTR = 0;
     for (const r of flatRooms) {
       if (r.systemId === sys.id || r.zoneId === sys.id || r.hvacSystemId === sys.id) {
-        sumSpaceTR += roomGovTR.get(r.id) ?? 0;
-        sumTfaTR   += roomTfaGovTR?.get(r.id) ?? 0;
+        sumIndoorTR += roomIndoorTR.get(r.id) ?? 0;
+        sumOaTR     += roomNonDiverseTR?.get(r.id) ?? 0;
       }
     }
-    if (sumSpaceTR <= 0 && sumTfaTR <= 0) continue;
+    if (sumIndoorTR <= 0 && sumOaTR <= 0) continue;
 
-    // Design diversity de-rates SPACE peaks (zones don't peak together). The TFA/OA
-    // coil runs continuously, so it is NOT diversified — it adds on top.
+    // Design diversity de-rates INDOOR peaks (zones don't peak together). The fresh-air /
+    // OA load runs continuously, so it is NOT diversified — it adds on top.
     const df = Math.max(0, Math.min(1, Number(sys.diversityFactor ?? 0.75)));
-    const requiredTR = sumSpaceTR * df + sumTfaTR;
+    const requiredTR = sumIndoorTR * df + sumOaTR;
     if (requiredTR <= 0 || installedTR <= 0) continue;
 
     const marginPct = (installedTR / requiredTR) * 100;
     const name = sys.name ?? sys.id;
-    const tfaNote = sumTfaTR > 0
-      ? `${n2(sumSpaceTR)}×${df.toFixed(2)} + TFA ${n2(sumTfaTR)} = ${n2(requiredTR)} TR req'd`
-      : `${n2(sumSpaceTR)}×${df.toFixed(2)} = ${n2(requiredTR)} TR req'd`;
-    parts.push(`${name}: diversity ${(df * 100).toFixed(0)}% -> ${tfaNote}; installed ${n2(installedTR)} TR (${marginPct.toFixed(0)}%)`);
+    // Client-facing: show only the net diversified plant-required TR and install margin.
+    // Diversity de-rates the indoor load; fresh-air/OA is held out un-diversified — but
+    // that split is intentionally NOT shown here (it confuses clients when there's no
+    // separate TFA/OA unit). The breakdown lives in the on-screen Equipment Selection.
+    parts.push(`${name}: diversity ${(df * 100).toFixed(0)}% -> ${n2(requiredTR)} TR req'd; installed ${n2(installedTR)} TR (${marginPct.toFixed(0)}%)`);
   }
   return parts.length > 0 ? parts.join('  |  ') : '—  (all systems at 100%)';
 };
 
 // Diversity-applied plant required TR across chiller/VRF systems, matching the app's
-// chillerPlantRequiredTR: (Σ space room gov × design diversity) + Σ chiller-fed TFA coil
-// (OA is non-diverse). Same inputs as formatDiversitySummary so the headline submission
-// basis and the diversity line always agree.
+// chillerPlantRequiredTR: (Σ indoor room load × design diversity) + Σ non-diverse OA
+// (room fresh air + chiller-fed TFA coil). Same inputs as formatDiversitySummary so the
+// headline submission basis and the diversity line always agree.
 const computePlantRequiredTR = (
   systems: any[],
   flatRooms: any[],
-  roomGovTR: Map<string, number>,
-  roomTfaGovTR?: Map<string, number>,
+  roomIndoorTR: Map<string, number>,
+  roomNonDiverseTR?: Map<string, number>,
 ): number => {
   let total = 0;
   for (const sys of systems) {
     const t = String(sys.type ?? '');
     if (t !== 'VRF' && t !== 'Chiller') continue;
-    let space = 0, tfa = 0;
+    let indoor = 0, oa = 0;
     for (const r of flatRooms) {
       if (r.systemId === sys.id || r.zoneId === sys.id || r.hvacSystemId === sys.id) {
-        space += roomGovTR.get(r.id) ?? 0;
-        tfa   += roomTfaGovTR?.get(r.id) ?? 0;
+        indoor += roomIndoorTR.get(r.id) ?? 0;
+        oa     += roomNonDiverseTR?.get(r.id) ?? 0;
       }
     }
     const df = Math.max(0, Math.min(1, Number(sys.diversityFactor ?? 0.75)));
-    total += space * df + tfa;
+    total += indoor * df + oa;
   }
   return total;
+};
+
+// Installed-equipment diversity check: achieved diversity = installed WORKING plant TR
+// ÷ installed connected indoor-unit (IDU/AHU/FCU) TR, versus the design DF. Flags when
+// the plant is undersized for what's hung on it (achieved < design DF). (Decision
+// 2026-06-11; mirrors the on-screen Equipment Selection check.)
+const formatPlantDiversityCheck = (
+  systems: any[],
+  flatRooms: any[],
+  roomChillerTfaTR?: Map<string, number>,
+): string => {
+  const parts: string[] = [];
+  for (const sys of systems) {
+    const t = String(sys.type ?? '');
+    if (t !== 'VRF' && t !== 'Chiller') continue;
+
+    // Connected SPACE indoor-unit (AHU / FCU / IDU) TR — zone terminal selections + direct
+    // IDUs. The TFA/DOAS unit is a separate system, so it is naturally excluded here.
+    let iduTR = 0;
+    for (const z of (sys.zones ?? (sys as any).ahuGroups ?? []) as any[]) {
+      if (z.unitSelections?.length) iduTR += (z.unitSelections as any[]).reduce((s: number, u: any) => s + (u.trCapacity ?? 0) * (u.quantity ?? 1), 0);
+      else if (z.selection) iduTR += (z.selection.trCapacity ?? 0) * (z.selection.quantity ?? 1);
+    }
+    if (sys.iduSelections) Object.values(sys.iduSelections as Record<string, any>).forEach((val: any) => {
+      (Array.isArray(val) ? val : val ? [val] : []).forEach((u: any) => { iduTR += (u.trCapacity ?? 0) * (u.quantity ?? 1); });
+    });
+
+    // Installed WORKING plant TR (standby excluded) — chiller units or VRF ODU.
+    let plantTR = 0;
+    if (t === 'Chiller') {
+      const units: any[] = sys.chillerUnits?.length
+        ? sys.chillerUnits
+        : (sys.unitSelection ? [{ ...sys.unitSelection, quantity: sys.unitSelection.quantity ?? 1 }] : []);
+      for (const u of units) {
+        if (u.role === 'standby') continue;
+        const per = (u.actualTR != null && u.actualTR > 0) ? u.actualTR : (u.trCapacity ?? 0);
+        plantTR += per * (u.quantity ?? 1);
+      }
+    } else {
+      const odu = sys.oduSelection;
+      if (odu) plantTR = odu.effectiveTR ?? ((odu.trCapacity ?? 0) * (odu.modules ?? 1));
+    }
+
+    // Carve the chiller-fed TFA coil OUT of the plant — diversity is not applied to TFA.
+    let tfaOnPlant = 0;
+    for (const r of flatRooms) {
+      if (r.systemId === sys.id || r.zoneId === sys.id || r.hvacSystemId === sys.id) {
+        tfaOnPlant += roomChillerTfaTR?.get(r.id) ?? 0;
+      }
+    }
+    const plantSpace = Math.max(0, plantTR - tfaOnPlant);  // plant left for the space AHUs
+
+    if (iduTR <= 0 || plantSpace <= 0) continue;
+    const df = Math.max(0, Math.min(1, Number(sys.diversityFactor ?? 0.75)));
+    const spaceOverIdu = plantSpace / iduTR;            // space plant ÷ connected — compared against design DF
+    const ok = spaceOverIdu >= df - 0.005;
+    // Displayed "Diversity %" = connected IDU ÷ space plant (IDU 148 / Plant 144 = 103%;
+    // IDU 80 / Plant 84 = 95%). Above 100% = connected exceeds plant (diversity in use);
+    // below 100% = plant exceeds connected (slightly oversized).
+    const diversityPct = (iduTR / plantSpace) * 100;
+    const name = sys.name ?? sys.id;
+    const plantStr = tfaOnPlant > 0.005
+      ? `Plant ${n2(plantSpace)} TR (${n2(plantTR)} - ${n2(tfaOnPlant)} TFA)`
+      : `Plant ${n2(plantSpace)} TR`;
+    const warn = ok ? '' : `  ·  plant undersized (below ${(df * 100).toFixed(0)}% design DF — add plant TR or reduce IDU)`;
+    parts.push(`${name}: Installed IDU ${n2(iduTR)} TR / ${plantStr} = Diversity ${diversityPct.toFixed(0)}%${warn}`);
+  }
+  return parts.length > 0 ? parts.join('  |  ') : '—';
 };
 
 const hasAnyChillerActualOverride = (systems: any[]): boolean => {
@@ -658,6 +728,29 @@ const hasAnyChillerActualOverride = (systems: any[]): boolean => {
     if (units.some(u => u.actualTR != null && u.actualTR > 0)) return true;
   }
   return false;
+};
+
+// Sum of installed WORKING plant TR across chiller/VRF systems (standby excluded) — the
+// real capacity being submitted. Chiller uses Actual TR when OEM-confirmed, else Nominal.
+const computeInstalledWorkingPlantTR = (systems: any[]): number => {
+  let total = 0;
+  for (const sys of systems) {
+    const t = String(sys.type ?? '');
+    if (t === 'Chiller') {
+      const units: any[] = sys.chillerUnits?.length
+        ? sys.chillerUnits
+        : (sys.unitSelection ? [{ ...sys.unitSelection, quantity: sys.unitSelection.quantity ?? 1 }] : []);
+      for (const u of units) {
+        if (u.role === 'standby') continue;
+        const per = (u.actualTR != null && u.actualTR > 0) ? u.actualTR : (u.trCapacity ?? 0);
+        total += per * (u.quantity ?? 1);
+      }
+    } else if (t === 'VRF') {
+      const odu = sys.oduSelection;
+      if (odu) total += odu.effectiveTR ?? ((odu.trCapacity ?? 0) * (odu.modules ?? 1));
+    }
+  }
+  return total;
 };
 
 const computeTotalInstalledPlant = (systems: any[]): string => {
@@ -1453,31 +1546,53 @@ export const generatePDFReport = (
     : '—  (no equipment selected)';
   const totalPlantStr = computeTotalInstalledPlant(activeEquipSystems);
 
-  // Per-room governing TR (max across cooling seasons), kept SEPARATE for space and
-  // chiller-fed TFA so diversity can be applied to space only (OA is non-diverse).
-  const roomGovTR = new Map<string, number>();       // space (primary) coil
-  const roomTfaGovTR = new Map<string, number>();     // chiller-fed TFA coil (0 if own-unit)
+  // Per-room governing TR, split so DIVERSITY applies to the INDOOR (space) load only.
+  // The fresh-air / outdoor-air load is continuous — non-coincident-peak diversity does
+  // not apply to it — so it is added back UN-diversified, together with any chiller-fed
+  // TFA coil. Governing cooling season = the one with the highest TOTAL room load; that
+  // operating point is then split into its indoor and outdoor-air parts.
+  // (Decision 2026-06-11: diversity on the indoor calc, not the full space design —
+  //  fresh air is added back on top. Mirrors EquipmentSelection.chillerPlantRequiredTR.)
+  const roomIndoorTR = new Map<string, number>();      // diversifiable indoor: envelope+people+lights+equip (erh)
+  const roomNonDiverseTR = new Map<string, number>();   // OA / fresh air (+ chiller-fed TFA) — never diversified
+  const roomChillerTfaTR = new Map<string, number>();   // chiller-fed TFA coil only — carved out of plant for the diversity check
   const coolingSeasonsForRoom = seasons.filter(s => s.key !== 'winter');
   entities.forEach((entity) => {
     entity.rooms.forEach((room) => {
       const rdoas = findReportDoasForRoom(room);
       const roomChillerFed = !!rdoas && ((rdoas.tfaCoolingSource ?? 'own-unit') === 'chiller-plant');
-      let maxSpace = 0, maxTfa = 0;
+      let bestTotal = -1, govIndoor = 0, govNonDiverse = 0, govTfa = 0;
       for (const season of coolingSeasonsForRoom) {
         const dc = resolveEntityDC(entity, season, project);
         const m = computeDetailed(room, envelopeElements[room.id] || [], dc, project);
-        if (m.grandTotal / 12000 > maxSpace) maxSpace = m.grandTotal / 12000;
-        const tfaTr = (m.tfaCoilSensible + m.tfaCoilLatent) / 12000;
-        if (roomChillerFed && tfaTr > maxTfa) maxTfa = tfaTr;
+        const oaTr = (m.oaSensible + m.oaLatent) / 12000;            // room fresh-air load (0 when DOAS-served)
+        const indoorTr = Math.max(0, m.grandTotal / 12000 - oaTr);   // space load less its OA share (= erh)
+        const tfaTr = roomChillerFed ? (m.tfaCoilSensible + m.tfaCoilLatent) / 12000 : 0;
+        const nonDiverse = oaTr + tfaTr;                             // all OA landing on this plant, un-diversified
+        const total = indoorTr + nonDiverse;
+        if (total > bestTotal) { bestTotal = total; govIndoor = indoorTr; govNonDiverse = nonDiverse; govTfa = tfaTr; }
       }
-      roomGovTR.set(room.id, maxSpace);
-      roomTfaGovTR.set(room.id, maxTfa);
+      roomIndoorTR.set(room.id, govIndoor);
+      roomNonDiverseTR.set(room.id, govNonDiverse);
+      roomChillerTfaTR.set(room.id, govTfa);
     });
   });
-  const diversityStr = formatDiversitySummary(activeEquipSystems, flatRoomDocs, roomGovTR, roomTfaGovTR);
+  const diversityStr = formatDiversitySummary(activeEquipSystems, flatRoomDocs, roomIndoorTR, roomNonDiverseTR);
+  // Installed-equipment check: achieved diversity (working plant ÷ connected IDU) vs design DF.
+  // Chiller-fed TFA coil is carved OUT of the plant first (TFA is non-diverse) — only the
+  // space AHUs vs the remaining plant get the diversity ratio.
+  const plantDiversityStr = formatPlantDiversityCheck(activeEquipSystems, flatRoomDocs, roomChillerTfaTR);
   // Single diversity-applied plant-required figure used by BOTH the submission basis
-  // and the diversity line, so they always agree (space×df + chiller-fed TFA).
-  const plantRequiredTR = computePlantRequiredTR(activeEquipSystems, flatRoomDocs, roomGovTR, roomTfaGovTR);
+  // and the diversity line, so they always agree (indoor×df + OA/fresh air).
+  const plantRequiredTR = computePlantRequiredTR(activeEquipSystems, flatRoomDocs, roomIndoorTR, roomNonDiverseTR);
+  // Submission basis reflects what's actually being INSTALLED: working plant TR (144,
+  // not the 135.54 load figure) and the design airflow rounded up to a clean hundred for
+  // submission (41,958 -> 42,000). Falls back to the load figure if no plant is selected.
+  const installedWorkingPlantTR = computeInstalledWorkingPlantTR(activeEquipSystems);
+  const submissionBasisTR = installedWorkingPlantTR > 0
+    ? installedWorkingPlantTR
+    : (plantRequiredTR > 0 ? plantRequiredTR : recTR);
+  const submissionCFMRounded = Math.ceil(submissionCFM / 100) * 100;
   autoTable(doc, {
     startY: y,
     body: [
@@ -1492,15 +1607,17 @@ export const generatePDFReport = (
         ? `${plantSeasonPeak.season}  (${n2(plantRequiredTR)} TR plant, diversity applied  ·  ${n0(recCFM)} CFM)`
         : `${peakSeason.season}  (${n2(peakSeason.governingTr)} TR space  ·  ${n0(peakSeason.cfm)} CFM)`],
       ['Recommended Submission Basis',     chillerFedTfa
-        ? `Space (diversified) + TFA coil on one plant  =  ${n2(plantRequiredTR)} TR  ·  ${n0(submissionCFM)} CFM`
+        ? `Space + TFA coil on one plant:  ${n2(submissionBasisTR)} TR (installed)  ·  ${n0(submissionCFMRounded)} CFM`
         : hasTfa
-          ? `Chiller ${n2(plantRequiredTR)} TR (diversified)  +  separate TFA unit ${n2(projectTfaCoilTR)} TR  ·  ${n0(submissionCFM)} CFM`
-          : `${n2(plantRequiredTR > 0 ? plantRequiredTR : recTR)} TR  and  ${n0(submissionCFM)} CFM`],
+          ? `Chiller ${n2(submissionBasisTR)} TR (installed)  +  separate TFA unit ${n2(projectTfaCoilTR)} TR  ·  ${n0(submissionCFMRounded)} CFM`
+          : `${n2(submissionBasisTR)} TR  and  ${n0(submissionCFMRounded)} CFM`],
       ...(hasTfa ? [['TFA / DOAS Coil Capacity', `${n2(projectTfaCoilTR)} TR  (outdoor-air coil, governing season)${chillerFedTfa ? ' — on main chiller plant' : ' — dedicated TFA unit'}`]] as [string,string][] : []),
       ...(hasTfa && projectTfaReheatBTUH > 0 ? [['TFA / DOAS Reheat Coil', `${n0(projectTfaReheatBTUH)} BTU/h  (${n2(projectTfaReheatBTUH / 12000)} TR · cool-to-ADP then reheat to supply temp)`]] as [string,string][] : []),
       ['Total Installed IDU / FCU Capacity', totalIDUStr],
       ['Total Installed Plant / ODU Capacity', totalPlantStr],
-      ['Diversity Factor Applied',         diversityStr],
+      // Diversity line is the installed IDU / Plant ratio (Pravat 2026-06-11). Falls back
+      // to the load-based diversity summary only when no terminal units have been entered.
+      ['Diversity Applied',                plantDiversityStr !== '—' ? plantDiversityStr : diversityStr],
     ],
     theme: 'grid',
     styles:       { fontSize: 9, cellPadding: 2.8, textColor: C.ink },

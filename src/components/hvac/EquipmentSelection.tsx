@@ -4458,13 +4458,40 @@ export default function EquipmentSelection({
   // Chiller plant load should track thermal zone load. Airflow-driven (CFM) uplift is used
   // for air-side equipment sizing, but should not inflate plant tonnage display.
   const chillerSummerThermalTR = totalSummerThermalTR;
-  const chillerThermalTR = includeMonsoon && totalMonsoonThermalTR > chillerSummerThermalTR
-    ? totalMonsoonThermalTR
-    : chillerSummerThermalTR;
+  const chillerMonsoonGoverns = includeMonsoon && totalMonsoonThermalTR > chillerSummerThermalTR;
+  const chillerThermalTR = chillerMonsoonGoverns ? totalMonsoonThermalTR : chillerSummerThermalTR;
 
-  // Diversity-adjusted chiller plant capacity (not all zones peak simultaneously)
+  // Outdoor-air (fresh-air / ventilation) tonnage carried inside each room's load TR.
+  // Diversity is applied to the INDOOR portion only — fresh air is continuous, so it is
+  // added back un-diversified. (Decision 2026-06-11; mirrors reportService plant calc.)
+  // Per room: prefer the persisted _calcOaTR; for rooms calculated before that field
+  // existed, fall back to load − indoor (summer), scaled by the summer OA fraction for
+  // the monsoon season.
+  const sumRoomOaTR = (season: 'summer' | 'monsoon') => systemRoomIds.reduce((s, rid) => {
+    const r = rooms.find((x: any) => x.id === rid) as any;
+    if (!r) return s;
+    const loadTR = Number(season === 'monsoon' ? r._calcMonsoonLoadTR : r._calcLoadTR) || 0;
+    let oaTR = Number(season === 'monsoon' ? r._calcMonsoonOaTR : r._calcOaTR);
+    if (!Number.isFinite(oaTR)) {
+      const summerLoadTR = Number(r._calcLoadTR) || 0;
+      const indoorSummerTR = ((Number(r._calcSensibleBTUH) || 0) + (Number(r._calcLatentBTUH) || 0)) / 12000;
+      const summerOaTR = Math.max(0, summerLoadTR - indoorSummerTR);
+      oaTR = season === 'monsoon'
+        ? (summerLoadTR > 0 ? loadTR * (summerOaTR / summerLoadTR) : 0)
+        : summerOaTR;
+    }
+    return s + Math.min(Math.max(0, oaTR), loadTR);
+  }, 0);
+  const chillerOaTR = selectedSystem?.type === 'Chiller'
+    ? (chillerMonsoonGoverns ? sumRoomOaTR('monsoon') : sumRoomOaTR('summer'))
+    : 0;
+  // Indoor (diversifiable) load = governing space load less its outdoor-air share.
+  const chillerIndoorTR = Math.max(0, chillerThermalTR - chillerOaTR);
+
+  // Diversity-adjusted chiller plant capacity (not all zones peak simultaneously) —
+  // applied to the INDOOR load only; fresh-air OA is added back below.
   const chillerDiverseTR = selectedSystem?.type === 'Chiller'
-    ? chillerThermalTR * (selectedSystem.diversityFactor ?? 0.75)
+    ? chillerIndoorTR * (selectedSystem.diversityFactor ?? 0.75)
     : 0;
 
   // TFA/DOAS coil load that lands on THIS chiller plant: only DOAS units explicitly
@@ -4482,8 +4509,9 @@ export default function EquipmentSelection({
       }, 0)
     : 0;
 
-  // Total required plant capacity = diversified space load + chiller-fed TFA coil.
-  const chillerPlantRequiredTR = chillerDiverseTR + chillerTfaCoilTR;
+  // Plant required = diversified indoor load + room fresh-air OA (non-diverse)
+  // + any chiller-fed TFA coil (also non-diverse).
+  const chillerPlantRequiredTR = chillerDiverseTR + chillerOaTR + chillerTfaCoilTR;
 
   // Effective chiller units — combines new chillerUnits[] with legacy unitSelection for display
   const effectiveChillerUnits = useMemo((): ODUCombinationUnit[] => {
@@ -4502,6 +4530,33 @@ export default function EquipmentSelection({
   const chillerTotalInstalledTR = effectiveChillerUnits.reduce((s, u) => s + effTR(u) * u.quantity, 0);
   const chillerWorkingTR = effectiveChillerUnits.filter(u => (u.role ?? 'working') === 'working').reduce((s, u) => s + effTR(u) * u.quantity, 0);
   const chillerStandbyTR = effectiveChillerUnits.filter(u => u.role === 'standby').reduce((s, u) => s + effTR(u) * u.quantity, 0);
+
+  // ── IDU → Plant diversity check ──────────────────────────────────────────────
+  // Achieved diversity = installed WORKING plant TR ÷ installed indoor-unit (AHU/FCU/
+  // IDU) TR. The plant must meet at least the design diversity factor applied to the
+  // connected indoor units; if achieved < design DF the plant is undersized for what
+  // is hung on it. (Decision 2026-06-11.)
+  const chillerInstalledIduTR = useMemo(() => {
+    if (!selectedSystem || selectedSystem.type !== 'Chiller') return 0;
+    let tr = 0;
+    for (const z of ((selectedSystem.zones ?? []) as EquipmentZone[])) {
+      for (const u of getZoneUnits(z)) tr += (u.trCapacity ?? 0) * (u.quantity ?? 1);
+    }
+    const idu = (selectedSystem as any).iduSelections;
+    if (idu) Object.values(idu).forEach((val: any) => normalizeIDUList(val).forEach((u: any) => { tr += (u.trCapacity ?? 0) * (u.quantity ?? 1); }));
+    return tr;
+  }, [selectedSystem]);
+  const chillerDesignDF = selectedSystem?.diversityFactor ?? 0.75;
+  // Carve the chiller-fed TFA coil OUT of the plant first — diversity is NOT applied to
+  // TFA. Only the SPACE AHUs (chillerInstalledIduTR, which excludes the separate TFA unit)
+  // vs the remaining plant get the diversity ratio. (Decision 2026-06-11.)
+  const chillerPlantSpaceTR = Math.max(0, chillerWorkingTR - chillerTfaCoilTR);
+  const chillerDiversityDisplayPct = chillerPlantSpaceTR > 0 ? (chillerInstalledIduTR / chillerPlantSpaceTR) * 100 : 0;
+  // Achieved diversity = space plant ÷ connected IDU, compared to the design DF.
+  const chillerAchievedDiversity = chillerInstalledIduTR > 0 ? chillerPlantSpaceTR / chillerInstalledIduTR : 0;
+  // Only meaningful once both the indoor units AND the (space) plant are present.
+  const chillerDiversityActive = selectedSystem?.type === 'Chiller' && chillerInstalledIduTR > 0 && chillerPlantSpaceTR > 0;
+  const chillerDiversityUndersized = chillerDiversityActive && chillerAchievedDiversity < chillerDesignDF - 0.005;
 
   // Effective cooling tower units — merges new ctUnits[] with legacy ctSelection
   const effectiveCTUnits = useMemo((): ODUCombinationUnit[] => {
@@ -6672,8 +6727,8 @@ export default function EquipmentSelection({
                         {/* Diversity calculation */}
                         <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs items-center">
                           <div className="flex items-center gap-1.5">
-                            <span className="text-slate-500 dark:text-slate-400">Σ Zone Load:</span>
-                            <span className="font-bold text-slate-800 dark:text-slate-200">{chillerThermalTR.toFixed(2)} TR</span>
+                            <span className="text-slate-500 dark:text-slate-400">Σ Indoor Load:</span>
+                            <span className="font-bold text-slate-800 dark:text-slate-200">{chillerIndoorTR.toFixed(2)} TR</span>
                           </div>
                           <span className="text-slate-300 dark:text-slate-600">×</span>
                           <div className="flex items-center gap-1.5">
@@ -6694,15 +6749,29 @@ export default function EquipmentSelection({
                               onKeyDown={e => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur(); }}
                             />
                             <span className="font-bold text-indigo-700 dark:text-indigo-400">{chillerDiverseTR.toFixed(2)} TR</span>
-                            <span className="text-slate-400 dark:text-slate-500 italic">{chillerTfaCoilTR > 0 ? 'space load' : 'plant capacity required'}</span>
+                            <span className="text-slate-400 dark:text-slate-500 italic">{(chillerOaTR > 0.005 || chillerTfaCoilTR > 0.005) ? 'indoor (diversified)' : 'plant capacity required'}</span>
                           </div>
-                          {chillerTfaCoilTR > 0 && (
+                          {chillerOaTR > 0.005 && (
+                            <>
+                              <span className="text-slate-300 dark:text-slate-600">+</span>
+                              <div className="flex items-center gap-1.5">
+                                <span className="text-teal-600 dark:text-teal-400">Fresh air (OA):</span>
+                                <span className="font-bold text-teal-700 dark:text-teal-300">{chillerOaTR.toFixed(2)} TR</span>
+                                <span className="text-slate-400 dark:text-slate-500 italic">non-diverse</span>
+                              </div>
+                            </>
+                          )}
+                          {chillerTfaCoilTR > 0.005 && (
                             <>
                               <span className="text-slate-300 dark:text-slate-600">+</span>
                               <div className="flex items-center gap-1.5">
                                 <span className="text-teal-600 dark:text-teal-400">TFA coil (on this plant):</span>
                                 <span className="font-bold text-teal-700 dark:text-teal-300">{chillerTfaCoilTR.toFixed(2)} TR</span>
                               </div>
+                            </>
+                          )}
+                          {(chillerOaTR > 0.005 || chillerTfaCoilTR > 0.005) && (
+                            <>
                               <span className="text-slate-300 dark:text-slate-600">=</span>
                               <div className="flex items-center gap-1.5">
                                 <span className="font-bold text-indigo-700 dark:text-indigo-400">{chillerPlantRequiredTR.toFixed(2)} TR</span>
@@ -6725,6 +6794,26 @@ export default function EquipmentSelection({
                             </>
                           )}
                         </div>
+
+                        {/* IDU → Plant diversity check: installed plant vs connected indoor units */}
+                        {chillerDiversityActive && (
+                          <div className={cn(
+                            'flex flex-wrap items-center gap-x-3 gap-y-1 text-xs mt-1.5 px-2.5 py-1.5 rounded-md border',
+                            chillerDiversityUndersized
+                              ? 'border-red-300 dark:border-red-800 bg-red-50 dark:bg-red-950/20 text-red-700 dark:text-red-300'
+                              : 'border-emerald-200 dark:border-emerald-800 bg-emerald-50 dark:bg-emerald-950/20 text-emerald-700 dark:text-emerald-300',
+                          )}>
+                            <span className="font-semibold uppercase tracking-wide text-[10px]">Diversity Applied</span>
+                            <span>Installed IDU: <strong>{chillerInstalledIduTR.toFixed(1)} TR</strong></span>
+                            {chillerTfaCoilTR > 0.005
+                              ? <span>/ Plant (working): <strong>{chillerPlantSpaceTR.toFixed(1)} TR</strong> ({chillerWorkingTR.toFixed(1)} − {chillerTfaCoilTR.toFixed(1)} TFA)</span>
+                              : <span>/ Plant (working): <strong>{chillerPlantSpaceTR.toFixed(1)} TR</strong></span>}
+                            <span>= Diversity <strong>{chillerDiversityDisplayPct.toFixed(0)}%</strong></span>
+                            {chillerDiversityUndersized
+                              ? <span className="inline-flex items-center gap-1 font-semibold"><AlertTriangle className="w-3.5 h-3.5" /> Plant undersized (below {(chillerDesignDF * 100).toFixed(0)}% design DF) — add plant TR or reduce IDU</span>
+                              : <span className="inline-flex items-center gap-1 font-semibold"><CheckCircle2 className="w-3.5 h-3.5" /> OK</span>}
+                          </div>
+                        )}
 
                         {/* Chiller unit list */}
                         <div className="space-y-2">
@@ -7038,7 +7127,7 @@ export default function EquipmentSelection({
                             </div>
                             <div className="text-xs text-amber-600 dark:text-amber-400">
                               {selectedSystem.type === 'Chiller'
-                                ? <>{includeMonsoon && <span className="mr-1">{governingSeason} ·</span>}Plant (×{(selectedSystem.diversityFactor ?? 0.75).toFixed(2)} div.{chillerTfaCoilTR > 0 ? ' + TFA' : ''}): <span className="font-semibold text-indigo-700 dark:text-indigo-400">{chillerPlantRequiredTR.toFixed(1)} TR</span></>
+                                ? <>{includeMonsoon && <span className="mr-1">{governingSeason} ·</span>}Plant (indoor ×{(selectedSystem.diversityFactor ?? 0.75).toFixed(2)} div.{(chillerOaTR > 0.005 || chillerTfaCoilTR > 0.005) ? ' + OA' : ''}): <span className="font-semibold text-indigo-700 dark:text-indigo-400">{chillerPlantRequiredTR.toFixed(1)} TR</span></>
                                 : <>
                                     {includeMonsoon && <span className="mr-1">{governingSeason} ·</span>}
                                     {totalRequiredTR > totalSummerRequiredTR * 1.05 ? 'CFM governs' : 'Load governs'}
