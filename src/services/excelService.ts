@@ -1422,9 +1422,9 @@ function buildRoomSheet(
   if (sLatShort || mLatShort) {
     const src = sLatShort ? record.summer : record.monsoon!;
     putV(ws, row, 1, 'Latent / Reheat', S.label);
-    putV(ws, row, 2, r0(src.reheatRequiredBtu), S.calc); putV(ws, row, 3, 'BTU/h', S.calc);
+    putV(ws, row, 2, r0(src.latentCfm), S.calc); putV(ws, row, 3, 'CFM latent need', S.calc);
     putV(ws, row, 4, '');
-    putV(ws, row, 5, `Coil @ ${r0(src.selectedAdp)}°F can't fully dry — add reheat or decouple latent to a DOAS (latent needs ${r0(src.latentCfm)} CFM vs ${r0(src.dehumidSensibleCfm)} on sensible)`, S.calc);
+    putV(ws, row, 5, `Coil @ ${r0(src.selectedAdp)}°F can't fully dry — supplied ${r0(src.designSupplyCFM)} CFM. Lower the coil ADP (Dehumidification mode) or add a DOAS / desiccant.`, S.calc);
     row++;
   }
 

@@ -1971,9 +1971,9 @@ export const generatePDFReport = (
                 : `Dehumidified (DSCFM)  /  ${n0(m.designCfm)} CFM`],
             ...(m.latentShortfallCfm > 1
               ? [['Latent / Reheat',
-                  `Coil @ ${n0(m.selectedAdp)}°F can't fully dry this room — add reheat ≈ ${n0(m.reheatRequiredBtu)} BTU/h, or decouple latent to a DOAS / desiccant`,
-                  'Dehumid (sens.) / Latent need',
-                  `${n0(m.dehumidSensibleCfm)} / ${n0(m.latentCfm)} CFM`]]
+                  `Coil @ ${n0(m.selectedAdp)}°F can't fully dry this room — lower the coil ADP (Dehumidification mode) or add a DOAS / desiccant. Reheat duty: see psychrometric analysis below.`,
+                  'Latent need / Supplied',
+                  `${n0(m.latentCfm)} / ${n0(m.designCfm)} CFM`]]
               : []),
           ],
           theme: 'grid',
@@ -2206,7 +2206,7 @@ export const generatePDFReport = (
             // RSHF (room) drives reheat sizing; GSHF (coil incl. OA + parasitic)
             // drives ADP. Show both since they answer different questions.
             ['Enthalpy h (BTU/lb)',      n2(outdoorPsycho.enthalpy),             n2(indoorPsycho.enthalpy),              n2(hSup),           `RSHF = ${n2(cSHR)}  ·  GSHF = ${n2(m.rshf)}`],
-            ['Moisture Action',          moisAct,                                 '—',                                    '—',                `Rate = ${moisRate.toFixed(2)} lbs/hr`],
+            ['Moisture Action',          moisAct,                                 '—',                                    '—',                `Coil condensate = ${moisRate.toFixed(2)} lbs/hr  (= coil latent / 1061 BTU/lb; size drain)`],
             ['Coil Latent (BTU/h)',      '—',                                     '—',                                    '—',                n0(m.coilLatent)],
             [needRH ? 'Reheat  ★ REQD' : 'Reheat', needRH ? `Room SHR ${n2(cSHR)} < ${tSHR}` : `Room SHR = ${n2(cSHR)}`, '—', '—', needRH ? `${n0(rhBTU)} BTU/h required` : 'Not required'],
           ],
@@ -2526,7 +2526,10 @@ export const generatePDFReport = (
 
       // ── Heating load table with safety + pickup ───────────────────────────
       const humRow: string[][] = wm.includeHumidifier && wm.humNeeded
-        ? [['+ TFA / DOAS Humidification  (fresh-air moisture — DOAS duty)', '—', `${n0(wm.hHumLoad)} BTU/h`]]
+        ? [[wm.isTFA
+            ? '+ TFA / DOAS Humidification  (fresh-air moisture — DOAS duty)'
+            : '+ Humidification  (fresh-air moisture — space humidifier duty)',
+            '—', `${n0(wm.hHumLoad)} BTU/h`]]
         : [];
       const slabRow: string[][] = wm.hSlabRaw > 0
         ? [['Slab-Edge Loss  (F × Perimeter × dT)',   `${n0(wm.hSlabRaw)}`,     `${n0(wm.hSlabSafe)}`]]
@@ -2537,7 +2540,10 @@ export const generatePDFReport = (
         head: [['Component', 'Raw (BTU/h)', 'With Safety (BTU/h)']],
         body: [
           ['Transmission Loss  (U × A × dT)',         `${n0(wm.hTransRaw)}`,    `${n0(wm.hTransSafe)}`],
-          ['Ventilation Heating  (1.08 × CFM × dT)',  `${n0(wm.hVentRaw)}`,     `${n0(wm.hVentSafe)}`],
+          [wm.isTFA
+            ? 'Infiltration Heating  (1.08 × CFM × dT, infiltration ACH — OA on DOAS)'
+            : 'OA + Infiltration Heating  (1.08 × FACPH-CFM × dT, no DOAS)',
+            `${n0(wm.hVentRaw)}`, `${n0(wm.hVentSafe)}`],
           ...slabRow,
           [`Subtotal  (safety ${wm.heatingSafetyPct.toFixed(0)}% applied)`,   '—', `${n0(wm.heatingSubtotal)}`],
           [`Pickup / Warm-up Allowance  (+${wm.heatingPickupPct.toFixed(0)}%)`, '—', `${n0(wm.designHeatingLoad - wm.heatingSubtotal)}`],

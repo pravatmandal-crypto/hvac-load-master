@@ -80,12 +80,18 @@ export const calculateHeatingLoad = (
     transmissionLoss += el.uValue * el.area * deltaT;
   });
 
-  // 2. Infiltration Heating Load — use winter infiltration ACH, NOT facph (designed fresh air).
-  //    facph is sized for ventilation/IAQ (5-10 ACH for offices) and grossly oversizes heating.
-  //    Real building infiltration is typically 0.3-1.0 ACH. Default 0.5 (moderate construction).
+  // 2. Ventilation / Infiltration Heating Load.
+  //    • DOAS (ventilationStrategy='tfa-cold'): the DOAS pre-tempers the mechanical fresh air, so
+  //      the space unit only covers INFILTRATION (winterInfiltrationACH, default 0.5 ACH).
+  //    • No DOAS: the space unit must heat the full mechanical fresh air (FACPH) it introduces —
+  //      use the greater of the OA airflow vs infiltration (mechanical OA pressurizes out most
+  //      infiltration). Mirrors how summer cooling already counts the full OA. (Decision 2026-06-10.)
   const infiltrationACH = design.winterInfiltrationACH ?? 0.5;
   const volume = calculateRoomVolume(room);
-  const cfm = (volume * infiltrationACH) / ASHRAE_CONSTANTS.CFM_TO_VOLUME_CORRECTION;
+  const infiltrationCFM = (volume * infiltrationACH) / ASHRAE_CONSTANTS.CFM_TO_VOLUME_CORRECTION;
+  const isTFA = design.ventilationStrategy === 'tfa-cold';
+  const facphCFM = (volume * (room.facph || 0)) / ASHRAE_CONSTANTS.CFM_TO_VOLUME_CORRECTION;
+  const cfm = isTFA ? infiltrationCFM : Math.max(facphCFM, infiltrationCFM);
   const ventilationHeating = ASHRAE_CONSTANTS.SENSIBLE_COOLING_CONSTANT * cfm * deltaT;
 
   // 3. Slab-edge perimeter loss (ASHRAE Ch.18 F-factor method) — only if room is on grade.

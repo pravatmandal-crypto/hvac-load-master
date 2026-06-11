@@ -1212,8 +1212,8 @@ function RoomDetail({
           <div className="mt-1 pt-1 border-t border-amber-200 dark:border-amber-900/60 text-[11px] leading-snug text-amber-700 dark:text-amber-400">
             <span className="font-semibold">Latent not met at ADP {Math.round(calc.coil.selectedADP)}°F.</span>{' '}
             The {Math.round(calc.coil.selectedADP)}°F coil can't dry this room — moisture removal would need
-            {' '}{Math.round(calc.coil.latentCFM).toLocaleString()} CFM of dehumidified air (vs {Math.round(calc.designCFM).toLocaleString()} supplied).
-            Add reheat ≈ {Math.round(calc.coil.reheatRequiredBTU).toLocaleString()} BTU/h, or decouple latent to a DOAS / desiccant.
+            {' '}{Math.round(calc.coil.latentCFM).toLocaleString()} CFM vs {Math.round(calc.designCFM).toLocaleString()} supplied.
+            Lower the coil ADP (Dehumidification mode) or decouple latent to a DOAS / desiccant.
           </div>
         )}
         {calc.supplyCfmBasis === 'dscfm' && calc.designCFM < calc.achBasisCFM - 1 && (
