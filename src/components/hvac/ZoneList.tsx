@@ -1162,12 +1162,31 @@ const ZoneList = ({
                       className="h-7 text-xs rounded border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 dark:text-slate-200 px-2 cursor-pointer"
                       value=""
                       title="Apply one fresh-air mode to every room in this zone"
-                      onChange={(e) => { const v = e.target.value; if (v) { void setZoneFreshAir(liveZoneRooms, v); e.currentTarget.value = ''; } }}
+                      onChange={(e) => {
+                        const raw = e.target.value;
+                        if (!raw) return;
+                        let mode: 'no-tfa' | 'tfa-served' | 'tfa-only'; let id: string | undefined;
+                        if (raw === 'no-tfa') { mode = 'no-tfa'; id = undefined; }
+                        else if (raw.includes(':')) { const [m, d] = raw.split(':'); mode = m === 'tfa-only' ? 'tfa-only' : 'tfa-served'; id = d || undefined; }
+                        else { mode = raw as 'tfa-served' | 'tfa-only'; id = undefined; }
+                        void setZoneFreshAir(liveZoneRooms, mode, id);
+                        e.currentTarget.value = '';
+                      }}
                     >
                       <option value="">— choose —</option>
                       <option value="no-tfa">On the room unit</option>
-                      <option value="tfa-served">Central cold TFA</option>
-                      <option value="tfa-only">TFA-only (corridor)</option>
+                      {(() => {
+                        const units = (equipSystems ?? []).filter((s: any) => s?.type === 'DOAS');
+                        return units.length >= 2
+                          ? units.flatMap((u: any) => [
+                              <option key={`s-${u.id}`} value={`tfa-served:${u.id}`}>Central cold TFA — {u.name}</option>,
+                              <option key={`o-${u.id}`} value={`tfa-only:${u.id}`}>TFA-only — {u.name}</option>,
+                            ])
+                          : [
+                              <option key="s" value="tfa-served">Central cold TFA</option>,
+                              <option key="o" value="tfa-only">TFA-only (corridor)</option>,
+                            ];
+                      })()}
                     </select>
                   </div>
                 )}

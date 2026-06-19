@@ -24,7 +24,7 @@ import type { EquipmentModel } from '../../constants/equipment-catalog';
 import GlobalEquipmentLibrary from './GlobalEquipmentLibrary';
 import { getLibraryItemsByType, GLOBAL_LIB_COLLECTION } from '../../services/equipmentLibraryService';
 import { ComboboxInput } from '../ui/combobox-input';
-import { calculateCoilParameters, calculatePsychrometrics, dewPointFromHumidityRatio, EZ_OPTIONS, calcZoneVentilation, calcSystemVentilation62, calculateEnvelopeGain, calculateInternalGains, calculateVentilationLoad, calculateTFALoad, calculateParasiticGains, getRecommendedAch, getMinAdp, resolveRoomTfa } from '../../lib/hvac';
+import { calculateCoilParameters, calculatePsychrometrics, dewPointFromHumidityRatio, EZ_OPTIONS, calcZoneVentilation, calcSystemVentilation62, getMinAdp, resolveRoomTfa } from '../../lib/hvac';
 import { calculateRoomVolume } from '../../lib/hvac/geometry';
 import SpecSheet from './SpecSheet';
 import type {
@@ -35,11 +35,9 @@ import {
   Plus, Trash2, Package, FileText, Search, Lock, Unlock, Box, Check, LayoutGrid,
   AlertTriangle, CheckCircle2, Wind, Zap, Droplets, ExternalLink, Upload,
   ChevronRight, ChevronDown, Info, BookOpen, Pencil, ArrowLeftRight, ArrowRight, ArrowLeft,
-  RotateCcw,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { cn } from '../../lib/utils';
-import { envelopeCache } from '../../lib/envelopeCache';
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
@@ -405,10 +403,7 @@ function IDUPickerDialog({
                 <div className="flex flex-col gap-1">
                   <div className="flex flex-wrap gap-4">
                     {(coilDutyTR ?? 0) > 0 && (
-                      <span className="text-indigo-700 dark:text-indigo-300">Coil Duty: <strong>{(coilDutyTR ?? 0).toFixed(2)} TR</strong></span>
-                    )}
-                    {(coilDutyTR ?? 0) > 0 && (
-                      <span className="text-indigo-700 dark:text-indigo-300">Required (×1.10): <strong className="text-orange-700 dark:text-orange-400">{((coilDutyTR ?? 0) * 1.10).toFixed(2)} TR</strong></span>
+                      <span className="text-indigo-700 dark:text-indigo-300">Coil Duty / Required: <strong className="text-orange-700 dark:text-orange-400">{(coilDutyTR ?? 0).toFixed(2)} TR</strong></span>
                     )}
                     {designCFM > 0 && (
                       <span className="text-indigo-700 dark:text-indigo-300">Design CFM: <strong>{Math.round(designCFM).toLocaleString()}</strong></span>
@@ -416,7 +411,8 @@ function IDUPickerDialog({
                   </div>
                   <span className="text-[11.5px] text-slate-500 dark:text-slate-400 italic leading-snug">
                     Chiller AHU — Coil Duty (thermal load) and Design CFM (dehumidified airflow) are independent.
-                    OEM builds the coil to the Coil Duty; the selected catalog model should meet the Required value (10% selection margin).
+                    The coil is built to the Coil Duty, which already carries the project safety factor — the
+                    selected model is sized to that duty (no extra selection margin added).
                   </span>
                 </div>
               </div>
@@ -1028,7 +1024,10 @@ function roundUpToStdTR(tr: number): number {
 function generateEquipmentSpecs(
   systemType: string, requiredTR: number, designCFM: number, systemName?: string,
 ): Partial<EquipmentModel> & { staticPressurePa?: number } {
-  const safetyFactor = systemType === 'Chiller' ? 1.1 : 1.1;
+  // Chiller AHU coils are built to the Coil Duty, which already carries the project safety
+  // factor — no extra selection margin (engineer decision 2026-06-19). Other unit types keep a
+  // 10% catalog-selection margin. Either way, roundUpToStdTR adds natural headroom.
+  const safetyFactor = systemType === 'Chiller' ? 1.0 : 1.1;
   const rawTR = requiredTR * safetyFactor;
   const tr = roundUpToStdTR(rawTR);
 
@@ -1836,6 +1835,22 @@ function deriveCategory(projectSystemType?: string): string {
   return map[projectSystemType ?? ''] ?? '';
 }
 
+// Infer the hvacSystemCategory from an existing equipmentSystems doc when the project never
+// persisted one. Lets Equipment Selection recover a system on load even if the project's
+// systemType/hvacSystemCategory is missing — otherwise auto-init bails and the screen sits
+// blank ("Select a system") even though a system exists in the database.
+function inferCategoryFromSystem(sys: any): string {
+  if (!sys?.type) return '';
+  const cond = sys.condenserType ?? sys.packageSubType ?? null;
+  for (const [cat, cfg] of Object.entries(CATEGORY_CONFIG)) {
+    if (cat === 'Hybrid') continue;
+    if (cfg.type !== sys.type) continue;
+    if (cfg.condenserType && cond && cfg.condenserType !== cond) continue;
+    return cat;
+  }
+  return '';
+}
+
 // ─── Main Component ───────────────────────────────────────────────────────────
 
 export default function EquipmentSelection({
@@ -1925,8 +1940,6 @@ export default function EquipmentSelection({
 
   // Live recalculation — zone design conditions + per-room results
   const [zoneDocs, setZoneDocs] = useState<any[]>([]);
-  const [recalcResults, setRecalcResults] = useState<Record<string, any>>({});
-  const [recalcLoading, setRecalcLoading] = useState(false);
 
   // Active tab — controlled so Summary tab can jump back to System Design
   const [activeTab, setActiveTab] = useState('systems');
@@ -1961,7 +1974,9 @@ export default function EquipmentSelection({
     setHvacSystemCategory(cat);
     // Persist the derived category so future loads don't need to re-derive
     if (!project?.hvacSystemCategory && cat) {
-      updateDoc(doc(db, 'projects', project.id), { hvacSystemCategory: cat, updatedAt: serverTimestamp() }).catch(() => {});
+      updateDoc(doc(db, 'projects', project.id), { hvacSystemCategory: cat, updatedAt: serverTimestamp() }).catch(err => {
+        console.error('Persist hvacSystemCategory failed:', err);
+      });
     }
     setRoomQuantities({});
     setUnitQuantity(1);
@@ -2009,8 +2024,36 @@ export default function EquipmentSelection({
       unitSelection:   null,
       createdAt: serverTimestamp(),
       updatedAt: serverTimestamp(),
-    }).then(ref => setSelectedSystemId(ref.id)).catch(() => {});
+    }).then(ref => setSelectedSystemId(ref.id)).catch(err => {
+      // Surface the failure instead of leaving an empty system list with no feedback,
+      // and release the lock so the effect can retry (otherwise it stays empty all session).
+      categoryInitRef.current = null;
+      console.error('Auto-create equipment system failed:', err);
+      toast.error(
+        (err as any)?.code === 'permission-denied'
+          ? 'Could not create the equipment system — you may not have edit permission for this project.'
+          : `Could not create the equipment system — ${(err as any)?.message ?? 'unknown error'}`,
+      );
+    });
   }, [hvacSystemCategory, equipSystems]);
+
+  // Fallback selection — recover from a blank screen. If systems are loaded but nothing valid
+  // is selected (e.g. the project's hvacSystemCategory was never persisted, so the auto-init
+  // effect above bailed on `!hvacSystemCategory`), select the existing primary system and adopt
+  // its category. Without this, navigating back to Equipment Selection shows "Select a system"
+  // even though the Chiller Plant exists in the database — the "system disappeared" symptom.
+  useEffect(() => {
+    if (!systemsLoadedRef.current || equipSystems.length === 0) return;
+    const valid = selectedSystemId && equipSystems.some(s => s.id === selectedSystemId);
+    if (valid) return;
+    const primary = equipSystems.find(s => s.type !== 'DOAS') ?? equipSystems[0];
+    if (!primary) return;
+    setSelectedSystemId(primary.id);
+    if (!hvacSystemCategory) {
+      const inferred = inferCategoryFromSystem(primary);
+      if (inferred) setHvacSystemCategory(inferred);
+    }
+  }, [equipSystems, selectedSystemId, hvacSystemCategory]);
 
   // Re-initialize quantities when user switches to a different system
   useEffect(() => {
@@ -2081,6 +2124,18 @@ export default function EquipmentSelection({
 
         setEquipSystems(deduped);
       },
+      // Without an error callback a failed read (permission / network / offline-cache
+      // hiccup on remount) silently leaves the systems list empty with no feedback —
+      // which reads to the user as "my equipment system disappeared / didn't save".
+      err => {
+        systemsLoadedRef.current = true; // unblock auto-init retry rather than hang
+        console.error('equipmentSystems listener error:', err);
+        toast.error(
+          (err as any)?.code === 'permission-denied'
+            ? 'Could not load equipment systems — permission denied for this project.'
+            : `Could not load equipment systems — ${(err as any)?.message ?? 'connection error'}. Reopen the project to retry.`,
+        );
+      },
     );
     return () => unsub();
   }, [project?.id]);
@@ -2096,6 +2151,10 @@ export default function EquipmentSelection({
           zoneName: d.data().zoneName ?? 'Zone',
           ...d.data(),
         })));
+      },
+      err => {
+        console.error('rooms listener error:', err);
+        toast.error(`Could not load rooms — ${(err as any)?.message ?? 'connection error'}.`);
       },
     );
     return () => unsub();
@@ -2234,6 +2293,22 @@ export default function EquipmentSelection({
 
   const deleteSystem = async (systemId: string) => {
     try {
+      const sys = equipSystems.find(s => s.id === systemId);
+      // Deleting a TFA/DOAS unit: detach its rooms (clear the pinned doasId + set them back to
+      // "on the room unit") so the resolver doesn't silently re-route them to another DOAS.
+      if (sys?.type === 'DOAS') {
+        const batch = writeBatch(db);
+        let n = 0;
+        for (const r of rooms as any[]) {
+          if (r.doasId === systemId) {
+            batch.update(doc(db, 'projects', project.id, 'rooms', r.id), {
+              tfaMode: 'no-tfa', doasId: deleteField(), updatedAt: serverTimestamp(),
+            });
+            n++;
+          }
+        }
+        if (n > 0) await batch.commit();
+      }
       await deleteDoc(doc(db, 'projects', project.id, 'equipmentSystems', systemId));
       if (selectedSystemId === systemId) setSelectedSystemId(null);
       toast.success('System deleted');
@@ -2487,11 +2562,25 @@ export default function EquipmentSelection({
       }
 
       // ── Part 1b: delete ENTIRE /equipmentSystems docs that are orphan duplicates ──
-      // An ES system is orphan when NO live room has room.systemId pointing to it.
-      // (These typically result from name+type dedup in ES — the user sees one "Chiller Plant"
-      // but Firestore has 5 of them, 4 of which no rooms reference.)
+      // A system is a deletable orphan ONLY when it is BOTH unreferenced (no room.systemId
+      // points to it AND none of its sub-zones is referenced by a room.zoneId) AND carries no
+      // configuration of its own (no assigned rooms, no zone room-lists, no equipment selected).
+      // Earlier this deleted any system no room referenced via systemId — which destroyed real
+      // systems whose rooms link by zoneId instead (the "my Chiller Plant disappeared" bug).
+      const systemHasConfig = (s: any) =>
+        (s.assignedRoomIds?.length ?? 0) > 0 ||
+        ((s.zones ?? []) as any[]).some((z: any) =>
+          (z.roomIds?.length ?? 0) > 0 || z.selection || (z.unitSelections?.length ?? 0) > 0) ||
+        !!s.unitSelection ||
+        (s.chillerUnits?.length ?? 0) > 0 ||
+        !!s.oduSelection ||
+        Object.keys(s.iduSelections ?? {}).length > 0;
       for (const sysDoc of allEsDocs) {
-        if (referencedSystemIds.has(sysDoc.id)) continue;  // some room references it → keep
+        const s: any = sysDoc.data;
+        if (referencedSystemIds.has(sysDoc.id)) continue;  // a room references it via systemId → keep
+        const reachableByZone = ((s.zones ?? []) as any[]).some((z: any) => z?.id && referencedZoneIds.has(z.id));
+        if (reachableByZone) continue;                     // a room references one of its sub-zones → keep
+        if (systemHasConfig(s)) continue;                  // holds real configuration → keep
         batch.delete(sysDoc.ref);
         orphanEsSystemDocs++;
       }
@@ -3637,26 +3726,6 @@ export default function EquipmentSelection({
   // Sidebar is only shown for VRF (multiple ODU groups) and Hybrid (multiple system types)
   const showSidebar = hvacSystemCategory === 'VRF' || hvacSystemCategory === 'Hybrid';
 
-  // ── Live calculation engine (same logic as LoadCalculator.persistRoomAnalysisSnapshot) ──
-
-  const getDesignConditionsForRoom = (room: any) => {
-    const zoneId = room.zoneId ?? room.systemId;
-    const zone = zoneDocs.find((z: any) => z.id === zoneId);
-    const summerTemp = project?.summerDesignTemp ?? project?.data?.summerDesignTemp ?? 95;
-    const summerHum  = project?.summerDesignHumidity ?? project?.data?.summerDesignHumidity ?? 50;
-    return {
-      outdoorTemp:        zone?.outdoorTemp        ?? summerTemp,
-      indoorTemp:         zone?.indoorTemp         ?? (project?.insideSummerTemp ?? project?.data?.insideSummerTemp ?? 75),
-      outdoorHumidity:    zone?.outdoorHumidity    ?? summerHum,
-      indoorHumidity:     zone?.indoorHumidity     ?? (project?.insideSummerHumidity ?? project?.data?.insideSummerHumidity ?? 50),
-      altitude:           project?.altitude        ?? project?.data?.altitude ?? 0,
-      latitude:           project?.latitude        ?? project?.data?.latitude ?? undefined,
-      longitude:          project?.longitude       ?? project?.data?.longitude ?? undefined,
-      winterOutdoorTemp:  project?.winterDesignTemp ?? project?.data?.winterDesignTemp ?? 30,
-      winterOutdoorHumidity: project?.winterDesignHumidity ?? project?.data?.winterDesignHumidity ?? 30,
-    };
-  };
-
   // TFA/DOAS resolution now lives in the shared lib/hvac/tfa resolver (single source
   // of truth across LC / SD / ZoneList / reports). These thin wrappers keep the
   // existing call sites unchanged. room.tfaMode is the primary driver; the legacy
@@ -3694,202 +3763,12 @@ export default function EquipmentSelection({
     }
   };
 
-  const computeRoomReqs = (room: any, elements: any[]) => {
-    const baseDc = getDesignConditionsForRoom(room);
-    const monsoonTemp = project?.monsoonDesignTemp ?? project?.data?.monsoonDesignTemp ?? 85;
-    const monsoonHum  = project?.monsoonDesignHumidity ?? project?.data?.monsoonDesignHumidity ?? 85;
-    const incMonsoon  = !!(project?.includeMonsoon ?? project?.data?.includeMonsoon);
-    const systemType  = project?.systemType ?? project?.data?.systemType;
-
-    // ── TFA / DOAS detection ──
-    // If the room's primary system (systemId or zoneId) is linked to a DOAS,
-    // switch the engine to 'tfa-cold' and pull TFA supply + ERV params from
-    // the DOAS doc. Defaults to undefined (engine falls back to 55°F / 90% RH
-    // / no ERV) when DOAS hasn't been configured by the user yet.
-    // Phase C: per-room override. A room marked 'no-tfa' opts out of the TFA
-    // branch even if its zone is TFA-linked (e.g. hi-wall split that can't take
-    // ducted TFA supply).
-    // Phase D: 'tfa-only' (corridor case) routes ALL load through the TFA supply
-    // air — the primary coil contribution is zeroed below and a carrying-capacity
-    // deficit is computed when 1.08 × CFM_tfa × (T_room − T_supply) < room sensible.
-    const doasCandidate = findDoasForRoom(room);
-    const effectiveTfaMode = getEffectiveTfaMode(room, doasCandidate);
-    const doas = effectiveTfaMode === 'no-tfa' ? null : doasCandidate;
-    const isTFA = !!doas;
-    const dc: any = isTFA
-      ? {
-          ...baseDc,
-          ventilationStrategy: 'tfa-cold',
-          tfaSupplyTemp: (doas as any).tfaSupplyTemp,
-          tfaSupplyHumidity: (doas as any).tfaSupplyHumidity,
-          ervSensibleEffectiveness: (doas as any).ervSensibleEffectiveness,
-          ervLatentEffectiveness: (doas as any).ervLatentEffectiveness,
-        }
-      : baseDc;
-
-    const rd = {
-      id: room.id, name: room.name ?? '', floor: room.floor ?? 'Ground',
-      length: Number(room.length) || 0, width: Number(room.width) || 0, height: Number(room.height) || 0,
-      hasFalseCeiling: room.hasFalseCeiling ?? false, falseCeilingHeight: Number(room.falseCeilingHeight) || 0,
-      facph: Number(room.facph) || 0, peopleCount: Number(room.peopleCount) || 0,
-      activityType: room.activityType ?? 'office',
-      lightsWattsPerSqft: Number(room.lightsWattsPerSqft) || 0,
-      equipmentKW: Number(room.equipmentKW) || 0, othersKW: Number(room.othersKW) || 0,
-    };
-
-    const bf = 0.15;
-    const ductPct = Number(room.ductGainPct) || 2;
-    const fanPct  = Number(room.fanGainPct) || 3;
-    const senSafePct  = Number(room.sensibleSafetyPercent ?? room.sensibleSafetyFactor ?? 10);
-    const latSafePct  = Number(room.latentSafetyPercent  ?? room.latentSafetyFactor  ?? 5);
-    const ovlSafePct  = Number(room.overallSafetyPercent ?? room.grandTotalSafetyFactor ?? 3);
-
-    const envelope  = calculateEnvelopeGain(elements, dc);
-    const internal  = calculateInternalGains(rd);
-    const vent      = calculateVentilationLoad(rd, dc);
-    const tfa       = isTFA ? calculateTFALoad(rd, dc) : null;
-    // OA bypass-factor model only applies when OA enters the primary coil.
-    // In TFA mode, OA is conditioned by the DOAS — primary sees zero raw OA.
-    const erVentSen = isTFA ? 0 : vent.sensible * bf;
-    const erVentLat = isTFA ? 0 : vent.latent * bf;
-    const erSens    = envelope.sensible + internal.sensible + erVentSen;
-    const erLat     = internal.latent + erVentLat;
-    const parasitic = calculateParasiticGains(erSens, erSens, ductPct, fanPct);
-    const ersh = (erSens + parasitic.ductGain + parasitic.fanGain) * (1 + senSafePct / 100);
-    const erlh = erLat * (1 + latSafePct / 100);
-    const oaSen = isTFA ? 0 : vent.sensible * (1 - bf);
-    const oaLat = isTFA ? 0 : vent.latent   * (1 - bf);
-    // Cold-DOAS credit (engineering-correct, per locked decision 5).
-    const tfaOffSen = tfa ? tfa.spaceSensibleOffset : 0;
-    const tfaOffLat = tfa ? tfa.spaceLatentOffset   : 0;
-    // Phase D: tfa-only rooms route ALL their load through the TFA unit's
-    // supply-air carrying capacity. Primary contribution = 0. Engineering
-    // check: 1.08 × CFM_tfa × (T_room − T_supply) must ≥ ersh; warn if not.
-    const isTfaOnly = isTFA && effectiveTfaMode === 'tfa-only';
-    const tfaCarryingBTUH = tfa ? 1.08 * tfa.cfm * (dc.indoorTemp - tfa.supplyTemp) : 0;
-    const tfaCarryingDeficit = isTfaOnly ? Math.max(0, ersh - tfaCarryingBTUH) : 0;
-    const coilSen   = isTfaOnly ? 0 : (isTFA ? Math.max(0, ersh - tfaOffSen) : ersh + oaSen);
-    const coilLat   = isTfaOnly ? 0 : (isTFA ? Math.max(0, erlh - tfaOffLat) : erlh + oaLat);
-    const grandTotalTR = (coilSen + coilLat) / 12000;
-
-    const presetACH  = getRecommendedAch(room.achProfile ?? room.activityType);
-    const totalACH   = Math.max(presetACH, rd.facph);
-    const supplyCFM  = (calculateRoomVolume(rd) * totalACH) / 60;
-    const coilParams = calculateCoilParameters(coilSen, coilLat, dc.indoorTemp, dc.indoorHumidity, dc.altitude || 0, bf, 35, 65, getMinAdp(systemType, project?.adpBasis ?? project?.data?.adpBasis));
-    // TFA-served airflow (corrected 2026-06-07): DOAS supplies only the OA air change;
-    // the space AHU moves the recirculation balance (supplyCFM − oaCFM). Size by the recirc
-    // floor, not thermal-only. tfa-only corridors are DOAS-fed, so they keep total. Use
-    // minAdpSensibleCFM (fixed ADP), not dehumidifiedCFM. See CLAUDE.md "Critical invariant".
-    const designCFM  = (isTFA && !isTfaOnly)
-      ? Math.max(coilParams.minAdpSensibleCFM, supplyCFM - (tfa?.cfm ?? 0))
-      : Math.max(coilParams.minAdpSensibleCFM, supplyCFM);
-    const cfmTR      = designCFM / 400;
-    // Plant TR is load-only (2026-05-20). cfmTR retained as sanity ratio.
-    const governingTR = grandTotalTR;
-    const requiredTR  = governingTR * (1 + ovlSafePct / 100);
-
-    // Monsoon season
-    const mDc: any = { ...dc, outdoorTemp: monsoonTemp, outdoorHumidity: monsoonHum };
-    const mEnv = calculateEnvelopeGain(elements, mDc);
-    const mVent = calculateVentilationLoad(rd, mDc);
-    const mTfa  = isTFA ? calculateTFALoad(rd, mDc) : null;
-    const mErVentSen = isTFA ? 0 : mVent.sensible * bf;
-    const mErVentLat = isTFA ? 0 : mVent.latent * bf;
-    const mErSens = mEnv.sensible + internal.sensible + mErVentSen;
-    const mErLat  = internal.latent + mErVentLat;
-    const mPara   = calculateParasiticGains(mErSens, mErSens, ductPct, fanPct);
-    const mErsh   = (mErSens + mPara.ductGain + mPara.fanGain) * (1 + senSafePct / 100);
-    const mErlh   = mErLat * (1 + latSafePct / 100);
-    const mOaSen  = isTFA ? 0 : mVent.sensible * (1 - bf);
-    const mOaLat  = isTFA ? 0 : mVent.latent   * (1 - bf);
-    const mTfaOffSen = mTfa ? mTfa.spaceSensibleOffset : 0;
-    const mTfaOffLat = mTfa ? mTfa.spaceLatentOffset   : 0;
-    const mCoilSen = isTfaOnly ? 0 : (isTFA ? Math.max(0, mErsh - mTfaOffSen) : mErsh + mOaSen);
-    const mCoilLat = isTfaOnly ? 0 : (isTFA ? Math.max(0, mErlh - mTfaOffLat) : mErlh + mOaLat);
-    const mTotalTR = (mCoilSen + mCoilLat) / 12000;
-    const mCoilP   = calculateCoilParameters(mCoilSen, mCoilLat, dc.indoorTemp, dc.indoorHumidity, dc.altitude || 0, bf, 35, 65, getMinAdp(systemType, project?.adpBasis ?? project?.data?.adpBasis));
-    const mDesignCFM  = (isTFA && !isTfaOnly)
-      ? Math.max(mCoilP.minAdpSensibleCFM, supplyCFM - (mTfa?.cfm ?? 0))
-      : Math.max(mCoilP.minAdpSensibleCFM, supplyCFM);
-    const mCfmTR      = mDesignCFM / 400;
-    const monsoonGoverningTR = mTotalTR;
-    const monsoonRequiredTR  = monsoonGoverningTR * (1 + ovlSafePct / 100);
-
-    const overallGoverningTR = incMonsoon ? Math.max(governingTR, monsoonGoverningTR) : governingTR;
-    const overallRequiredTR  = incMonsoon ? Math.max(requiredTR, monsoonRequiredTR)   : requiredTR;
-    const overallDesignCFM   = incMonsoon ? Math.max(designCFM,  mDesignCFM)          : designCFM;
-
-    return {
-      requiredTR, governingTR, designCFM,
-      monsoonLoadTR: mTotalTR, monsoonGoverningTR, monsoonRequiredTR, monsoonDesignCFM: mDesignCFM,
-      overallGoverningTR, overallRequiredTR, overallDesignCFM,
-      // TFA / DOAS — zero when this room's primary is not DOAS-served.
-      tfaCoilBTUH: tfa ? tfa.coilSensible + tfa.coilLatent : 0,
-      tfaCoilTR: tfa ? (tfa.coilSensible + tfa.coilLatent) / 12000 : 0,
-      tfaCfm: tfa ? tfa.cfm : 0,
-      monsoonTfaCoilBTUH: mTfa ? mTfa.coilSensible + mTfa.coilLatent : 0,
-      monsoonTfaCoilTR: mTfa ? (mTfa.coilSensible + mTfa.coilLatent) / 12000 : 0,
-      // Phase D: tfa-only flag + carrying capacity diagnostics (for warnings).
-      isTFA,
-      isTfaOnly,
-      tfaCarryingBTUH,
-      tfaCarryingDeficit,
-      effectiveTfaMode,
-    };
-  };
-
-  const recalcSystemRooms = async () => {
-    if (!project?.id || !selectedSystemId) return;
-    // For non-DOAS: rooms directly assigned to this system.
-    // For DOAS: rooms belonging to any primary system linked via doasLinkedSystemIds OR
-    // any zone linked via doasLinkedZoneIds — computeRoomReqs detects the link and switches
-    // to TFA mode. Both link types must be honored or zone-linked DOAS rooms never recalc.
-    const sys = equipSystems.find(s => s.id === selectedSystemId);
-    const linkedIds: string[] = sys && sys.type === 'DOAS'
-      ? [
-          ...((sys as any).doasLinkedSystemIds ?? []),
-          ...((sys as any).doasLinkedZoneIds ?? []),
-        ]
-      : [];
-    const sysRooms = sys && sys.type === 'DOAS'
-      ? rooms.filter((r: any) => linkedIds.includes(r.zoneId) || linkedIds.includes(r.systemId))
-      : rooms.filter((r: any) => r.zoneId === selectedSystemId || r.systemId === selectedSystemId);
-    if (sysRooms.length === 0) return;
-    setRecalcLoading(true);
-    try {
-      const results: Record<string, any> = {};
-      await Promise.all(sysRooms.map(async (room: any) => {
-        const cached = envelopeCache.get(project.id, room.id);
-        let elements: any[];
-        if (cached) {
-          elements = cached;
-        } else {
-          const elemSnap = await getDocs(collection(db, 'projects', project.id, 'rooms', room.id, 'envelopeElements'));
-          elements = elemSnap.docs.map(d => ({ id: d.id, ...d.data() }));
-          envelopeCache.set(project.id, room.id, elements);
-        }
-        results[room.id] = computeRoomReqs(room, elements);
-      }));
-      setRecalcResults(prev => ({ ...prev, ...results }));
-    } catch {
-      toast.error('Load recalculation failed');
-    } finally {
-      setRecalcLoading(false);
-    }
-  };
-
-  // Auto-recalc when selected system changes
-  useEffect(() => {
-    if (selectedSystemId && project?.id) {
-      void recalcSystemRooms();
-    }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedSystemId, project?.id]);
-
-  // getRoomReqs: prefer live recalculated results over stored _calc* snapshot
+  // getRoomReqs: read the persisted _calc* snapshot written by Load Calculator. ES no longer
+  // runs its own load engine — Load Calculator is the single source of truth, and every edit
+  // (move / update / delete / TFA / design-condition change) re-persists the affected rooms,
+  // so this snapshot stays current. (Previously ES had a parallel computeRoomReqs engine that
+  // could diverge from LC; it was removed 2026-06-19.)
   const getRoomReqs = (roomId: string) => {
-    const live = recalcResults[roomId];
-    if (live) return live;
     const r = rooms.find(x => x.id === roomId);
     const summerReqTR = Number(r?._calcRequiredTR) || 0;
     const summerCFM   = Number(r?._calcDesignCFM) || 0;
@@ -3922,10 +3801,21 @@ export default function EquipmentSelection({
 
   // Computed from room documents — single source of truth shared with Load Calculator
   const systemRoomIds = useMemo(
-    () => selectedSystemId
-      ? rooms.filter((r: any) => r.zoneId === selectedSystemId || r.systemId === selectedSystemId).map((r: any) => r.id)
-      : [],
-    [rooms, selectedSystemId],
+    () => {
+      if (!selectedSystemId) return [];
+      // Rooms can be linked to a system three ways: legacy flat (room.zoneId === systemId),
+      // modern (room.systemId === systemId), OR via the system's sub-zones (zone.roomIds[]).
+      // The sub-zone path was missing — so chillers built with zones found no rooms here,
+      // which broke live recalc (it fell back to stale persisted TR) and the OA/diversity sums.
+      const sys = equipSystems.find(s => s.id === selectedSystemId) as any;
+      const subZoneRoomIds = new Set<string>();
+      ((sys?.zones ?? []) as any[]).forEach((z: any) =>
+        (z.roomIds ?? []).forEach((rid: string) => subZoneRoomIds.add(rid)));
+      return rooms
+        .filter((r: any) => r.zoneId === selectedSystemId || r.systemId === selectedSystemId || subZoneRoomIds.has(r.id))
+        .map((r: any) => r.id);
+    },
+    [rooms, selectedSystemId, equipSystems],
   );
 
   // Fresh air CFM from LC FACPH values — used by AHU spec autofill
@@ -4036,9 +3926,9 @@ export default function EquipmentSelection({
         };
       })
       .filter((x) => x.isTfaOnly && x.deficit > 0);
-    // getRoomReqs reads recalcResults + rooms; both are deps.
+    // getRoomReqs reads the persisted snapshot on `rooms`.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [doasServedRoomIds, recalcResults, rooms]);
+  }, [doasServedRoomIds, rooms]);
 
   // OA CFM for DOAS = sum of facph × volume over served rooms.
   const doasOACFM = useMemo(
@@ -4455,11 +4345,16 @@ export default function EquipmentSelection({
     return btu;
   }, [selectedSystem, systemRoomIds, rooms]);
 
-  // Chiller plant load should track thermal zone load. Airflow-driven (CFM) uplift is used
-  // for air-side equipment sizing, but should not inflate plant tonnage display.
-  const chillerSummerThermalTR = totalSummerThermalTR;
-  const chillerMonsoonGoverns = includeMonsoon && totalMonsoonThermalTR > chillerSummerThermalTR;
-  const chillerThermalTR = chillerMonsoonGoverns ? totalMonsoonThermalTR : chillerSummerThermalTR;
+  // Chiller plant load tracks the persisted (Load Calculator) thermal load — NOT ES's in-component
+  // live recalc, which can diverge from LC. Used for the displayed "Cooling Load" and for choosing
+  // the governing season of the OA term.
+  const chillerStoredSummerTR = totalSummerThermalTR; // Σ room._calcLoadTR (stored)
+  const chillerStoredMonsoonTR = systemRoomIds.reduce((s, rid) => {
+    const r = rooms.find((x: any) => x.id === rid) as any;
+    return s + (Number(r?._calcMonsoonLoadTR) || 0);
+  }, 0);
+  const chillerMonsoonGoverns = includeMonsoon && chillerStoredMonsoonTR > chillerStoredSummerTR;
+  const chillerThermalTR = chillerMonsoonGoverns ? chillerStoredMonsoonTR : chillerStoredSummerTR;
 
   // Outdoor-air (fresh-air / ventilation) tonnage carried inside each room's load TR.
   // Diversity is applied to the INDOOR portion only — fresh air is continuous, so it is
@@ -4485,11 +4380,24 @@ export default function EquipmentSelection({
   const chillerOaTR = selectedSystem?.type === 'Chiller'
     ? (chillerMonsoonGoverns ? sumRoomOaTR('monsoon') : sumRoomOaTR('summer'))
     : 0;
-  // Indoor (diversifiable) load = governing space load less its outdoor-air share.
-  const chillerIndoorTR = Math.max(0, chillerThermalTR - chillerOaTR);
+  // Plant is sized from the SELECTED AHU/IDU capacity that the chiller actually serves
+  // (engineer decision 2026-06-19), not the raw space load. Before any unit is selected, fall
+  // back to the required coil duty (Σ zone overall-required TR) so a target still shows.
+  const chillerCoilDutyTR = systemRoomIds.reduce((s, rid) => {
+    const r = rooms.find((x: any) => x.id === rid) as any;
+    const stored = Number(r?._calcOverallRequiredTR);
+    const live = Number((getRoomReqs(rid) as any)?.overallRequiredTR);
+    return s + (Number.isFinite(stored) && stored > 0 ? stored : (Number.isFinite(live) && live > 0 ? live : 0));
+  }, 0);
+  const chillerConnectedTR = selectedSystem?.type === 'Chiller'
+    ? (totalIDU_TR > 0 ? totalIDU_TR : chillerCoilDutyTR)
+    : 0;
+
+  // Indoor (diversifiable) portion of the connected capacity = connected − fresh-air OA share.
+  const chillerIndoorTR = Math.max(0, chillerConnectedTR - chillerOaTR);
 
   // Diversity-adjusted chiller plant capacity (not all zones peak simultaneously) —
-  // applied to the INDOOR load only; fresh-air OA is added back below.
+  // applied to the INDOOR portion only; fresh-air OA is added back below un-diversified.
   const chillerDiverseTR = selectedSystem?.type === 'Chiller'
     ? chillerIndoorTR * (selectedSystem.diversityFactor ?? 0.75)
     : 0;
@@ -4665,11 +4573,8 @@ export default function EquipmentSelection({
       const sysRooms = (rooms as any[]).filter(r => r.zoneId === sys.id || r.systemId === sys.id);
       const roomCount = sysRooms.length;
 
-      const requiredTR = sysRooms.reduce((sum: number, r: any) => {
-        const live = recalcResults[r.id];
-        if (live) return sum + (live.overallRequiredTR ?? live.requiredTR ?? 0);
-        return sum + Number(r._calcOverallRequiredTR ?? r._calcRequiredTR ?? 0);
-      }, 0);
+      const requiredTR = sysRooms.reduce((sum: number, r: any) =>
+        sum + Number(r._calcOverallRequiredTR ?? r._calcRequiredTR ?? 0), 0);
 
       let installedTR = 0;
       if (sys.type === 'VRF') {
@@ -4700,7 +4605,7 @@ export default function EquipmentSelection({
 
       return { id: sys.id, name: sys.name, type: sys.type as SystemType, roomCount, requiredTR, installedTR, status };
     });
-  }, [equipSystems, rooms, recalcResults]);
+  }, [equipSystems, rooms]);
 
   // ── Guard: no project ──────────────────────────────────────────────────────
 
@@ -5307,14 +5212,6 @@ export default function EquipmentSelection({
                       )}
                     </div>
                     <div className="flex items-center gap-1 shrink-0">
-                      <Button size="sm" variant="ghost"
-                        className={cn('h-8 text-sm gap-1 shrink-0', recalcLoading ? 'text-blue-500' : 'text-slate-400 hover:text-emerald-600')}
-                        title="Recalculate loads from design engine"
-                        disabled={recalcLoading}
-                        onClick={() => void recalcSystemRooms()}>
-                        <RotateCcw className={cn('w-3.5 h-3.5', recalcLoading && 'animate-spin')} />
-                        {recalcLoading ? 'Calculating…' : 'Refresh Loads'}
-                      </Button>
                       <Button size="sm" variant="ghost" className="h-8 text-sm gap-1 text-slate-400 hover:text-blue-600 shrink-0"
                         title="Rename / change type"
                         onClick={() => { setEditingSystemId(selectedSystem.id); setEditingSystemName(selectedSystem.name); setEditingSystemType(selectedSystem.type); }}>
@@ -5594,7 +5491,7 @@ export default function EquipmentSelection({
                             </label>
                           </div>
                           <p className="text-xs text-slate-400 dark:text-slate-500 mt-3 italic">
-                            Changing these values updates TFA/DOAS sizing live. To re-persist primary system room loads, switch to the linked primary and click <strong>Refresh Loads</strong>, or use <strong>Recalculate</strong> in Load Calculator project summary.
+                            Changing these values updates TFA/DOAS sizing live. To refresh the primary system's room loads, use <strong>Recompute &amp; save all</strong> (or change a design condition) in Load Calculator — Equipment Selection reads those saved values.
                           </p>
                         </div>
 
@@ -5912,15 +5809,23 @@ export default function EquipmentSelection({
                           const zoneRoomReqs = zoneRooms.map((r: any) => ({ r, reqs: getRoomReqs(r.id) }));
                           const zoneTR  = zoneRoomReqs.reduce((s, { reqs }) => s + (reqs.overallRequiredTR || 0), 0);
                           const zoneCFM = zoneRoomReqs.reduce((s, { reqs }) => s + (reqs.overallDesignCFM  || 0), 0);
-                          // Coil Duty (thermal load only, no cfmTR floor) — used as the sizing
-                          // requirement for chiller AHU pickers since AHU coils are custom-built
-                          // to project duty, not catalog-rated TR.
+                          // Coil Duty = the Load Calculator's "REQUIRED EQUIPMENT CAPACITY":
+                          // the max-season grand-total load WITH the room's overall safety factor
+                          // (e.g. monsoon 69.41 TR × 1.03 = 71.49 TR), no cfmTR floor. AHU coils
+                          // are custom-built to this duty, not catalog-rated TR.
+                          // Coil Duty = Load Calculator's "REQUIRED EQUIPMENT CAPACITY"
+                          // (max-season grand-total load × overall safety). LC is the single
+                          // authoritative engine and persists this as _calcOverallRequiredTR;
+                          // ES mirrors that saved value rather than recomputing, so the two
+                          // screens can never disagree. Fall back to the live recalc only for a
+                          // brand-new room LC hasn't persisted yet.
                           const zoneCoilTR = zoneRoomReqs.reduce((s, { r, reqs }) => {
-                            // Live recalc exposes monsoonLoadTR; live summer load lives in governingTR
-                            // (without the CFM floor it equals load TR — we approximate from live req).
-                            const sum = Number(r._calcLoadTR) || 0;
-                            const mon = (reqs as any).monsoonLoadTR ?? Number(r._calcMonsoonLoadTR) ?? 0;
-                            return s + Math.max(sum, mon);
+                            const stored = Number((r as any)._calcOverallRequiredTR);
+                            const live   = Number((reqs as any).overallRequiredTR);
+                            const required = Number.isFinite(stored) && stored > 0
+                              ? stored
+                              : (Number.isFinite(live) && live > 0 ? live : 0);
+                            return s + required;
                           }, 0);
                           const zoneHeatingBTUH = zoneRooms.reduce((s: number, r: any) => s + (Number(r._calcWinterHeatingBTUH) || 0), 0);
                           const zoneNeedsHumidifier = zoneRooms.some((r: any) => r.includeHumidifier);
@@ -7673,7 +7578,7 @@ export default function EquipmentSelection({
             <div className="mb-3 flex items-center justify-between">
               <div>
                 <h3 className="text-base font-semibold text-slate-800 dark:text-slate-100">System Load Summary</h3>
-                <p className="text-slate-500 dark:text-slate-400 text-xs">Required TR from stored load snapshots. Open each system in System Design and click "Refresh Loads" for live values.</p>
+                <p className="text-slate-500 dark:text-slate-400 text-xs">Required TR from Load Calculator's saved loads. Edit rooms / conditions in Load Calculator to update these.</p>
               </div>
               <span className="text-sm text-slate-400 dark:text-slate-500">{equipSystems.length} system{equipSystems.length !== 1 ? 's' : ''}</span>
             </div>

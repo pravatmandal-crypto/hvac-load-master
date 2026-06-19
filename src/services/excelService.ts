@@ -106,6 +106,30 @@ const CLR = {
 const asNum = (v: any, fb = 0): number => { const n = Number(v); return isFinite(n) ? n : fb; };
 const r2 = (v: number) => Math.round(v * 100) / 100;
 const r0 = (v: number) => Math.round(v);
+
+// Per-zone dehumidification strategy (set in Equipment Selection) — lets the room sheet show a
+// latent shortfall as RESOLVED by the engineer's chosen reheat/desiccant instead of an open flag.
+const DEHUMID_REHEAT_LABELS: Record<string, string> = {
+  'reheat-hwc': 'AHU Heating Coil (HW)',
+  'reheat-electric-ahu': 'AHU Electric Heater',
+  'reheat-duct': 'Duct Heater',
+  'standalone': 'Standalone Desiccant / DX',
+};
+const isReheatMethod = (m?: string | null): boolean =>
+  m === 'reheat-hwc' || m === 'reheat-electric-ahu' || m === 'reheat-duct';
+const resolveRoomDehumid = (room: any, systems: any[]): { method: string; reheatKW: number | null; label: string } | null => {
+  for (const sys of systems || []) {
+    const inSys = room?.systemId === sys.id || room?.zoneId === sys.id || room?.hvacSystemId === sys.id
+      || ((sys.zones ?? []) as any[]).some((z: any) => (z.roomIds ?? []).includes(room?.id));
+    if (!inSys) continue;
+    const zone = ((sys.zones ?? []) as any[]).find((z: any) => z.id === room?.zoneId || (z.roomIds ?? []).includes(room?.id));
+    const method = (zone?.dehumidMethod ?? sys.dehumidMethod) as string | null | undefined;
+    if (!method) return null;
+    const reheatKW = Number(zone?.dehumidReheatKW ?? zone?.fahu?.electricHeaterKW ?? sys.dehumidReheatKW) || null;
+    return { method, reheatKW, label: DEHUMID_REHEAT_LABELS[method] ?? method };
+  }
+  return null;
+};
 const safeStr = (v: any, fb = ''): string => (v == null || v === '' ? fb : String(v));
 
 // Report identity stamp — engineer-controlled date + stable No./revision, set per export.
@@ -1432,15 +1456,31 @@ function buildRoomSheet(
   putV(ws, row, 6, incMon ? 'CFM' : '', S.total);
   row++;
 
-  // Latent / reheat diagnostic — flagged when the coil can't dry the room at its selected ADP.
-  const sLatShort = record.summer.latentShortfallCfm > 1;
-  const mLatShort = !!record.monsoon && record.monsoon.latentShortfallCfm > 1;
+  // Latent / reheat diagnostic — flag only when the ACTUAL design supply air can't carry the
+  // latent load (latent need > supplied CFM). The raw latentShortfallCfm is sensible-based, so
+  // it false-alarms when the ACH / DSCFM floor already bumps supply above the latent need.
+  const sLatShort = (record.summer.latentCfm - record.summer.designSupplyCFM) > 1;
+  const mLatShort = !!record.monsoon && ((record.monsoon.latentCfm - record.monsoon.designSupplyCFM) > 1);
   if (sLatShort || mLatShort) {
     const src = sLatShort ? record.summer : record.monsoon!;
-    putV(ws, row, 1, 'Latent / Reheat', S.label);
+    const dh = resolveRoomDehumid(record.room, equipSystems);
     putV(ws, row, 2, r0(src.latentCfm), S.calc); putV(ws, row, 3, 'CFM latent need', S.calc);
     putV(ws, row, 4, '');
-    putV(ws, row, 5, `Coil @ ${r0(src.selectedAdp)}°F can't fully dry — supplied ${r0(src.designSupplyCFM)} CFM. Lower the coil ADP (Dehumidification mode) or add a DOAS / desiccant.`, S.calc);
+    if (dh && isReheatMethod(dh.method)) {
+      // Required reheat from RSHF (same basis as the report) — NOT the stored dehumidReheatKW,
+      // which can be stale/undersized and differ between identical rooms.
+      const roomTot = src.ersh + src.erlh;
+      const cSHR = roomTot > 0 ? src.ersh / roomTot : 1;
+      const rhBtu = cSHR < 0.75 ? Math.max(0, (src.erlh * 0.75) / 0.25 - src.ersh) : 0;
+      putV(ws, row, 1, 'Dehumidification (Reheat)', S.label);
+      putV(ws, row, 5, `Reheat dehumidification (${dh.label}): coil over-cools below ${r0(src.selectedAdp)}°F ADP to wring out the latent load at ${r0(src.designSupplyCFM)} CFM, then reheats to supply temp. Required reheat duty: ${r2(rhBtu / 3412.142)} kW (${r0(rhBtu)} BTU/h).`, S.calc);
+    } else if (dh && dh.method === 'standalone') {
+      putV(ws, row, 1, 'Dehumidification', S.label);
+      putV(ws, row, 5, `Standalone desiccant / DX dehumidification selected for this zone — removes the residual latent the cooling coil can't at ${r0(src.designSupplyCFM)} CFM.`, S.calc);
+    } else {
+      putV(ws, row, 1, 'Latent / Reheat', S.label);
+      putV(ws, row, 5, `Coil @ ${r0(src.selectedAdp)}°F can't fully dry — supplied ${r0(src.designSupplyCFM)} CFM. Lower the coil ADP (Dehumidification mode) or add a DOAS / desiccant.`, S.calc);
+    }
     row++;
   }
 

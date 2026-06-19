@@ -50,7 +50,12 @@ export const resolveRoomTfa = (
   if (raw === 'no-tfa') return { doas: null, mode: 'no-tfa' };
 
   if (raw === 'tfa-served' || raw === 'tfa-only') {
-    const doas = getProjectDoas(equipSystems);
+    // Multi-DOAS: a room may pin a specific unit via room.doasId. Fall back to the first
+    // project DOAS when unset or the referenced unit is gone (backward-compatible).
+    const byId = room?.doasId
+      ? (equipSystems ?? []).find((s: any) => s?.type === 'DOAS' && s.id === room.doasId)
+      : null;
+    const doas = byId ?? getProjectDoas(equipSystems);
     // Needs a DOAS to actually condition the OA; until one exists, behave as no-tfa.
     return doas ? { doas, mode: raw } : { doas: null, mode: 'no-tfa' };
   }

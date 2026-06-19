@@ -80,7 +80,7 @@ type RoomTableProps = {
   onEnvelopeDraftChange?: (roomId: string, draft: EnvelopeElement[] | null) => void;
   userId?: string;
   equipSystems?: any[];
-  setRoomFreshAir?: (room: any, mode: 'no-tfa' | 'tfa-served' | 'tfa-only') => void;
+  setRoomFreshAir?: (room: any, mode: 'no-tfa' | 'tfa-served' | 'tfa-only', doasId?: string) => void;
 };
 
 type RoomParameterState = {
@@ -2611,7 +2611,7 @@ function DraggableRoomHeader({
   metrics: { totalBTU: number; totalTR: number; designSupplyCFM: number; tfaCoilTR?: number };
   onDelete: () => void;
   equipSystems?: any[];
-  setRoomFreshAir?: (room: any, mode: 'no-tfa' | 'tfa-served' | 'tfa-only') => void;
+  setRoomFreshAir?: (room: any, mode: 'no-tfa' | 'tfa-served' | 'tfa-only', doasId?: string) => void;
 }) {
   const { attributes, listeners, setNodeRef, isDragging } = useDraggable({ id });
 
@@ -2619,7 +2619,15 @@ function DraggableRoomHeader({
 
   // Fresh-air dropdown: optimistic so the pick shows instantly, then reconciles
   // once the saved tfaMode propagates back through the room subscription.
-  const resolvedFreshAir = resolveRoomTfa(room, equipSystems ?? []).mode;
+  // Multi-DOAS: the select value encodes the unit too (`mode:doasId`) when ≥2 TFA units exist.
+  const doasUnits = (equipSystems ?? []).filter((s: any) => s?.type === 'DOAS');
+  const multiDoas = doasUnits.length >= 2;
+  const resolvedTfa = resolveRoomTfa(room, equipSystems ?? []);
+  const encodeFreshAir = (mode: string, doasId?: string): string =>
+    mode === 'no-tfa'
+      ? 'no-tfa'
+      : (multiDoas ? `${mode}:${doasId ?? resolvedTfa.doas?.id ?? doasUnits[0]?.id ?? ''}` : mode);
+  const resolvedFreshAir = encodeFreshAir(resolvedTfa.mode, room?.doasId);
   const [pendingFreshAir, setPendingFreshAir] = useState<string | null>(null);
   useEffect(() => {
     setPendingFreshAir(p => (p && p === resolvedFreshAir ? null : p));
@@ -2672,11 +2680,27 @@ function DraggableRoomHeader({
           title="How this room's fresh air is handled"
           value={shownFreshAir}
           onClick={e => e.stopPropagation()}
-          onChange={e => { e.stopPropagation(); const v = e.target.value as 'no-tfa' | 'tfa-served' | 'tfa-only'; setPendingFreshAir(v); void setRoomFreshAir(room, v); }}
+          onChange={e => {
+            e.stopPropagation();
+            const raw = e.target.value;
+            let mode: 'no-tfa' | 'tfa-served' | 'tfa-only'; let id: string | undefined;
+            if (raw === 'no-tfa') { mode = 'no-tfa'; id = undefined; }
+            else if (raw.includes(':')) { const [m, d] = raw.split(':'); mode = m === 'tfa-only' ? 'tfa-only' : 'tfa-served'; id = d || undefined; }
+            else { mode = raw as 'tfa-served' | 'tfa-only'; id = undefined; }
+            setPendingFreshAir(raw);
+            void setRoomFreshAir(room, mode, id);
+          }}
         >
           <option value="no-tfa">Fresh air: on unit</option>
-          <option value="tfa-served">Fresh air: central TFA</option>
-          <option value="tfa-only">Fresh air: TFA-only</option>
+          {multiDoas
+            ? doasUnits.flatMap((u: any) => [
+                <option key={`s-${u.id}`} value={`tfa-served:${u.id}`}>Central TFA — {u.name}</option>,
+                <option key={`o-${u.id}`} value={`tfa-only:${u.id}`}>TFA-only — {u.name}</option>,
+              ])
+            : [
+                <option key="s" value="tfa-served">Fresh air: central TFA</option>,
+                <option key="o" value="tfa-only">Fresh air: TFA-only</option>,
+              ]}
         </select>
       )}
 
@@ -2709,6 +2733,7 @@ const MemoDraggableRoomHeader = memo(DraggableRoomHeader, (prev, next) => {
     prev.room?.width === next.room?.width &&
     prev.room?.height === next.room?.height &&
     prev.room?.tfaMode === next.room?.tfaMode &&
+    prev.room?.doasId === next.room?.doasId &&
     prev.equipSystems === next.equipSystems
   );
 });

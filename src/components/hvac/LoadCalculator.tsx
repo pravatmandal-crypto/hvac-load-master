@@ -187,6 +187,7 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
       // sees the user's "Fresh air" choice (it would always fall back to the zone
       // link). Preserve the persisted TFA coil too so staleness detection works.
       tfaMode: r.tfaMode ?? r.data?.tfaMode,
+      doasId: r.doasId ?? r.data?.doasId,
       _calcTfaCoilBTUH: r._calcTfaCoilBTUH ?? r.data?._calcTfaCoilBTUH,
       _calcTfaCoilTR: r._calcTfaCoilTR ?? r.data?._calcTfaCoilTR,
       _calcTfaCfm: r._calcTfaCfm ?? r.data?._calcTfaCfm,
@@ -195,6 +196,7 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
       _calcTfaWinterHeatingBTUH: r._calcTfaWinterHeatingBTUH ?? r.data?._calcTfaWinterHeatingBTUH,
       _calcTfaReheatBTUH: r._calcTfaReheatBTUH ?? r.data?._calcTfaReheatBTUH,
       _calcTfaOnly: r._calcTfaOnly ?? r.data?._calcTfaOnly,
+      _calcTfaSupplyKey: r._calcTfaSupplyKey ?? r.data?._calcTfaSupplyKey,
     };
   };
 
@@ -780,6 +782,11 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
       _calcDesignCFM: parseFloat(designSupplyCFM.toFixed(0)),
       _calcSensibleBTUH: parseFloat(ersh.toFixed(0)),
       _calcLatentBTUH: parseFloat(erlh.toFixed(0)),
+      // Outdoor-air (fresh-air) tonnage carried in the room load — needed by the chiller plant
+      // (OA is added back un-diversified). Was previously unwritten by this engine, forcing
+      // Equipment Selection onto an approximate fallback. Mirrors loadCalculationService.
+      _calcOaTR: parseFloat((oaTotal / 12000).toFixed(3)),
+      _calcMonsoonOaTR: parseFloat(((monsoonOaSen + monsoonOaLat) / 12000).toFixed(3)),
       _calcMonsoonLoadTR: parseFloat(monsoonGrandTotalTR.toFixed(3)),
       _calcMonsoonCfmTR: parseFloat(monsoonCfmTR.toFixed(3)),
       _calcMonsoonGoverningTR: parseFloat(monsoonGoverningTR.toFixed(3)),
@@ -827,6 +834,12 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
       // RAW (no overall safety) to match its sibling _calcTfaCoilBTUH.
       _calcTfaReheatBTUH: isTFA && tfa
         ? parseFloat((tfa.reheatCoilSensible || 0).toFixed(0))
+        : deleteField(),
+      // Signature of the DOAS supply settings these TFA loads were computed with. Lets the
+      // staleness detector flag a room when the DOAS supply temp / RH / ERV / winter setpoint
+      // change (so the chiller plant + reports refresh), not just when TFA is toggled on/off.
+      _calcTfaSupplyKey: isTFA && doasForThis
+        ? `${(doasForThis as any).tfaSupplyTemp ?? 55}|${(doasForThis as any).tfaSupplyHumidity ?? 90}|${(doasForThis as any).ervSensibleEffectiveness ?? 0}|${(doasForThis as any).ervLatentEffectiveness ?? 0}|${(doasForThis as any).tfaWinterSupplyTemp ?? ''}`
         : deleteField(),
       updatedAt: new Date(),
     });
@@ -1213,19 +1226,26 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
 
   // Set one room's fresh-air mode: ensure a DOAS exists (for central/corridor),
   // write the explicit tfaMode, then re-persist that room so loads/exports update.
-  const setRoomFreshAir = useCallback(async (room: any, mode: 'no-tfa' | 'tfa-served' | 'tfa-only') => {
+  const setRoomFreshAir = useCallback(async (room: any, mode: 'no-tfa' | 'tfa-served' | 'tfa-only', doasId?: string) => {
     try {
       // When we just created the DOAS, equipSystems hasn't re-subscribed yet, so
       // splice the (synthetic) DOAS into the list the snapshot resolves TFA against —
       // otherwise the first room would persist as no-TFA until a manual Recalculate.
+      // Only auto-create when no specific unit was picked (single-DOAS convenience); when a
+      // doasId is given the unit already exists (multi-DOAS picker).
       let equip = equipSystems;
-      if (mode !== 'no-tfa') {
+      if (mode !== 'no-tfa' && !doasId) {
         const doas = await ensureProjectDoas();
         if (doas && !getProjectDoas(equipSystems)) equip = [...(equipSystems ?? []), doas];
       }
-      await updateDoc(doc(db, 'projects', project.id, 'rooms', room.id), { tfaMode: mode, updatedAt: serverTimestamp() });
+      await updateDoc(doc(db, 'projects', project.id, 'rooms', room.id), {
+        tfaMode: mode,
+        // Pin the chosen TFA unit (multi-DOAS); clear it for on-unit or single-DOAS picks.
+        doasId: (mode !== 'no-tfa' && doasId) ? doasId : deleteField(),
+        updatedAt: serverTimestamp(),
+      });
       const zoneId = room.zoneId as string;
-      await persistRoomAnalysisSnapshot(zoneId, room.id, room.systemId ?? zoneId, { ...room, tfaMode: mode }, envelopeElements[room.id] ?? [], equip);
+      await persistRoomAnalysisSnapshot(zoneId, room.id, room.systemId ?? zoneId, { ...room, tfaMode: mode, doasId: (mode !== 'no-tfa' ? doasId : undefined) }, envelopeElements[room.id] ?? [], equip);
     } catch (err) {
       toast.error('Could not update fresh air: ' + (err instanceof Error ? err.message : 'unknown'));
     }
@@ -1234,13 +1254,36 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
   // Set every room in a zone at once (the uniform-zone shortcut). Takes the actual
   // displayed room list from ZoneList — works for both zone rows and system rows
   // (where rooms aren't keyed by the system id).
-  const setZoneFreshAir = useCallback(async (zoneRooms: any[], mode: 'no-tfa' | 'tfa-served' | 'tfa-only') => {
+  const setZoneFreshAir = useCallback(async (zoneRooms: any[], mode: 'no-tfa' | 'tfa-served' | 'tfa-only', doasId?: string) => {
     if (!zoneRooms || zoneRooms.length === 0) return;
-    if (mode !== 'no-tfa') await ensureProjectDoas();
+    if (mode !== 'no-tfa' && !doasId) await ensureProjectDoas();
     for (const r of zoneRooms) {
-      await setRoomFreshAir(r, mode);
+      await setRoomFreshAir(r, mode, doasId);
     }
   }, [ensureProjectDoas, setRoomFreshAir]);
+
+  // Create an ADDITIONAL TFA/DOAS unit (multi-DOAS) — for buildings needing separate FAHU/ERV
+  // units per riser/zone. Unlike ensureProjectDoas (the single default unit), this always adds
+  // a new one. Returns the new unit's id so the caller can assign rooms to it.
+  const addTfaUnit = useCallback(async (): Promise<string | null> => {
+    try {
+      const n = (equipSystems ?? []).filter((s: any) => s?.type === 'DOAS').length + 1;
+      const refDoc = await addDoc(collection(db, 'projects', project.id, 'equipmentSystems'), {
+        name: `TFA / Fresh Air ${n}`,
+        type: 'DOAS',
+        brand: null, brandLocked: false, diversityFactor: 1,
+        assignedRoomIds: [], iduSelections: {}, zones: [], oduSelection: null, unitSelection: null,
+        ...TFA_SUPPLY_DEFAULTS,
+        tfaCoolingSource: pickCoolingSource(project, equipSystems),
+        createdAt: serverTimestamp(), updatedAt: serverTimestamp(),
+      });
+      toast.success(`Added "TFA / Fresh Air ${n}" — assign rooms via the Fresh air dropdown`);
+      return refDoc.id;
+    } catch (err) {
+      toast.error('Could not add TFA unit: ' + (err instanceof Error ? err.message : 'unknown'));
+      return null;
+    }
+  }, [equipSystems, project]);
 
   // ── DOAS / TFA staleness detection ──────────────────────────────────────
   // A room is "stale" when its persisted _calcTfa* fields disagree with the
@@ -1250,16 +1293,31 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
   //   2. Room's primary is no longer DOAS-served but room still has _calcTfaCoilBTUH
   //      → loads have an obsolete TFA credit, primary is undersized.
   // The banner in the project summary surfaces a single "Recalculate" action.
+  // Signature of the DOAS supply settings that drive a room's TFA coil load. Must match the
+  // `_calcTfaSupplyKey` written in persistRoomAnalysisSnapshot.
+  const tfaSupplyKey = (doas: any): string =>
+    doas
+      ? `${doas.tfaSupplyTemp ?? 55}|${doas.tfaSupplyHumidity ?? 90}|${doas.ervSensibleEffectiveness ?? 0}|${doas.ervLatentEffectiveness ?? 0}|${doas.tfaWinterSupplyTemp ?? ''}`
+      : '';
+
   const tfaStaleRoomIds = useMemo(() => {
     const stale: string[] = [];
     if (!getProjectDoas(equipSystems)) return stale;
-    // A room is "stale" when its current TFA mode disagrees with its persisted
-    // TFA fields (mode says served but no _calcTfa*, or vice-versa).
+    // A room is "stale" when (1) its current TFA mode disagrees with its persisted TFA fields
+    // (mode says served but no _calcTfa*, or vice-versa), OR (2) it's TFA-served but its persisted
+    // loads were computed with different DOAS supply settings than the DOAS now has (supply temp /
+    // RH / ERV / winter setpoint changed) — so the chiller plant + reports would otherwise stay stale.
     for (const zoneRooms of Object.values(rooms)) {
       for (const r of zoneRooms as any[]) {
-        const shouldBeTFA = resolveRoomTfa(r, equipSystems, zones).mode !== 'no-tfa';
+        const { doas, mode } = resolveRoomTfa(r, equipSystems, zones);
+        const shouldBeTFA = mode !== 'no-tfa';
         const hasTFAFields = Number(r._calcTfaCoilBTUH) > 0;
-        if (shouldBeTFA !== hasTFAFields) stale.push(r.id);
+        if (shouldBeTFA !== hasTFAFields) { stale.push(r.id); continue; }
+        // Supply-setting drift — only when a key was previously stored (legacy rooms get one on
+        // their next recompute, so this never mass-flags pre-existing rooms).
+        if (shouldBeTFA && doas && r._calcTfaSupplyKey && r._calcTfaSupplyKey !== tfaSupplyKey(doas)) {
+          stale.push(r.id);
+        }
       }
     }
     return stale;
@@ -1285,6 +1343,35 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
     toast.success(`Recalculated ${ok} room${ok === 1 ? '' : 's'} in TFA mode`);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tfaStaleRoomIds, rooms, envelopeElements]);
+
+  // ── Orphaned TFA-unit detection (multi-DOAS guard) ──────────────────────
+  // A room can pin a specific TFA unit via room.doasId. If that unit is later deleted, the
+  // resolver silently falls back to the FIRST DOAS — re-routing the room without notice. Flag
+  // those rooms so the engineer reassigns them deliberately.
+  const orphanDoasRoomIds = useMemo(() => {
+    const ids: string[] = [];
+    const doasIds = new Set((equipSystems ?? []).filter((s: any) => s?.type === 'DOAS').map((s: any) => s.id));
+    for (const zoneRooms of Object.values(rooms)) {
+      for (const r of zoneRooms as any[]) {
+        if ((r.tfaMode === 'tfa-served' || r.tfaMode === 'tfa-only') && r.doasId && !doasIds.has(r.doasId)) {
+          ids.push(r.id);
+        }
+      }
+    }
+    return ids;
+  }, [equipSystems, rooms]);
+
+  // Detach orphaned rooms — put them back "on the room unit" so they're not silently served by
+  // the wrong (fallback) DOAS. The engineer then re-picks a unit in the Fresh-air dropdown.
+  const detachOrphanDoasRooms = useCallback(async () => {
+    for (const zoneId of Object.keys(rooms)) {
+      for (const r of (rooms[zoneId] ?? []) as any[]) {
+        if (!orphanDoasRoomIds.includes(r.id)) continue;
+        try { await setRoomFreshAir(r, 'no-tfa'); }
+        catch (err) { console.error('[LC] detach orphan TFA room failed', r.id, err); }
+      }
+    }
+  }, [rooms, orphanDoasRoomIds, setRoomFreshAir]);
 
   // ── CFM-governance staleness detection ─────────────────────────────────
   // Engine change 2026-05-20: cfmTR no longer inflates _calcRequiredTR.
@@ -1959,6 +2046,30 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
     }
   };
 
+  // Auto-refresh persisted room snapshots when project design conditions change.
+  // Equipment Selection / PDF / Excel read the persisted _calc* fields, so without this a
+  // condition edit (temps / humidity / monsoon / winter / altitude) leaves them showing the
+  // OLD loads until someone manually clicks "Recompute & save all". We arm a flag from the
+  // Edit-dialog save (only when a condition actually changed), then run the recompute once the
+  // updated project prop propagates — so rooms recompute with the NEW conditions, not the old.
+  const awaitingConditionRecalcRef = useRef(false);
+  const conditionsSig = [
+    project.summerDesignTemp, project.summerDesignHumidity,
+    project.monsoonDesignTemp, project.monsoonDesignHumidity,
+    project.winterDesignTemp, project.winterDesignHumidity,
+    project.insideSummerTemp, project.insideSummerHumidity,
+    project.insideMonsoonTemp, project.insideMonsoonHumidity,
+    project.insideWinterTemp, project.insideWinterHumidity,
+    project.includeMonsoon, project.includeWinter,
+    project.altitude ?? project.data?.altitude,
+  ].join('|');
+  useEffect(() => {
+    if (!awaitingConditionRecalcRef.current) return;
+    awaitingConditionRecalcRef.current = false;
+    if (totalRoomCount > 0) void recomputeAllRooms();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [conditionsSig]);
+
   const [addingZone, setAddingZone] = useState(false);
   const addZone = async (systemId?: string) => {
     if (addingZone) return;
@@ -2330,6 +2441,23 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
       setEnvelopeElements(prev => { const next = { ...prev }; delete next[roomId]; return next; });
       const roomRef = doc(db, 'projects', project.id, 'rooms', roomId);
       await deleteDoc(roomRef);
+      // Also strip the room id from any ES sub-zone roomIds[] so the equipment system doesn't
+      // keep a stale reference (which would show a phantom room count and need a manual Recovery).
+      const batch = writeBatch(db);
+      let touched = 0;
+      for (const sys of equipSystems as any[]) {
+        const subZones = (sys.zones ?? []) as any[];
+        if (!subZones.some((z: any) => (z.roomIds ?? []).includes(roomId))) continue;
+        const cleaned = subZones.map((z: any) =>
+          (z.roomIds ?? []).includes(roomId)
+            ? { ...z, roomIds: (z.roomIds ?? []).filter((id: string) => id !== roomId) }
+            : z);
+        batch.update(doc(db, 'projects', project.id, 'equipmentSystems', sys.id), {
+          zones: cleaned, updatedAt: serverTimestamp(),
+        });
+        touched++;
+      }
+      if (touched > 0) await batch.commit();
       toast.success('Room deleted');
     } catch (error) {
       toast.error('Delete failed');
@@ -2754,6 +2882,20 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
       const resolvedInsideWinterTemp = editData.insideWinterTemp === '' ? currentInsideWinterTemp : Number(editData.insideWinterTemp);
       const resolvedInsideWinterRH = editData.insideWinterHumidity === '' ? currentInsideWinterRH : Number(editData.insideWinterHumidity);
 
+      // Did any load-affecting design condition change? If so, arm the auto-recompute so all
+      // rooms' persisted snapshots refresh once this update propagates (see conditionsSig effect).
+      const conditionsChanged =
+        resolvedIncludeMonsoon !== currentIncludeMonsoon ||
+        resolvedIncludeWinter  !== currentIncludeWinter  ||
+        resolvedSummerTemp !== currentSummerTemp || resolvedSummerRH !== currentSummerRH ||
+        resolvedMonsoonTemp !== currentMonsoonTemp || resolvedMonsoonRH !== currentMonsoonRH ||
+        resolvedWinterTemp !== currentWinterTemp || resolvedWinterRH !== currentWinterRH ||
+        resolvedInsideSummerTemp !== currentInsideSummerTemp || resolvedInsideSummerRH !== currentInsideSummerRH ||
+        resolvedInsideMonsoonTemp !== currentInsideMonsoonTemp || resolvedInsideMonsoonRH !== currentInsideMonsoonRH ||
+        resolvedInsideWinterTemp !== currentInsideWinterTemp || resolvedInsideWinterRH !== currentInsideWinterRH ||
+        resolvedAltitude !== currentAltitude;
+      if (conditionsChanged) awaitingConditionRecalcRef.current = true;
+
       await updateDoc(doc(db, 'projects', project.id), {
         name: resolvedName,
         location: resolvedLocation,
@@ -3016,6 +3158,30 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
             <Button size="sm" className="h-8 text-xs gap-1.5 bg-amber-600 hover:bg-amber-700 shrink-0"
               onClick={() => void recalcAllRooms()}>
               Recalculate {tfaStaleRoomIds.length} Room{tfaStaleRoomIds.length === 1 ? '' : 's'}
+            </Button>
+          </div>
+        )}
+
+        {/* ── Orphaned TFA-unit warning (multi-DOAS guard) ──────────────────
+            A room points to a TFA/DOAS unit that no longer exists (deleted). The
+            resolver is silently falling it back to the first unit — flag it so the
+            engineer reassigns deliberately. */}
+        {orphanDoasRoomIds.length > 0 && (
+          <div className="rounded-xl border border-rose-300 dark:border-rose-700 bg-rose-50 dark:bg-rose-950/30 px-4 py-3 flex items-center justify-between gap-3">
+            <div className="flex items-start gap-2.5">
+              <AlertTriangle className="w-4 h-4 text-rose-600 dark:text-rose-400 shrink-0 mt-0.5" />
+              <div>
+                <p className="text-sm font-semibold text-rose-800 dark:text-rose-300">
+                  {orphanDoasRoomIds.length} room{orphanDoasRoomIds.length === 1 ? '' : 's'} reference a removed TFA unit
+                </p>
+                <p className="text-xs text-rose-700 dark:text-rose-400 mt-0.5">
+                  Their assigned TFA/DOAS unit was deleted — they’re falling back to the first unit. Reassign their fresh air in the dropdown, or detach them to the room unit.
+                </p>
+              </div>
+            </div>
+            <Button size="sm" variant="outline" className="h-8 text-xs gap-1.5 border-rose-300 dark:border-rose-700 text-rose-700 dark:text-rose-300 shrink-0"
+              onClick={() => void detachOrphanDoasRooms()}>
+              Detach {orphanDoasRoomIds.length} to room unit
             </Button>
           </div>
         )}
@@ -3356,6 +3522,14 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
                 >
                   <Settings className="w-3.5 h-3.5" />
                   Global
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void addTfaUnit()}
+                  title="Add a separate TFA / DOAS fresh-air unit (for multi-riser or multi-zone buildings). Then assign rooms to it via the room/zone Fresh-air dropdown."
+                  className="inline-flex items-center gap-1 text-xs h-8 px-2.5 rounded-md border border-teal-300 dark:border-teal-700 text-teal-700 dark:text-teal-300 bg-teal-50 dark:bg-teal-950/30 hover:bg-teal-100 dark:hover:bg-teal-900/40 transition-colors"
+                >
+                  <Plus className="w-3.5 h-3.5" /> TFA Unit
                 </button>
                 <Button size="sm" onClick={() => addZone()} disabled={addingZone} className="gap-1 bg-orange-600 hover:bg-orange-700 text-xs h-8">
                   {addingZone ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Plus className="w-3.5 h-3.5" />} Add Zone

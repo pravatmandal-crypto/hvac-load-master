@@ -571,6 +571,50 @@ const computeZoneCoilDuty = (zone: any, flatRooms: any[]): { coilTR: number; des
 // Diversity is applied to the INDOOR calc only — fresh air is continuous and carried
 // in full — then the install margin is shown.
 //   Example: "Chiller Plant: diversity 75% -> 110.00×0.75 + OA 25.50 = 108.00 TR req'd; installed 144.00 TR (133%)"
+// Connected space indoor-unit (AHU/FCU/IDU) TR for a system — zone terminal selections
+// (z.unitSelections or z.selection) plus any direct per-room IDU selections. The TFA/DOAS
+// unit is a separate system, so it is naturally excluded. Mirrors EquipmentSelection's
+// installed-capacity plant basis (chiller plant is sized off the selected AHUs).
+const connectedIduTR = (sys: any): number => {
+  let iduTR = 0;
+  for (const z of (sys.zones ?? (sys as any).ahuGroups ?? []) as any[]) {
+    if (z.unitSelections?.length) iduTR += (z.unitSelections as any[]).reduce((s: number, u: any) => s + (u.trCapacity ?? 0) * (u.quantity ?? 1), 0);
+    else if (z.selection) iduTR += (z.selection.trCapacity ?? 0) * (z.selection.quantity ?? 1);
+  }
+  if (sys.iduSelections) Object.values(sys.iduSelections as Record<string, any>).forEach((val: any) => {
+    (Array.isArray(val) ? val : val ? [val] : []).forEach((u: any) => { iduTR += (u.trCapacity ?? 0) * (u.quantity ?? 1); });
+  });
+  return iduTR;
+};
+
+// Per-zone dehumidification strategy (set in Equipment Selection) — so the report can show
+// that a latent shortfall is RESOLVED by the engineer's chosen reheat / desiccant, instead of
+// flagging it as an open problem. Method + reheat kW live on the ES sub-zone (or the system).
+const DEHUMID_REHEAT_LABELS: Record<string, string> = {
+  'reheat-hwc': 'AHU Heating Coil (HW)',
+  'reheat-electric-ahu': 'AHU Electric Heater',
+  'reheat-duct': 'Duct Heater',
+  'standalone': 'Standalone Desiccant / DX',
+};
+const isReheatMethod = (m?: string | null): boolean =>
+  m === 'reheat-hwc' || m === 'reheat-electric-ahu' || m === 'reheat-duct';
+const resolveRoomDehumid = (
+  room: any,
+  systems: any[],
+): { method: string; reheatKW: number | null; label: string } | null => {
+  for (const sys of systems) {
+    const inSys = room.systemId === sys.id || room.zoneId === sys.id || room.hvacSystemId === sys.id
+      || ((sys.zones ?? []) as any[]).some((z: any) => (z.roomIds ?? []).includes(room.id));
+    if (!inSys) continue;
+    const zone = ((sys.zones ?? []) as any[]).find((z: any) => z.id === room.zoneId || (z.roomIds ?? []).includes(room.id));
+    const method = (zone?.dehumidMethod ?? (sys as any).dehumidMethod) as string | null | undefined;
+    if (!method) return null;
+    const reheatKW = Number(zone?.dehumidReheatKW ?? zone?.fahu?.electricHeaterKW ?? (sys as any).dehumidReheatKW) || null;
+    return { method, reheatKW, label: DEHUMID_REHEAT_LABELS[method] ?? method };
+  }
+  return null;
+};
+
 const formatDiversitySummary = (
   systems: any[],
   flatRooms: any[],
@@ -610,9 +654,13 @@ const formatDiversitySummary = (
     if (sumIndoorTR <= 0 && sumOaTR <= 0) continue;
 
     // Design diversity de-rates INDOOR peaks (zones don't peak together). The fresh-air /
-    // OA load runs continuously, so it is NOT diversified — it adds on top.
+    // OA load runs continuously, so it is NOT diversified — it adds on top. Plant is sized
+    // off the SELECTED AHU/IDU capacity (indoor portion = connected − OA); falls back to the
+    // space-load indoor before any unit is selected. Mirrors EquipmentSelection.
     const df = Math.max(0, Math.min(1, Number(sys.diversityFactor ?? 0.75)));
-    const requiredTR = sumIndoorTR * df + sumOaTR;
+    const connected = connectedIduTR(sys);
+    const indoorBasis = connected > 0 ? Math.max(0, connected - sumOaTR) : sumIndoorTR;
+    const requiredTR = indoorBasis * df + sumOaTR;
     if (requiredTR <= 0 || installedTR <= 0) continue;
 
     const marginPct = (installedTR / requiredTR) * 100;
@@ -648,7 +696,11 @@ const computePlantRequiredTR = (
       }
     }
     const df = Math.max(0, Math.min(1, Number(sys.diversityFactor ?? 0.75)));
-    total += indoor * df + oa;
+    // Indoor basis = selected AHU/IDU capacity less its OA share (matches the app); fall back
+    // to space-load indoor when no unit is selected yet.
+    const connected = connectedIduTR(sys);
+    const indoorBasis = connected > 0 ? Math.max(0, connected - oa) : indoor;
+    total += indoorBasis * df + oa;
   }
   return total;
 };
@@ -1479,12 +1531,13 @@ export const generatePDFReport = (
 
   // Compute project totals per season
   const projectSeasonTotals = seasons.map((season) => {
-    let cooling = 0; let cfm = 0; let heating = 0; let tfaCoil = 0;
+    let cooling = 0; let reqTr = 0; let cfm = 0; let heating = 0; let tfaCoil = 0;
     entities.forEach((entity) => {
       const dc = resolveEntityDC(entity, season, project);
       entity.rooms.forEach((room) => {
         const m = computeDetailed(room, envelopeElements[room.id] || [], dc, project);
-        cooling  += m.grandTotal;     // space (primary) coil — TFA-reduced
+        cooling  += m.grandTotal;     // space (primary) coil — TFA-reduced (raw load)
+        reqTr    += m.requiredTr;      // with overall safety — the equipment-sizing basis
         cfm      += m.designCfm;
         heating  += m.designHeatingLoad;
         tfaCoil  += m.tfaCoilSensible + m.tfaCoilLatent; // TFA/DOAS coil duty
@@ -1493,8 +1546,9 @@ export const generatePDFReport = (
     const loadTr = cooling / 12000;
     const cfmTr  = cfm / 400;
     const tfaCoilTr = tfaCoil / 12000;
-    // Plant TR is LOAD-ONLY. cfmTr retained as a sanity ratio only.
-    return { season: season.label, key: season.key, loadTr, cfm, cfmTr, heating, tfaCoilTr, governingTr: loadTr };
+    // Governing TR carries the overall safety factor (matches Equipment Selection's coil duty);
+    // Space TR (loadTr) is the raw coil load. cfmTr retained as a sanity ratio only.
+    return { season: season.label, key: season.key, loadTr, cfm, cfmTr, heating, tfaCoilTr, governingTr: reqTr };
   });
   const projectTfaCoilTR = Math.max(0, ...projectSeasonTotals.filter(s => s.key !== 'winter').map(s => s.tfaCoilTr));
   const hasTfa = projectTfaCoilTR > 0;
@@ -1602,7 +1656,7 @@ export const generatePDFReport = (
       ['Total Rooms',                      n0(allRooms.length)],
       ['Peak Governing Season',            chillerFedTfa
         ? `${plantSeasonPeak.season}  (${n2(plantRequiredTR)} TR plant, diversity applied  ·  ${n0(recCFM)} CFM)`
-        : `${peakSeason.season}  (${n2(peakSeason.governingTr)} TR space  ·  ${n0(peakSeason.cfm)} CFM)`],
+        : `${peakSeason.season}  (${n2(peakSeason.loadTr)} TR space  ·  ${n0(peakSeason.cfm)} CFM)`],
       ['Recommended Submission Basis',     chillerFedTfa
         ? `Space + TFA coil on one plant:  ${n2(submissionBasisTR)} TR (installed)  ·  ${n0(submissionCFMRounded)} CFM`
         : hasTfa
@@ -1725,22 +1779,22 @@ export const generatePDFReport = (
     const sumDc = resolveEntityDC(entity, summer,  effProject);
     const monDc = monsoon ? resolveEntityDC(entity, monsoon, effProject) : null;
     const winDc = winter ? resolveEntityDC(entity, winter, effProject) : null;
-    let sumBTUH = 0, sumCfm = 0, monBTUH = 0, monCfm = 0, winHeat = 0;
+    let sumBTUH = 0, sumReqTR = 0, sumCfm = 0, monBTUH = 0, monReqTR = 0, monCfm = 0, winHeat = 0;
     entity.rooms.forEach((room) => {
       const sm = computeDetailed(room, envelopeElements[room.id] || [], sumDc, effProject);
-      sumBTUH += sm.grandTotal; sumCfm += sm.designCfm;
+      sumBTUH += sm.grandTotal; sumReqTR += sm.requiredTr; sumCfm += sm.designCfm;
       if (monDc) {
         const mm = computeDetailed(room, envelopeElements[room.id] || [], monDc, effProject);
-        monBTUH += mm.grandTotal; monCfm += mm.designCfm;
+        monBTUH += mm.grandTotal; monReqTR += mm.requiredTr; monCfm += mm.designCfm;
       }
       if (winDc) winHeat += computeDetailed(room, envelopeElements[room.id] || [], winDc, effProject).designHeatingLoad;
     });
-    const sumTr    = sumBTUH / 12000;
+    const sumTr    = sumBTUH / 12000;   // raw season load (Summer/Monsoon TR columns)
     const monTr    = monBTUH / 12000;
-    // Load-only governing (space coil). sumBTUH/monBTUH are already TFA-reduced.
     const sumGovTR = sumTr;
     const monGovTR = monsoon ? monTr : 0;
-    const govTr    = includeMonsoon ? Math.max(sumGovTR, monGovTR) : sumGovTR;
+    // Gov. TR carries the overall safety factor (matches Equipment Selection's coil duty).
+    const govTr    = includeMonsoon ? Math.max(sumReqTR, monReqTR) : sumReqTR;
     const govCfm   = Math.max(sumCfm, monCfm);
     const inst = getInstalledTrCfm(entity.id, effectiveEquipSystems, entity.rooms.map(r => r.id));
     const row: any[] = [entity.type, parentName, entity.name, n0(entity.rooms.length), n2(sumGovTR)];
@@ -1842,15 +1896,14 @@ export const generatePDFReport = (
       if (entity.rooms.length === 0) continue;
       const eDc  = resolveEntityDC(entity, summer, project);
       const eMon = monsoon ? resolveEntityDC(entity, monsoon, project) : null;
-      let sBTU = 0, sCFM = 0, mBTU = 0, mCFM = 0;
+      let sReqTR = 0, sCFM = 0, mReqTR = 0, mCFM = 0;
       entity.rooms.forEach((rm) => {
         const sm = computeDetailed(rm, envelopeElements[rm.id] || [], eDc, project);
-        sBTU += sm.grandTotal; sCFM += sm.designCfm;
-        if (eMon) { const mm = computeDetailed(rm, envelopeElements[rm.id] || [], eMon, project); mBTU += mm.grandTotal; mCFM += mm.designCfm; }
+        sReqTR += sm.requiredTr; sCFM += sm.designCfm;
+        if (eMon) { const mm = computeDetailed(rm, envelopeElements[rm.id] || [], eMon, project); mReqTR += mm.requiredTr; mCFM += mm.designCfm; }
       });
-      const sTR = sBTU / 12000, mTR = mBTU / 12000;
-      // Load-only governing (space coil); grandTotal is already TFA-reduced.
-      const govTR  = includeMonsoon ? Math.max(sTR, mTR) : sTR;
+      // Fit basis carries the overall safety factor (matches Equipment Selection's coil duty).
+      const govTR  = includeMonsoon ? Math.max(sReqTR, mReqTR) : sReqTR;
       const govCFM = Math.max(sCFM, mCFM);
       const inst   = getInstalledTrCfm(entity.id, effectiveEquipSystems, entity.rooms.map(r => r.id));
       const fitStatus = inst.tr === 0 ? 'No Equip' : inst.tr >= govTR * 0.97 ? 'OK' : 'Undersized';
@@ -1941,6 +1994,7 @@ export const generatePDFReport = (
     const winDcE = winter ? resolveEntityDC(entity, winter, project) : null;
 
     let totArea = 0, totSumTRsum = 0, totMonTRsum = 0, totCFMsum = 0, totWinHeat = 0;
+    let totSumReqTRsum = 0, totMonReqTRsum = 0;  // with overall safety — for the ZONE TOTAL Gov TR
     let totTfaTR = 0, totTfaCFM = 0, totTfaWinterHeat = 0;
 
     // Prefer the engine's persisted values (load-only + TFA-aware) over a fresh
@@ -1961,7 +2015,9 @@ export const generatePDFReport = (
       // cooling breakdown / zone summary, which both recompute live.
       const sumTR  = Math.max(num(room._calcGoverningTR)        ?? 0, sm.governingTr);
       const monTR  = Math.max(num(room._calcMonsoonGoverningTR) ?? 0, mm?.governingTr ?? 0);
-      const govTR  = Math.max(num(room._calcOverallGoverningTR) ?? 0, sumTR, monTR);
+      // Gov TR carries the overall safety factor (matches Equipment Selection's coil duty);
+      // sumTR/monTR above stay as the raw per-season governing load for their columns.
+      const govTR  = Math.max(num(room._calcOverallRequiredTR) ?? 0, sm.requiredTr, mm?.requiredTr ?? 0);
       const cfm    = Math.max(num(room._calcOverallDesignCFM)   ?? 0, sm.designCfm, mm?.designCfm ?? 0);
       // TFA coil duty — governing (summer/monsoon) persisted value, falling back to
       // the live recompute when the room object doesn't carry the persisted _calc
@@ -1977,6 +2033,8 @@ export const generatePDFReport = (
       totArea     += sm.area;
       totSumTRsum += sumTR;
       totMonTRsum += monTR;
+      totSumReqTRsum += Math.max(num(room._calcRequiredTR)        ?? 0, sm.requiredTr);
+      totMonReqTRsum += Math.max(num(room._calcMonsoonRequiredTR) ?? 0, mm?.requiredTr ?? 0);
       totCFMsum   += cfm;
       totWinHeat  += wm?.designHeatingLoad ?? 0;
       totTfaTR    += tfaTR;
@@ -1998,10 +2056,11 @@ export const generatePDFReport = (
       return row;
     });
 
-    // Load-only zone totals (sum of per-room governing TR), matching the app UI.
+    // Per-season TR columns stay raw load; the Gov TR total carries the overall safety factor
+    // (matches the per-room Gov TR cell + Equipment Selection's coil duty).
     const totSumTR  = totSumTRsum;
     const totMonTR  = includeMonsoon ? totMonTRsum : 0;
-    const totGovTR  = includeMonsoon ? Math.max(totSumTR, totMonTR) : totSumTR;
+    const totGovTR  = includeMonsoon ? Math.max(totSumReqTRsum, totMonReqTRsum) : totSumReqTRsum;
     const totCFM    = totCFMsum;
 
     // Totals row — installed TR/CFM from equipment selection merged at zone level
@@ -2108,11 +2167,37 @@ export const generatePDFReport = (
               resolveRoomSupplyBasis(room.supplyCfmBasis, project?.supplyBasis) === 'ach'
                 ? `${n1(m.totalAch)} ACH  /  ${n0(m.totalSupplyCfm)} CFM`
                 : `Dehumidified (DSCFM)  /  ${n0(m.designCfm)} CFM`],
-            ...(m.latentShortfallCfm > 1
-              ? [['Latent / Reheat',
-                  `Coil @ ${n0(m.selectedAdp)}°F can't fully dry this room — lower the coil ADP (Dehumidification mode) or add a DOAS / desiccant. Reheat duty: see psychrometric analysis below.`,
-                  'Latent need / Supplied',
-                  `${n0(m.latentCfm)} / ${n0(m.designCfm)} CFM`]]
+            // Latent shortfall row — only when the actual design supply air can't carry the latent
+            // load at the selected ADP (latentShortfallCFM is sensible-based and false-alarms once
+            // the ACH/DSCFM floor bumps supply above the latent need). When the engineer has chosen
+            // a dehumidification strategy for this zone (reheat or desiccant), show it as RESOLVED
+            // with the reheat duty — not an open failure.
+            ...((m.latentCfm - m.designCfm) > 1
+              ? (() => {
+                  const dh = resolveRoomDehumid(room, activeEquipSystems);
+                  if (dh && isReheatMethod(dh.method)) {
+                    // Use the SAME RSHF-based required-reheat the psychro "Reheat ★ REQD" row shows
+                    // below — NOT the zone's stored dehumidReheatKW (which can be stale/undersized and
+                    // would contradict the psychro row, and differ between identical rooms).
+                    const _roomTot = m.ersh + m.erlh;
+                    const _cSHR = _roomTot > 0 ? m.ersh / _roomTot : 1;
+                    const rhBtu = _cSHR < 0.75 ? Math.max(0, (m.erlh * 0.75) / 0.25 - m.ersh) : 0;
+                    return [['Dehumidification (Reheat)',
+                      `Reheat dehumidification selected (${dh.label}): the coil over-cools below the ${n0(m.selectedAdp)}°F ADP to wring out the full latent load at ${n0(m.designCfm)} CFM, then reheats to hold supply temp. Size the reheat coil to the duty at right.`,
+                      'Required reheat duty',
+                      `${n2(rhBtu / 3412.142)} kW  (${n0(rhBtu)} BTU/h)`]];
+                  }
+                  if (dh && dh.method === 'standalone') {
+                    return [['Dehumidification',
+                      `Standalone desiccant / DX dehumidification selected for this zone — removes the residual latent the cooling coil can't at ${n0(m.designCfm)} CFM.`,
+                      'Latent need / Supplied',
+                      `${n0(m.latentCfm)} / ${n0(m.designCfm)} CFM`]];
+                  }
+                  return [['Latent / Reheat',
+                    `Coil @ ${n0(m.selectedAdp)}°F can't fully dry this room — supplied ${n0(m.designCfm)} CFM is below the ${n0(m.latentCfm)} CFM the latent load needs at this ADP. Lower the coil ADP (Dehumidification mode) or add a DOAS / desiccant.`,
+                    'Latent need / Supplied',
+                    `${n0(m.latentCfm)} / ${n0(m.designCfm)} CFM`]];
+                })()
               : []),
           ],
           theme: 'grid',
@@ -2266,7 +2351,7 @@ export const generatePDFReport = (
           ['Selected ADP',  `${n0(m.selectedAdp)} °F`],
           ['RSHF',          n2(panelRSHF)],
           ['Design CFM',    `${n0(m.designCfm)} CFM`],
-          ['Governing TR',  `${n2(m.governingTr)} TR`],
+          ['Governing TR',  `${n2(m.requiredTr)} TR`],
           ...(includeWinter ? [['Winter Load', `${n0(m.designHeatingLoad)} BTU/h`]] : []),
           ...(includeWinter && Number((room as any)?._calcTfaWinterHeatingBTUH) > 0
             ? [['TFA Heat Coil', `${n0(Number((room as any)._calcTfaWinterHeatingBTUH))} BTU/h`]]
@@ -2721,8 +2806,14 @@ export const generatePDFReport = (
 
       // ── Humidification analysis ───────────────────────────────────────────
       y = ensureSpace(doc, y, 40, project);
-      const humLabel = wm.humNeeded ? 'HUMIDIFIER REQUIRED' : 'NO HUMIDIFIER NEEDED';
-      const humLabelColor: [number,number,number] = wm.humNeeded ? [0, 100, 180] : [20, 130, 70];
+      // When the space settles within comfort (≥30% RH) without a humidifier, humidification is
+      // OPTIONAL — only needed to actively hold the (higher) indoor RH target. The figures are
+      // shown for reference so the client can decide; they are not a hard requirement.
+      const humOptional = wm.humNeeded && wm.humRhAfterHeating >= 30;
+      const humLabel = !wm.humNeeded
+        ? 'NO HUMIDIFIER NEEDED'
+        : (humOptional ? 'HUMIDIFIER OPTIONAL' : 'HUMIDIFIER RECOMMENDED');
+      const humLabelColor: [number,number,number] = (!wm.humNeeded || humOptional) ? [20, 130, 70] : [200, 120, 0];
 
       doc.setFillColor(235, 248, 255);
       doc.rect(PAGE.left, y - 2.5, pageW - PAGE.left - PAGE.right, 7, 'F');
@@ -2737,14 +2828,17 @@ export const generatePDFReport = (
       const humBody: string[][] = [
         ['Outdoor Air',  `${dualTu(winDcRoom.outdoorTemp)} / ${winDcRoom.outdoorHumidity}% RH`, `W = ${wm.humWOutGr.toFixed(1)} gr/lb`],
         ['Indoor Target', `${dualTu(winDcRoom.indoorTemp)} / ${winDcRoom.indoorHumidity}% RH`, `W = ${wm.humWInGr.toFixed(1)} gr/lb`],
-        ['Moisture Deficit dW', `${wm.humDeltaWGr.toFixed(1)} gr/lb`, wm.humNeeded ? 'Humidification needed' : 'Sufficient — no humidifier'],
+        ['Moisture Deficit dW', `${wm.humDeltaWGr.toFixed(1)} gr/lb`, wm.humNeeded ? (humOptional ? 'Only to actively hold the target RH' : 'Humidification needed') : 'Sufficient — no humidifier'],
         ['RH after heating (no humidifier)', `${wm.humRhAfterHeating}%`, wm.humRhAfterHeating < 30 ? '⚠ Below ASHRAE 55 min (30%)' : '✓ Within comfort range'],
       ];
+      if (humOptional) {
+        humBody.push(['Design Basis', `No humidifier — space settles at ~${wm.humRhAfterHeating}% RH`, 'Within comfort. Figures below size a humidifier only IF the target RH must be held.']);
+      }
       if (wm.humNeeded) {
         humBody.push(
           ['Fresh Air CFM (ventilation)', `${Math.round(wm.humFreshCFM)} CFM`, 'Only fresh air needs moisture'],
-          ['Humidifier Output (incl. 10% margin)', `${wm.humRate.toFixed(2)} lbs/hr`, `Base: ${wm.humRateBase.toFixed(2)} lbs/hr`],
-          ['Energy Penalty', `${n0(wm.humEnergyBTU)} BTU/h`, `${wm.humEnergyKW.toFixed(2)} kW`],
+          [`Humidifier Output${humOptional ? ' (optional)' : ''} — to hold ${winDcRoom.indoorHumidity}% RH (+10% margin)`, `${wm.humRate.toFixed(2)} lbs/hr`, `Base: ${wm.humRateBase.toFixed(2)} lbs/hr.  If an adiabatic / evaporative humidifier (wetted media, spray, ultrasonic) is used, add ${n0(wm.humEnergyBTU)} BTU/h to the DESIGN HEATING LOAD (Space) — the coil must offset the evaporative cooling. Steam / isothermal type: separate electrical load, not added.`],
+          [`Energy Penalty${humOptional ? ' (if humidified)' : ''}`, `${n0(wm.humEnergyBTU)} BTU/h`, `${wm.humEnergyKW.toFixed(2)} kW`],
           ['ASHRAE 62.1-2022 §5.9 Cap', `Indoor W = ${wm.humWInGr.toFixed(1)} gr/lb`, wm.humExceedsCap62 ? '⚠ Exceeds 87 gr/lb cap' : '✓ Within 87 gr/lb limit'],
         );
       }
