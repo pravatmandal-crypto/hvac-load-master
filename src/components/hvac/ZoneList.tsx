@@ -16,6 +16,7 @@ import {
   getRecommendedAch,
   resolveSupplyCfm,
   resolveRoomSupplyBasis,
+  resolveTotalSupplyACH,
   getMinAdp,
   type DesignConditions,
   type RoomDetails,
@@ -152,7 +153,7 @@ function computeZoneTotals(
       const grandTotal = coilSensible + coilLatent;
 
       const presetTotalACH = getRecommendedAch(room.achProfile ?? room.activityType);
-      const effectiveTotalACH = Math.max(presetTotalACH, rd.facph);
+      const effectiveTotalACH = resolveTotalSupplyACH(presetTotalACH, rd.facph, Number(room.recircPct) || 0);
       const totalSupplyCFM = (calculateRoomVolume(rd) * effectiveTotalACH) / 60;
       const freshAirCFM = (calculateRoomVolume(rd) * rd.facph) / 60;
       // Supply-air basis: 'dscfm' (DEFAULT, dehumidified-air) vs 'ach' (legacy ACH-preset).

@@ -25,6 +25,7 @@ import {
   getRecommendedAch,
   resolveSupplyCfm,
   resolveRoomSupplyBasis,
+  resolveTotalSupplyACH,
   getMinAdp,
   SPACE_TYPES_62,
   getSpaceType,
@@ -100,6 +101,9 @@ type RoomParameterState = {
   equipmentKW: number;
   othersKW: number;
   facph: number;
+  // Recirculation % (0 = unused). When set, total supply ACH = facph ÷ (1 − recircPct/100),
+  // i.e. the client's "X ACH fresh with Y% recirculation" basis. Fresh air stays absolute at facph.
+  recircPct: number;
   sensibleSafetyPercent: number;
   latentSafetyPercent: number;
   overallSafetyPercent: number;
@@ -129,6 +133,7 @@ function getRoomParameterState(room: any, projectSupplyBasis?: string): RoomPara
     equipmentKW: Number(room?.equipmentKW) || 0,
     othersKW: Number(room?.othersKW) || 0,
     facph: Number(room?.facph) || 0,
+    recircPct: Number(room?.recircPct) || 0,
     sensibleSafetyPercent: Number(room?.sensibleSafetyPercent) || 10,
     latentSafetyPercent: Number(room?.latentSafetyPercent) || 5,
     overallSafetyPercent: Number(room?.overallSafetyPercent) || 3,
@@ -158,6 +163,7 @@ function areRoomParameterStatesEqual(left: RoomParameterState, right: RoomParame
     left.equipmentKW === right.equipmentKW &&
     left.othersKW === right.othersKW &&
     left.facph === right.facph &&
+    left.recircPct === right.recircPct &&
     left.sensibleSafetyPercent === right.sensibleSafetyPercent &&
     left.latentSafetyPercent === right.latentSafetyPercent &&
     left.overallSafetyPercent === right.overallSafetyPercent &&
@@ -171,8 +177,9 @@ function areRoomParameterStatesEqual(left: RoomParameterState, right: RoomParame
 
 // ─── Per-room calculation hook ────────────────────────────────────────────────
 
-function useRoomCalc(room: any, elements: any[], designConditions: DesignConditions, project?: any, equipSystems: any[] = []) {
-  return useMemo(() => {
+// Pure room calc engine. useRoomCalc is a thin memoized wrapper around this so the
+// pipeline can also be run outside React (e.g. summary rollups) without duplicating logic.
+function computeRoomCalc(room: any, elements: any[], designConditions: DesignConditions, project?: any, equipSystems: any[] = []) {
     const rd: RoomDetails = {
       id: room.id,
       name: room.name ?? '',
@@ -391,7 +398,7 @@ function useRoomCalc(room: any, elements: any[], designConditions: DesignConditi
     // Separate OA FACPH from total-supply ACH requirement.
     // OA FACPH drives outdoor-air load; total ACH (preset) drives minimum supply airflow.
     const presetTotalACH = getRecommendedAch(room.achProfile ?? room.activityType);
-    const totalSupplyACH = Math.max(presetTotalACH, rd.facph);
+    const totalSupplyACH = resolveTotalSupplyACH(presetTotalACH, rd.facph, Number(room.recircPct) || 0);
     const totalSupplyCFM = (calculateRoomVolume(rd) * totalSupplyACH) / 60;
     const freshAirCFM = (calculateRoomVolume(rd) * rd.facph) / 60;
     // Supply-air basis: 'dscfm' (DEFAULT, dehumidified-air) vs 'ach' (legacy ACH-preset).
@@ -506,7 +513,11 @@ function useRoomCalc(room: any, elements: any[], designConditions: DesignConditi
       freshAirCFM,
       dehumidCompare,
     };
-  }, [room, elements, designConditions, project]);
+}
+
+function useRoomCalc(room: any, elements: any[], designConditions: DesignConditions, project?: any, equipSystems: any[] = []) {
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  return useMemo(() => computeRoomCalc(room, elements, designConditions, project, equipSystems), [room, elements, designConditions, project]);
 }
 
 function getMonsoonDesignConditions(project?: any, base?: DesignConditions): DesignConditions {
@@ -754,7 +765,6 @@ function RoomDetail({
   const [isUpdating, setIsUpdating] = useState(false);
   const roomDraftRef = useRef<RoomParameterState>(roomDraft);
   const committedRoomState = useMemo(() => getRoomParameterState(room, project?.supplyBasis), [room, project?.supplyBasis]);
-  const liveRoom = useMemo(() => ({ ...room, ...roomDraft }), [room, roomDraft]);
   const isRoomDirty = useMemo(
     () => !areRoomParameterStatesEqual(roomDraft, committedRoomState),
     [roomDraft, committedRoomState],
@@ -775,10 +785,12 @@ function RoomDetail({
   const isEnvelopeDirty = envelopeDraft !== null;
   const liveElements: EnvelopeElement[] = (envelopeDraft ?? elements) as EnvelopeElement[];
 
-  const c = useRoomCalc(liveRoom, liveElements, designConditions, project, equipSystems);
   const monsoonDc = useMemo(() => getMonsoonDesignConditions(project, designConditions), [project, designConditions]);
-  const monsoonCalc = useRoomCalc(liveRoom, liveElements, monsoonDc, project, equipSystems);
   const hasMonsoon = !!(project?.includeMonsoon ?? project?.data?.includeMonsoon);
+  const liveRoom = useMemo(() => ({ ...room, ...roomDraft }), [room, roomDraft]);
+
+  const c = useRoomCalc(liveRoom, liveElements, designConditions, project, equipSystems);
+  const monsoonCalc = useRoomCalc(liveRoom, liveElements, monsoonDc, project, equipSystems);
   const loadGoverningSeason = hasMonsoon && monsoonCalc.grandTotalTR > c.grandTotalTR ? 'Monsoon' : 'Summer';
   const cfmGoverningSeason = hasMonsoon && monsoonCalc.cfmTR > c.cfmTR ? 'Monsoon' : 'Summer';
   const loadGoverningTR = hasMonsoon ? Math.max(c.grandTotalTR, monsoonCalc.grandTotalTR) : c.grandTotalTR;
@@ -1170,7 +1182,7 @@ function RoomDetail({
         </Table>
       </div>
 
-      <div className="mt-2 grid grid-cols-3 gap-2">
+      <div className="mt-2 grid grid-cols-2 sm:grid-cols-4 gap-2">
         <div className="bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-2 text-center">
           <p className="text-[10px] text-gray-500 dark:text-slate-400 uppercase tracking-wide">RSHF</p>
           <p className="text-sm font-bold text-slate-800 dark:text-slate-100">{f1(calc.rshf * 100)}%</p>
@@ -1182,6 +1194,11 @@ function RoomDetail({
         <div className="bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-2 text-center">
           <p className="text-[10px] text-gray-500 dark:text-slate-400 uppercase tracking-wide">Area</p>
           <p className="text-sm font-bold text-slate-800 dark:text-slate-100">{calc.rd.length * calc.rd.width} ft²</p>
+        </div>
+        <div className={`rounded-lg border px-3 py-2 text-center ${calc.coil.latentShortfallCFM > 1 ? 'bg-amber-50 dark:bg-amber-950/30 border-amber-300 dark:border-amber-800' : 'bg-sky-50 dark:bg-sky-950/30 border-sky-200 dark:border-sky-800'}`}>
+          <p className="text-[10px] text-gray-500 dark:text-slate-400 uppercase tracking-wide">Coil ADP (selected)</p>
+          <p className={`text-sm font-bold ${calc.coil.latentShortfallCFM > 1 ? 'text-amber-700 dark:text-amber-400' : 'text-sky-700 dark:text-sky-300'}`}>{calc.coil.selectedADP.toFixed(0)} °F</p>
+          <p className="text-[9px] text-gray-400 dark:text-slate-500">indicated {calc.coil.indicatedADP.toFixed(1)} °F</p>
         </div>
       </div>
 
@@ -1636,18 +1653,43 @@ function RoomDetail({
           <Field label="Others (kW)">
             <BufferedNumberInput committersRef={draftCommittersRef} draftKey={`${id}-others`} value={roomDraft.othersKW} onDraftChange={(draft, parsed) => handleNumericDraftChange('othersKW', draft, parsed)} onCommit={next => patchRoomDraft({ othersKW: next })} className="h-8 text-sm" />
           </Field>
-          <Field label="OA FACPH">
+          <Field label="OA FACPH (fresh air)">
             <div>
               <BufferedNumberInput committersRef={draftCommittersRef} draftKey={`${id}-facph`} value={roomDraft.facph} onDraftChange={(draft, parsed) => handleNumericDraftChange('facph', draft, parsed)} onCommit={next => patchRoomDraft({ facph: next })} className="h-8 text-sm" />
-              <p className="mt-1 text-[10px] text-slate-500">OA FACPH should be {'<='} Total ACH. Total supply ACH uses max(Preset ACH, OA FACPH).</p>
+              <p className="mt-1 text-[10px] text-slate-500">Fresh (outdoor) air-change rate — the absolute minimum. OA load is sized on this.</p>
               <p className="mt-0.5 text-[10px] font-semibold text-cyan-700">
                 Fresh Air on Governing Design Airflow ({governingDesignAirflowSeason}): {freshAirPctOnDesignCfm.toFixed(2)}% ({Math.round(freshAirCfmFromInput).toLocaleString()} / {Math.round(governingDesignAirflow).toLocaleString()} CFM)
               </p>
               {room._oaFacphMigrated && (
                 <p className="mt-0.5 text-[10px] font-semibold text-blue-700">Auto-migrated OA FACPH from legacy default. Please review for project-specific compliance.</p>
               )}
-              {(Number(roomDraft.facph) || 0) > c.presetTotalACH && (
-                <p className="mt-0.5 text-[10px] font-semibold text-amber-700">OA FACPH is above preset total ACH. Effective total ACH is auto-raised to {(Number(roomDraft.facph) || 0).toFixed(1)}.</p>
+            </div>
+          </Field>
+          <Field label="Recirculation %">
+            <div>
+              <BufferedNumberInput committersRef={draftCommittersRef} draftKey={`${id}-recirc`} value={roomDraft.recircPct} onDraftChange={(draft, parsed) => handleNumericDraftChange('recircPct', draft, parsed)} onCommit={next => patchRoomDraft({ recircPct: next })} className="h-8 text-sm" />
+              {roomDraft.recircPct > 0 && roomDraft.recircPct < 100 ? (
+                (() => {
+                  const vol = calculateRoomVolume(c.rd);
+                  const govCfm = governingDesignAirflow;
+                  const govAch = vol > 0 ? (govCfm * 60) / vol : 0;
+                  const coolingGoverns = govCfm > c.totalSupplyCFM + 1;
+                  const actualRecirc = govCfm > 0 ? (1 - freshAirCfmFromInput / govCfm) * 100 : roomDraft.recircPct;
+                  return (
+                    <p className="mt-1 text-[10px] font-semibold text-emerald-700">
+                      Air-change floor = Fresh ÷ (1 − {roomDraft.recircPct}%) = {c.totalSupplyACH.toFixed(1)} ACH ({Math.round(c.totalSupplyCFM).toLocaleString()} CFM). Overrides the ACH preset.
+                      {coolingGoverns ? (
+                        <span className="block font-normal text-amber-700">
+                          Cooling load governs → design supply {Math.round(govCfm).toLocaleString()} CFM ({govAch.toFixed(1)} ACH); recirc floats up to ≈{actualRecirc.toFixed(0)}% (fresh stays fixed).
+                        </span>
+                      ) : (
+                        <span className="block font-normal text-emerald-700">This floor governs the design supply.</span>
+                      )}
+                    </p>
+                  );
+                })()
+              ) : (
+                <p className="mt-1 text-[10px] text-slate-500">0 = use the space-type ACH preset. Set e.g. 75 for "2 ACH fresh + 75% recirculation".</p>
               )}
             </div>
           </Field>
@@ -2530,7 +2572,7 @@ function calculateRoomStripMetrics(room: any, elements: any[], dc: DesignConditi
   const fanPct = Number(room.fanGainPct) || 3;
   const sensibleSafetyFactor = Number(room.sensibleSafetyPercent ?? 10) / 100;
   const latentSafetyFactor = Number(room.latentSafetyPercent ?? 5) / 100;
-  const achCFM = (calculateRoomVolume(rd) * Math.max(getRecommendedAch(room.achProfile ?? room.activityType), rd.facph)) / 60;
+  const achCFM = (calculateRoomVolume(rd) * resolveTotalSupplyACH(getRecommendedAch(room.achProfile ?? room.activityType), rd.facph, Number(room.recircPct) || 0)) / 60;
 
   // TFA/DOAS: same shared resolver as everywhere else. When DOAS-served, the strip
   // shows the REDUCED primary (space) TR and the TFA coil separately.

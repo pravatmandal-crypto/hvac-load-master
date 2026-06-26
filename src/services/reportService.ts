@@ -15,7 +15,7 @@ import {
   getMinAdp,
   calculateSingleElementGain,
 } from '../lib/hvac-logic';
-import { resolveSupplyCfm, resolveRoomSupplyBasis } from '../lib/hvac/supplyCfm';
+import { resolveSupplyCfm, resolveRoomSupplyBasis, resolveTotalSupplyACH } from '../lib/hvac/supplyCfm';
 
 // DOAS/TFA systems for the report currently being built. Set once at the top of
 // each (synchronous) report-generation entry point; read by computeDetailed to
@@ -921,7 +921,7 @@ const computeDetailed = (room: any, elements: any[], dc: DC, project: any): Deta
   // Coil recomputed from the (TFA-reduced) loads — drives ADP / RSHF / supply air.
   const coil = calculateCoilParameters(coilSensible, coilLatent, dcEff.indoorTemp, dcEff.indoorHumidity, dcEff.altitude, BF, 35, 65, getMinAdp(project?.systemType, project?.adpBasis));
 
-  const totalAch     = Math.max(getRecommendedAch(room?.achProfile ?? room?.activityType), asNum(room?.facph, 0));
+  const totalAch     = resolveTotalSupplyACH(getRecommendedAch(room?.achProfile ?? room?.activityType), asNum(room?.facph, 0), asNum(room?.recircPct, 0));
   const totalSupplyCfm = (calculateRoomVolume(room) * totalAch) / 60;
   // TFA-served space coils are sized by thermal (sensible-at-ADP) airflow only — the
   // recommended-ACH air-change duty belongs to the DOAS. tfa-only corridors keep the
@@ -2182,10 +2182,20 @@ export const generatePDFReport = (
                     const _roomTot = m.ersh + m.erlh;
                     const _cSHR = _roomTot > 0 ? m.ersh / _roomTot : 1;
                     const rhBtu = _cSHR < 0.75 ? Math.max(0, (m.erlh * 0.75) / 0.25 - m.ersh) : 0;
-                    return [['Dehumidification (Reheat)',
-                      `Reheat dehumidification selected (${dh.label}): the coil over-cools below the ${n0(m.selectedAdp)}°F ADP to wring out the full latent load at ${n0(m.designCfm)} CFM, then reheats to hold supply temp. Size the reheat coil to the duty at right.`,
+                    // Only print the "over-cools then reheats — size the reheat coil" narrative when
+                    // reheat is actually needed (room SHR < 0.75 → the supply over-cools while drying).
+                    // At SHR >= 0.75 the duty is 0, so describing a reheat coil next to "0.00 kW" is
+                    // self-contradictory — state plainly that no reheat is required instead.
+                    if (rhBtu > 0) {
+                      return [['Dehumidification (Reheat)',
+                        `Reheat dehumidification selected (${dh.label}): the coil over-cools below the ${n0(m.selectedAdp)}°F ADP to wring out the full latent load at ${n0(m.designCfm)} CFM, then reheats to hold supply temp. Size the reheat coil to the duty at right.`,
+                        'Required reheat duty',
+                        `${n2(rhBtu / 3412.142)} kW  (${n0(rhBtu)} BTU/h)`]];
+                    }
+                    return [['Dehumidification',
+                      `Coil @ ${n0(m.selectedAdp)}°F dries this room at ${n0(m.designCfm)} CFM with no reheat — room SHR ${_cSHR.toFixed(2)} is at/above 0.75, so the supply air does not over-cool. (${dh.label} is configured for this zone should a tighter supply-temp band later be required.)`,
                       'Required reheat duty',
-                      `${n2(rhBtu / 3412.142)} kW  (${n0(rhBtu)} BTU/h)`]];
+                      `Not required (SHR ${_cSHR.toFixed(2)})`]];
                   }
                   if (dh && dh.method === 'standalone') {
                     return [['Dehumidification',

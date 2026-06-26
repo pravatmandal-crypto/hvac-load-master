@@ -39,6 +39,7 @@ import {
   getMinAdp,
   resolveSupplyCfm,
   resolveRoomSupplyBasis,
+  resolveTotalSupplyACH,
   resolveRoomTfa,
   getProjectDoas,
   pickCoolingSource,
@@ -58,6 +59,7 @@ interface Room {
   hasFalseCeiling: boolean;
   falseCeilingHeight: number;
   facph: number;
+  recircPct: number;
   peopleCount: number;
   lightsWattsPerSqft: number;
   equipmentKW: number;
@@ -154,6 +156,9 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
       hasFalseCeiling: r.hasFalseCeiling ?? r.data?.hasFalseCeiling ?? false,
       falseCeilingHeight: r.falseCeilingHeight ?? r.data?.falseCeilingHeight ?? 8,
       facph: Number.isFinite(normalizedFacph) ? normalizedFacph : legacyDefaultOaFacph,
+      // Recirculation % MUST survive normalization (object is rebuilt field-by-field, no spread),
+      // else every load/save round-trip strips it back to 0 and the input "always reads 0".
+      recircPct: Number(r.recircPct ?? r.data?.recircPct ?? 0) || 0,
       peopleCount: r.peopleCount ?? r.data?.peopleCount ?? 0,
       activityType: r.activityType ?? r.data?.activityType ?? 'office',
       achProfile: r.achProfile ?? r.data?.achProfile ?? r.activityType ?? r.data?.activityType ?? 'office',
@@ -607,7 +612,7 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
       getMinAdp(project?.systemType, project?.adpBasis),
     );
     const presetTotalACH = getRecommendedAch(roomSource.achProfile ?? roomSource.activityType);
-    const totalSupplyACH = Math.max(presetTotalACH, rd.facph);
+    const totalSupplyACH = resolveTotalSupplyACH(presetTotalACH, rd.facph, Number(roomSource.recircPct) || 0);
     const totalSupplyCFM = (calculateRoomVolume(rd) * totalSupplyACH) / 60;
     const freshAirCFM = (calculateRoomVolume(rd) * rd.facph) / 60;
     // Supply-air basis: 'dscfm' (DEFAULT, dehumidified-air) vs 'ach' (legacy ACH-preset).
@@ -1000,7 +1005,7 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
         getMinAdp(project?.systemType, project?.adpBasis),
       );
       const presetTotalACH = getRecommendedAch(room.achProfile ?? room.activityType);
-      const totalSupplyACH = Math.max(presetTotalACH, rd.facph);
+      const totalSupplyACH = resolveTotalSupplyACH(presetTotalACH, rd.facph, Number(room.recircPct) || 0);
       const totalSupplyCFM = (calculateRoomVolume(rd) * totalSupplyACH) / 60;
       const freshAirCFM = (calculateRoomVolume(rd) * rd.facph) / 60;
       // Supply-air basis: 'dscfm' (DEFAULT) vs 'ach' (legacy). See lib/hvac/supplyCfm.

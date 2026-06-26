@@ -2,6 +2,7 @@
 
 import React, { useState, useEffect, useCallback } from 'react';
 import { cn } from '../../lib/utils';
+import { calculatePsychrometrics, dewPointFromHumidityRatio } from '../../lib/hvac';
 import { FileText, ChevronDown, ChevronRight, Wand2, Save, Printer, CheckCircle2, Download } from 'lucide-react';
 import { Button } from '../ui/button';
 import { Input } from '../ui/input';
@@ -58,6 +59,16 @@ function buildAHU(project: any, psychro: any, tr: number, cfm: number, systemOAC
   const mixWB = cfm > 0 ? (owbF * oaCFM + iwbF * retCFM) / cfm : owbF;
   const lvDB = (psychro?.coil as any)?.supplyTemp ?? 55;
   const lvRH = (psychro?.coil as any)?.supplyRH ?? 95;
+  // Apparatus dew point (coil surface temp) + off-coil dew point — the coil-selection
+  // drivers the AHU vendor needs. ADP must sit below the room dew point to hold design RH.
+  const adpRaw = (psychro?.coil as any)?.selectedADP;
+  const adpF = Number.isFinite(Number(adpRaw)) ? parseFloat(Number(adpRaw).toFixed(1)) : undefined;
+  const altF = Number(project?.altitude ?? project?.data?.altitude ?? 0);
+  let lvDPF: number | undefined;
+  try {
+    const lp = calculatePsychrometrics(Number(lvDB), Number(lvRH), altF);
+    lvDPF = parseFloat(dewPointFromHumidityRatio(lp.humidityRatio, altF).toFixed(1));
+  } catch { /* ignore psychro errors */ }
   // exactTR=true → caller passed the selected catalog per-unit TR; use as-is.
   // exactTR=false → caller passed a load requirement; add 10% safety and round to 0.5 TR.
   const capTR = exactTR ? parseFloat(tr.toFixed(2)) : Math.ceil(tr * 1.1 * 2) / 2;
@@ -135,6 +146,8 @@ function buildAHU(project: any, psychro: any, tr: number, cfm: number, systemOAC
     mixedAirWBF: parseFloat(mixWB.toFixed(1)),
     leavingAirDBF: parseFloat(String(lvDB)),
     leavingAirRHPct: lvRH,
+    leavingAirDPF: lvDPF,
+    apparatusDewPointF: adpF,
     coolingCapTR: capTR,
     coolingCapKW: capKW,
     coilType: `Chilled Water (${coolRows}-Row Coil)`,
@@ -396,6 +409,8 @@ function generatePrintHTML(system: EquipmentSystem, project: any, spec: FullSpec
       row('Room (Return Air) DB / RH',        `${dbCo(a.roomDBF)} DB  /  ${a.roomRHPct}% RH`),
       row('Mixed Air (Entering Coil) DB / WB',`${a.mixedAirDBF}°F (${fToC(a.mixedAirDBF)}°C) DB  /  ${a.mixedAirWBF}°F WB`),
       row('Supply Air (Leaving Coil) DB / RH',`${a.leavingAirDBF}°F (${fToC(a.leavingAirDBF)}°C) DB  /  ${a.leavingAirRHPct}% RH`),
+      ...(a.leavingAirDPF != null ? [row('Off-Coil Dew Point',       `${dbCo(a.leavingAirDPF)}`)] : []),
+      ...(a.apparatusDewPointF != null ? [row('Apparatus Dew Point (ADP)', `${dbCo(a.apparatusDewPointF)}`)] : []),
     ].join(''));
     out += section(`${++unitN}. Chilled Water Coil`, [
       row('Quantity',                         `${a.quantity ?? 1} nos`),
@@ -761,6 +776,8 @@ function AHUUnitForm({ ahu, onChange, ahuConfig }: {
         <SF label="Mixed Air WB" value={ahu.mixedAirWBF} onChange={v => onChange('mixedAirWBF', v)} unit="°F" />
         <SF label="Leaving Air DB" value={ahu.leavingAirDBF} onChange={v => onChange('leavingAirDBF', v)} unit="°F" />
         <SF label="Leaving Air RH" value={ahu.leavingAirRHPct} onChange={v => onChange('leavingAirRHPct', v)} unit="%" />
+        <SF label="Off-Coil Dew Point" value={ahu.leavingAirDPF ?? 0} onChange={v => onChange('leavingAirDPF', v)} unit="°F" />
+        <SF label="Apparatus Dew Point (ADP)" value={ahu.apparatusDewPointF ?? 0} onChange={v => onChange('apparatusDewPointF', v)} unit="°F" />
       </Sec>
 
       <Sec title="Chilled Water Coil" color="sky">

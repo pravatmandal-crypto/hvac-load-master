@@ -26,6 +26,7 @@ import {
   getMinAdp,
   resolveSupplyCfm,
   resolveRoomSupplyBasis,
+  resolveTotalSupplyACH,
   type DesignConditions,
   type EnvelopeElement,
 } from '../lib/hvac';
@@ -400,7 +401,7 @@ function calcSeason(project: any, zos: any, room: any, elements: EnvelopeElement
   const grand  = (coilS + coilL) * (1 + oPct / 100);
 
   const coil = calculateCoilParameters(coilS, coilL, dc.indoorTemp, dc.indoorHumidity, asNum(project?.altitude), BF, 35, 65, getMinAdp(project?.systemType, project?.adpBasis));
-  const ach  = Math.max(getRecommendedAch(room.activityType ?? room.achProfile), asNum(room.facph));
+  const ach  = resolveTotalSupplyACH(getRecommendedAch(room.activityType ?? room.achProfile), asNum(room.facph), asNum(room.recircPct));
   const totCFM = (volume * ach) / 60;
   const freshAirCFM = (volume * asNum(room.facph)) / 60;
   // Either/or supply basis (matches the app + PDF) — no longer max(dehumidified, ACH).
@@ -1472,8 +1473,15 @@ function buildRoomSheet(
       const roomTot = src.ersh + src.erlh;
       const cSHR = roomTot > 0 ? src.ersh / roomTot : 1;
       const rhBtu = cSHR < 0.75 ? Math.max(0, (src.erlh * 0.75) / 0.25 - src.ersh) : 0;
-      putV(ws, row, 1, 'Dehumidification (Reheat)', S.label);
-      putV(ws, row, 5, `Reheat dehumidification (${dh.label}): coil over-cools below ${r0(src.selectedAdp)}°F ADP to wring out the latent load at ${r0(src.designSupplyCFM)} CFM, then reheats to supply temp. Required reheat duty: ${r2(rhBtu / 3412.142)} kW (${r0(rhBtu)} BTU/h).`, S.calc);
+      // Only describe a reheat coil when one is actually needed (SHR < 0.75). At SHR >= 0.75 the
+      // duty is 0 — don't print "then reheats … required reheat duty: 0.00 kW" (self-contradictory).
+      if (rhBtu > 0) {
+        putV(ws, row, 1, 'Dehumidification (Reheat)', S.label);
+        putV(ws, row, 5, `Reheat dehumidification (${dh.label}): coil over-cools below ${r0(src.selectedAdp)}°F ADP to wring out the latent load at ${r0(src.designSupplyCFM)} CFM, then reheats to supply temp. Required reheat duty: ${r2(rhBtu / 3412.142)} kW (${r0(rhBtu)} BTU/h).`, S.calc);
+      } else {
+        putV(ws, row, 1, 'Dehumidification', S.label);
+        putV(ws, row, 5, `Coil @ ${r0(src.selectedAdp)}°F dries this room at ${r0(src.designSupplyCFM)} CFM with no reheat — room SHR ${cSHR.toFixed(2)} is at/above 0.75, so the supply does not over-cool. Reheat not required.`, S.calc);
+      }
     } else if (dh && dh.method === 'standalone') {
       putV(ws, row, 1, 'Dehumidification', S.label);
       putV(ws, row, 5, `Standalone desiccant / DX dehumidification selected for this zone — removes the residual latent the cooling coil can't at ${r0(src.designSupplyCFM)} CFM.`, S.calc);

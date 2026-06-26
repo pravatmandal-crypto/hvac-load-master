@@ -12,6 +12,10 @@ export interface AHUData {
   mixedAirWBF: number;
   leavingAirDBF: number;
   leavingAirRHPct: number;
+  // Off-coil dew point (°F) and apparatus dew point (°F) — the coil-selection drivers the
+  // AHU manufacturer needs. ADP must sit below the room dew point to hold the design RH.
+  leavingAirDPF?: number;
+  apparatusDewPointF?: number;
   coolingCapTR: number;
   coolingCapKW: number;
   coilType: string;

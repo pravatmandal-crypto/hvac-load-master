@@ -49,6 +49,24 @@ export function resolveDesignMode(mode?: string): DesignModeResolved {
   }
 }
 
+/**
+ * Total supply-air ACH — the air-change / ventilation floor for the design airflow.
+ *
+ * When a recirculation % is specified (the client's design basis, e.g. "2 ACH fresh with 75%
+ * recirculation"), the total supply = fresh ÷ (1 − recirc): 2 ÷ (1 − 0.75) = 8 ACH. The fresh-air
+ * (OA) rate stays absolute at `facph`; recirculation floats UP automatically when the cooling load
+ * drives the design airflow above this floor (so the actual recirc % exceeds the nominal in
+ * high-load rooms — physically correct). An explicit recirc % SUPERSEDES the generic space-type
+ * preset, since the client has stated the air-change basis directly.
+ *
+ * When recircPct is unset (0 / undefined), falls back to the legacy max(space-type preset, facph).
+ */
+export function resolveTotalSupplyACH(presetACH: number, facph: number, recircPct?: number): number {
+  const r = Number(recircPct) || 0;
+  if (r > 0 && r < 100) return facph / (1 - r / 100); // fresh ÷ fresh-fraction
+  return Math.max(presetACH, facph);
+}
+
 /** Resolve a room's effective supply basis: explicit room override wins, else the project default. */
 export function resolveRoomSupplyBasis(roomBasis?: string, projectSupplyBasis?: string): SupplyCfmBasis {
   if (roomBasis === 'ach') return 'ach';

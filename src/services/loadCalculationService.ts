@@ -25,6 +25,7 @@ import {
   getMinAdp,
   resolveSupplyCfm,
   resolveRoomSupplyBasis,
+  resolveTotalSupplyACH,
   type SupplyCfmBasis,
   type RoomDetails,
 } from '../lib/hvac';
@@ -208,7 +209,7 @@ export async function calculateAndPersistRoom(
   );
 
   const presetTotalACH = getRecommendedAch(room.achProfile ?? room.activityType);
-  const totalSupplyACH = Math.max(presetTotalACH, rd.facph);
+  const totalSupplyACH = resolveTotalSupplyACH(presetTotalACH, rd.facph, Number(room.recircPct) || 0);
   const totalSupplyCFM = (calculateRoomVolume(rd) * totalSupplyACH) / 60;
   // Fresh-air (OA) the room introduces — used to floor the space AHU under the DSCFM basis.
   const freshAirCFM = (calculateRoomVolume(rd) * rd.facph) / 60;
