@@ -1,4 +1,4 @@
-import { memo, useEffect, useMemo, useRef, useState } from 'react';
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useDraggable } from '@dnd-kit/core';
 import { collection, onSnapshot, query, where } from 'firebase/firestore';
 import { db } from '../../lib/firebase';
@@ -845,11 +845,14 @@ function RoomDetail({
   }, [committedRoomState, hasActiveEdits]);
 
   useEffect(() => {
-    onDirtyChange?.(id, isRoomDirty);
+    // Report the SAME condition that renders the amber "Unsaved changes" warning
+    // (params OR envelope), so the parent's leave-guard blocks exactly when the
+    // warning is visible — never "blocked with no warning", never "warning but closes".
+    onDirtyChange?.(id, isRoomDirty || isEnvelopeDirty);
     return () => {
       onDirtyChange?.(id, false);
     };
-  }, [id, isRoomDirty, onDirtyChange]);
+  }, [id, isRoomDirty, isEnvelopeDirty, onDirtyChange]);
 
   // Publish draft whenever roomDraft changes (user has actively edited)
   useEffect(() => {
@@ -2814,6 +2817,19 @@ export default function RoomTable({
   userId, equipSystems, setRoomFreshAir,
 }: RoomTableProps) {
   const [dirtyRoomId, setDirtyRoomId] = useState<string | null>(null);
+  // A ref mirrors dirtyRoomId so the navigation guard reads the LIVE value even from a
+  // stale closure. The room-strip header is memoized (MemoDraggableRoomHeader) and its
+  // comparator ignores `onToggle`, so after an edit the strip keeps a stale onToggle that
+  // captured an OLD dirtyRoomId — the guard would then block a clean room. Reading the ref
+  // (a stable object whose .current is always current) sidesteps that entirely.
+  const dirtyRoomIdRef = useRef<string | null>(null);
+  const handleRoomDirtyChange = useCallback((roomId: string, isDirty: boolean) => {
+    setDirtyRoomId((prev) => {
+      const next = isDirty ? roomId : prev === roomId ? null : prev;
+      dirtyRoomIdRef.current = next;
+      return next;
+    });
+  }, []);
 
   // Custom wall assemblies from U Builder (Firestore: u_assemblies)
   const [customAssemblies, setCustomAssemblies] = useState<Array<{ id: string; displayId: string; name: string; uValue: number; wallCategory: string }>>([]);
@@ -2915,17 +2931,18 @@ export default function RoomTable({
   }
 
   const blockDirtyRoomNavigation = () => {
-    if (!dirtyRoomId) return false;
-    toast.error('Update or cancel the room parameter changes before leaving this room.');
+    if (!dirtyRoomIdRef.current) return false;
+    toast.error('Update or cancel the unsaved changes before leaving this room.');
     return true;
   };
 
   const handleExpandedRoomChange = (nextRoomId: string | null) => {
-    if (dirtyRoomId && dirtyRoomId !== nextRoomId) {
-      blockDirtyRoomNavigation();
-      return;
-    }
-    if (dirtyRoomId && nextRoomId === null) {
+    // Block leaving a room while its "Unsaved changes" warning is showing (params OR
+    // envelope). Update or Cancel clears the warning, after which the arrow closes
+    // normally. Clean rooms open/close freely. Reads the ref (not dirtyRoomId) so a
+    // stale memoized-strip onToggle still sees the live dirty state.
+    const dirty = dirtyRoomIdRef.current;
+    if (dirty && dirty !== nextRoomId) {
       blockDirtyRoomNavigation();
       return;
     }
@@ -2980,12 +2997,7 @@ export default function RoomTable({
                 customWallTypes={customWallTypes}
                 customRoofTypes={customRoofTypes}
                 customFloorTypes={customFloorTypes}
-                onDirtyChange={(roomId, isDirty) => {
-                  setDirtyRoomId((prev) => {
-                    if (isDirty) return roomId;
-                    return prev === roomId ? null : prev;
-                  });
-                }}
+                onDirtyChange={handleRoomDirtyChange}
               />
             )}
           </div>
