@@ -112,3 +112,5 @@ export {
   TFA_SUPPLY_DEFAULTS,
   type ResolvedTfaMode,
 } from './tfa';
+
+export { CALC_VERSION, computeRoomInputSig, roomSigParts, type RoomSigInput } from './calcSignature';

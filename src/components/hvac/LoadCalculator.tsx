@@ -44,6 +44,7 @@ import {
   getProjectDoas,
   pickCoolingSource,
   TFA_SUPPLY_DEFAULTS,
+  computeRoomInputSig,
   type RoomDetails,
 } from '../../lib/hvac';
 import { EnvelopeElement, ACTIVITY_TYPES, ACTIVITY_ACH_RECOMMENDATIONS } from '../../lib/hvac/constants';
@@ -202,6 +203,9 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
       _calcTfaReheatBTUH: r._calcTfaReheatBTUH ?? r.data?._calcTfaReheatBTUH,
       _calcTfaOnly: r._calcTfaOnly ?? r.data?._calcTfaOnly,
       _calcTfaSupplyKey: r._calcTfaSupplyKey ?? r.data?._calcTfaSupplyKey,
+      // Input fingerprint MUST survive normalization (no spread) — else it loads as
+      // undefined and the input-drift staleness banner flags every room forever.
+      _calcInputSig: r._calcInputSig ?? r.data?._calcInputSig,
     };
   };
 
@@ -773,6 +777,9 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
       return v;
     };
 
+    // Input fingerprint — lets the staleness banner detect when a room's saved
+    // _calc* no longer matches its current inputs (see lib/hvac/calcSignature).
+    const inputSig = computeRoomInputSig({ room: roomSource, elements });
     await updateDoc(getRoomRef(zoneId, roomId, systemId), {
       analysis: stripUndefinedDeep(analysis),
       analysisUpdatedAt: new Date(),
@@ -780,6 +787,7 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
       totalLoadTR: grandTotalTR,
       dehumidifiedCFM: coil.dehumidifiedCFM,
       designSupplyCFM,
+      _calcInputSig: inputSig,
       _calcLoadTR: parseFloat(grandTotalTR.toFixed(3)),
       _calcCfmTR: parseFloat(cfmTR.toFixed(3)),
       _calcGoverningTR: parseFloat(governingTR.toFixed(3)),
@@ -871,6 +879,7 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
               totalLoadTR: grandTotalTR,
               dehumidifiedCFM: coil.dehumidifiedCFM,
               designSupplyCFM,
+              _calcInputSig: inputSig,
               _calcLoadTR: parseFloat(grandTotalTR.toFixed(3)),
               _calcCfmTR: parseFloat(cfmTR.toFixed(3)),
               _calcGoverningTR: parseFloat(governingTR.toFixed(3)),
@@ -1422,6 +1431,49 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
     toast.success(`Recalculated ${ok} room${ok === 1 ? '' : 's'} — plant TR now load-only`);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [cfmGovernanceStaleRoomIds, rooms, envelopeElements]);
+
+  // ── Input-drift staleness detection (general) ──────────────────────────────
+  // A room's persisted _calc* were computed from its inputs at save time. If any
+  // load-affecting input (geometry, gains, envelope, fresh-air, safety %, TFA mode)
+  // has changed since — or the load engine version bumped — the saved values are
+  // stale and Equipment Selection / PDF / Excel (which read them) would be wrong.
+  // We stamp `_calcInputSig` on every save; here we recompute the expected sig from
+  // current inputs and flag any room whose stored sig is missing or mismatched.
+  // (Legacy rooms with no sig are flagged once — a single recompute clears them.)
+  const inputStaleRoomIds = useMemo(() => {
+    const stale: string[] = [];
+    for (const zoneRooms of Object.values(rooms)) {
+      for (const r of zoneRooms as any[]) {
+        try {
+          const expected = computeRoomInputSig({ room: r, elements: envelopeElements[r.id] ?? [] });
+          if (r._calcInputSig !== expected) stale.push(r.id);
+        } catch {
+          // Never false-flag on a transient computation error.
+        }
+      }
+    }
+    return stale;
+  }, [rooms, envelopeElements]);
+
+  const recalcInputStaleRooms = useCallback(async () => {
+    const ids = inputStaleRoomIds;
+    if (ids.length === 0) return;
+    toast.info(`Syncing ${ids.length} room${ids.length === 1 ? '' : 's'} with saved data…`);
+    let ok = 0;
+    for (const zoneId of Object.keys(rooms)) {
+      for (const r of (rooms[zoneId] ?? []) as any[]) {
+        if (!ids.includes(r.id)) continue;
+        try {
+          await persistRoomAnalysisSnapshot(zoneId, r.id, r.systemId ?? zoneId, r, envelopeElements[r.id] ?? []);
+          ok += 1;
+        } catch (err) {
+          console.error('[LC] input-drift recalc failed for room', r.id, err);
+        }
+      }
+    }
+    toast.success(`Synced ${ok} room${ok === 1 ? '' : 's'} — saved data now matches inputs`);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [inputStaleRoomIds, rooms, envelopeElements]);
 
   // Firestore zone + system documents — authoritative for names, design-condition overrides, and empty zones.
   // /zones    — LC zones created by the user
@@ -3232,6 +3284,32 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
             <Button size="sm" className="h-8 text-xs gap-1.5 bg-blue-600 hover:bg-blue-700 shrink-0"
               onClick={() => void recalcCfmGovernanceRooms()}>
               Recalculate {cfmGovernanceStaleRoomIds.length} Room{cfmGovernanceStaleRoomIds.length === 1 ? '' : 's'}
+            </Button>
+          </div>
+        )}
+
+        {/* ── Input-drift staleness banner (general) ────────────────────────
+            Shown when a room's saved _calc* no longer match its current inputs
+            (envelope / gains / geometry / fresh-air changed without a re-save, or
+            the load engine version bumped). Equipment Selection, PDF & Excel read
+            the SAVED values, so this surfaces the same "Recompute & save all"
+            action — but automatically, instead of it being buried in Global. */}
+        {inputStaleRoomIds.length > 0 && (
+          <div className="rounded-xl border border-orange-300 dark:border-orange-700 bg-orange-50 dark:bg-orange-950/30 px-4 py-3 flex items-center justify-between gap-3">
+            <div className="flex items-start gap-2.5">
+              <AlertTriangle className="w-4 h-4 text-orange-600 dark:text-orange-400 shrink-0 mt-0.5" />
+              <div>
+                <p className="text-sm font-semibold text-orange-800 dark:text-orange-300">
+                  Saved data out of date — {inputStaleRoomIds.length} room{inputStaleRoomIds.length === 1 ? '' : 's'} don’t match their current inputs
+                </p>
+                <p className="text-xs text-orange-700 dark:text-orange-400 mt-0.5">
+                  Reports &amp; Equipment Selection read the saved loads. Recompute to sync them with the live calculation.
+                </p>
+              </div>
+            </div>
+            <Button size="sm" className="h-8 text-xs gap-1.5 bg-orange-600 hover:bg-orange-700 shrink-0"
+              onClick={() => void recalcInputStaleRooms()}>
+              Recompute &amp; save {inputStaleRoomIds.length} room{inputStaleRoomIds.length === 1 ? '' : 's'}
             </Button>
           </div>
         )}
