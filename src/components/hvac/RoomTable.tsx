@@ -1223,8 +1223,30 @@ function RoomDetail({
         </div>
         <div className="mt-1 pt-1 border-t border-slate-100 dark:border-slate-800 flex justify-between">
           <span className="text-gray-400">Governing →</span>
-          <span className="font-bold text-slate-800 dark:text-slate-100 font-mono">{Math.round(calc.designCFM).toLocaleString()} CFM</span>
+          <span className="font-bold text-slate-800 dark:text-slate-100 font-mono">{Math.round(calc.designCFM).toLocaleString()} CFM{calc.isTFA && !calc.isTfaOnly && calc.tfaCfm > 1 ? ' (space coil)' : ''}</span>
         </div>
+        {calc.isTFA && !calc.isTfaOnly && calc.tfaCfm > 1 && (() => {
+          // TFA: the room gets TWO streams — the space (recirc) coil + the DOAS treated fresh air.
+          // designCFM above is the space coil only (it sizes the coil & CFM/TR). This line surfaces
+          // the TOTAL air the room actually receives. Works for both delivery configs: one combined
+          // AHU (DOAS into AHU return), or AHU + a parallel DOAS duct — the total air is the same.
+          const total = calc.designCFM + calc.tfaCfm;
+          const vol = calculateRoomVolume(calc.rd);
+          const ach = vol > 0 ? (total * 60) / vol : 0;
+          const freshAch = vol > 0 ? (calc.tfaCfm * 60) / vol : 0;
+          const recircActualPct = total > 0 ? (calc.designCFM / total) * 100 : 0;
+          return (
+            <div className="mt-1 pt-1 border-t border-indigo-200 dark:border-indigo-900/60 text-[11px] leading-snug text-indigo-700 dark:text-indigo-300">
+              <div className="flex justify-between">
+                <span className="font-semibold">Total room supply (Space AHU + DOAS)</span>
+                <span className="font-bold font-mono">{Math.round(total).toLocaleString()} CFM ({ach.toFixed(1)} ACH)</span>
+              </div>
+              <p className="font-normal text-indigo-600 dark:text-indigo-400">
+                Fresh (DOAS) {Math.round(calc.tfaCfm).toLocaleString()} CFM = {freshAch.toFixed(1)} ACH — held at the OA FACPH minimum. Recirc (space coil) {Math.round(calc.designCFM).toLocaleString()} CFM = {recircActualPct.toFixed(0)}% of supply — floats up from the nominal recirc % as the cooling load grows; fresh never drops below its minimum. Coil &amp; CFM/TR above are sized on the space airflow only; this is the air the room receives (one combined AHU, or AHU + parallel DOAS — per project).
+              </p>
+            </div>
+          );
+        })()}
         {calc.coil.latentShortfallCFM > 1 && (
           <div className="mt-1 pt-1 border-t border-amber-200 dark:border-amber-900/60 text-[11px] leading-snug text-amber-700 dark:text-amber-400">
             <span className="font-semibold">Latent not met at ADP {Math.round(calc.coil.selectedADP)}°F.</span>{' '}

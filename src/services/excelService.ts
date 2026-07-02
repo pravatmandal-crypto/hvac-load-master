@@ -1528,6 +1528,17 @@ function buildRoomSheet(
     putV(ws, row, 2, r0(roomTfaCFM), S.total);
     putV(ws, row, 3, 'CFM', S.total);
     row++;
+    // Total air the room receives = space (recirc) coil + DOAS treated fresh. The coil above
+    // sizes on the space airflow only. Skip tfa-only rooms (no own coil — supply is the DOAS).
+    if (!record.room?._calcTfaOnly) {
+      const spaceCFM = Math.max(record.summer.designSupplyCFM, record.monsoon?.designSupplyCFM ?? 0);
+      putV(ws, row, 1, 'Total Room Supply  [space coil + DOAS fresh]', S.label);
+      putV(ws, row, 2, r0(spaceCFM + roomTfaCFM), S.total);
+      putV(ws, row, 3, 'CFM', S.total);
+      addMerge(ws, row, 4, row, COLS);
+      putV(ws, row, 4, `Total air the room receives = space (recirc) coil ${r0(spaceCFM)} + DOAS treated fresh ${r0(roomTfaCFM)} CFM. Fresh is held at the OA FACPH minimum; recirc floats up with the cooling load.`, S.note);
+      row++;
+    }
   }
 
   // Winter total ref cell — captured in the loop above (robust against the optional

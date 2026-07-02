@@ -2373,6 +2373,12 @@ export const generatePDFReport = (
             ? [
                 ['TFA Coil', `${n2((/monsoon/i.test(seasonLabel) ? Number(room._calcMonsoonTfaCoilTR) : Number(room._calcTfaCoilTR)) || m.tfaCoilTr || 0)} TR`],
                 ['TFA Airflow', `${n0(Number(room._calcTfaCfm) || m.tfaCfm || 0)} CFM`],
+                // Total air the room receives = space (recirc) coil + DOAS treated fresh.
+                // Design CFM (above) sizes the coil; this is the combined room airflow.
+                // Skip tfa-only rooms (no own coil — Design CFM already is the full supply).
+                ...(!m.isTfaOnly
+                  ? [['Total Supply', `${n0(m.designCfm + (Number(room._calcTfaCfm) || m.tfaCfm || 0))} CFM`]]
+                  : []),
               ]
             : []),
         ];
