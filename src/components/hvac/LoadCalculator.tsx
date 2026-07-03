@@ -925,6 +925,11 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
     let monsoonCooling = 0;
     let monsoonDesignCfm = 0;
     let monsoonCoilDehumCfm = 0;
+    // Seasonal diversity: Σ per-zone peak (each zone at its OWN worst season) vs the
+    // plant's coincident peak (max of season sums). When zones peak in different seasons
+    // the sum-of-zone-peaks exceeds the plant block load — that difference is real
+    // seasonal diversity, and it's why the zone strips can add up to more than the plant.
+    let sumOfZonePeaksCooling = 0;
     // Phase D aggregations — TFA-side numbers split out from plant totals.
     let tfaCoilBTUH = 0;          // Σ TFA-served room OA conditioning (summer)
     let tfaMonsoonCoilBTUH = 0;   // Σ TFA-served room OA conditioning (monsoon)
@@ -1069,6 +1074,8 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
         indoorHumidity: zoneRecord?.winterIndoorHumidity ?? defaultDesignConditions.winterIndoorHumidity ?? insideWinterHumidity,
       };
 
+      let zoneSummerCooling = 0;   // this zone's summer coil load (for seasonal diversity)
+      let zoneMonsoonCooling = 0;  // this zone's monsoon coil load (for seasonal diversity)
       for (const room of (zoneRooms as any[])) {
         const elements = (liveEnvelopeElements[room.id] || []) as EnvelopeElement[];
         // Shared resolver: room.tfaMode drives TFA serving; legacy link as fallback.
@@ -1076,6 +1083,7 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
         const summerSnapshot = calculateCoolingSnapshot(room, elements, zoneSummerDc, doas);
         const heatingSnapshot = calculateCoolingSnapshot(room, elements, zoneHeatingDc, doas);
 
+        zoneSummerCooling += summerSnapshot.grandTotal;
         summerCooling += summerSnapshot.grandTotal;
         summerDesignCfm += summerSnapshot.designSupplyCFM;
         summerCoilDehumCfm += summerSnapshot.coilDehumCFM;
@@ -1100,12 +1108,17 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
 
         if (includeMonsoon) {
           const monsoonSnapshot = calculateCoolingSnapshot(room, elements, zoneMonsoonDc, doas);
+          zoneMonsoonCooling += monsoonSnapshot.grandTotal;
           monsoonCooling += monsoonSnapshot.grandTotal;
           monsoonDesignCfm += monsoonSnapshot.designSupplyCFM;
           monsoonCoilDehumCfm += monsoonSnapshot.coilDehumCFM;
           if (doas) tfaMonsoonCoilBTUH += monsoonSnapshot.tfaCoilBTUH;
         }
       }
+      // This zone's peak = its own worst season (non-coincident with other zones).
+      sumOfZonePeaksCooling += includeMonsoon
+        ? Math.max(zoneSummerCooling, zoneMonsoonCooling)
+        : zoneSummerCooling;
     }
 
     const roomCount = Object.values(liveRooms).reduce((sum, r) => sum + (r as any[]).length, 0);
@@ -1125,6 +1138,11 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
     const peakSeason = governingLoadSeason;
     const totalCooling = governingLoadSeason === 'Monsoon' ? monsoonCooling : summerCooling;
     const totalDesignCfm = includeMonsoon ? Math.max(summerDesignCfm, monsoonDesignCfm) : summerDesignCfm;
+    // Seasonal diversity = Σ zone-peaks − plant coincident peak. > 0 means zones peak in
+    // different seasons, so the shared plant (block load) is smaller than adding each
+    // zone's own worst-season strip. Both are correct; the plant number is the one to size on.
+    const sumOfZonePeaksTR = sumOfZonePeaksCooling / 12000;
+    const seasonalDiversityTR = Math.max(0, sumOfZonePeaksTR - governingLoadTR);
     // CFM/TR ratio for sanity warning (typical 350-450 CFM/TR for comfort cooling).
     const cfmPerTRRatio = totalTR > 0 ? totalDesignCfm / totalTR : 0;
     const cfmRatioOutOfRange = cfmPerTRRatio > 0 && (cfmPerTRRatio < 350 || cfmPerTRRatio > 450);
@@ -1142,6 +1160,8 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
       governingAirflowSeason,
       governingLoadTR,
       governingCfmTR,
+      seasonalDiversityTR,
+      sumOfZonePeaksTR,
       cfmPerTRRatio,
       cfmRatioOutOfRange,
       summer: {
@@ -3458,6 +3478,11 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
                   {projectTotals.cfmRatioOutOfRange && (
                     <p className="mt-2 text-[11px] text-amber-700 dark:text-amber-400">
                       ⚠ Project CFM/TR ratio is {Math.round(projectTotals.cfmPerTRRatio)} — outside typical 350–450 band. Verify duct/fan sizing; AHU/IDU selection should satisfy CFM independently of plant TR.
+                    </p>
+                  )}
+                  {projectTotals.seasonalDiversityTR > 0.05 && (
+                    <p className="mt-2 text-[11px] text-slate-500 dark:text-slate-400" title="Zones peak in different seasons, so the shared plant never sees every zone at its own peak simultaneously.">
+                      Seasonal diversity: <span className="font-mono font-semibold text-slate-700 dark:text-slate-300">−{projectTotals.seasonalDiversityTR.toFixed(2)} TR</span> — zones peak in different seasons, so the plant block load ({projectTotals.governingLoadTR.toFixed(2)} TR) is below the sum of each zone&rsquo;s own peak ({projectTotals.sumOfZonePeaksTR.toFixed(2)} TR). Size the plant on the block load.
                     </p>
                   )}
                 </div>
