@@ -22,6 +22,8 @@ import {
   calculateRoomArea,
   calculateRoomVolume,
   calculateVentilationLoad,
+  calculateTFALoad,
+  resolveRoomTfa,
   getRecommendedAch,
   getMinAdp,
   resolveSupplyCfm,
@@ -371,8 +373,18 @@ function getDesignConditions(project: any, zos: any, season: 'summer' | 'monsoon
   };
 }
 
-function calcSeason(project: any, zos: any, room: any, elements: EnvelopeElement[], season: 'summer' | 'monsoon'): SeasonResult {
-  const dc = getDesignConditions(project, zos, season);
+function calcSeason(project: any, zos: any, room: any, elements: EnvelopeElement[], season: 'summer' | 'monsoon', equipSystems: any[] = []): SeasonResult {
+  const dc0 = getDesignConditions(project, zos, season);
+  // TFA/DOAS: when the room is DOAS-served the outdoor air is conditioned by the TFA
+  // unit, not the primary coil. Recompute with the cold-DOAS branch so the space coil
+  // load, ADP, dehumidified CFM and Design CFM reflect the reduced (sensible-leaning)
+  // coil — mirrors reportService.computeDetailed / ZoneList.computeZoneTotals.
+  const { doas, mode: tfaMode } = resolveRoomTfa(room, equipSystems);
+  const isTFA = !!doas;
+  const isTfaOnly = tfaMode === 'tfa-only';
+  const dc: any = isTFA
+    ? { ...dc0, ventilationStrategy: 'tfa-cold', tfaSupplyTemp: doas.tfaSupplyTemp, tfaSupplyHumidity: doas.tfaSupplyHumidity, ervSensibleEffectiveness: doas.ervSensibleEffectiveness, ervLatentEffectiveness: doas.ervLatentEffectiveness }
+    : dc0;
   const rd = {
     id: room.id, name: room.name ?? '', floor: room.floor ?? 'Ground',
     length: asNum(room.length), width: asNum(room.width), height: asNum(room.height),
@@ -387,6 +399,7 @@ function calcSeason(project: any, zos: any, room: any, elements: EnvelopeElement
   const vent   = calculateVentilationLoad(rd, dc);
   const int    = calculateInternalGains(rd);
   const env    = calculateEnvelopeGain(elements, dc);
+  const tfa    = isTFA ? calculateTFALoad(rd, dc) : null;
 
   const dPct = asNum(room.ductGainPct, 2);
   const fPct = asNum(room.fanGainPct,  3);
@@ -394,25 +407,33 @@ function calcSeason(project: any, zos: any, room: any, elements: EnvelopeElement
   const lPct = asNum(room.latentSafetyPercent   ?? room.latentSafetyFactor,  5);
   const oPct = asNum(room.overallSafetyPercent  ?? room.grandTotalSafetyFactor, 3);
 
-  const erBase = env.sensible + int.sensible + vent.sensible * BF;
+  // In TFA mode the bypass-OA terms go to the DOAS unit, not the primary coil.
+  const ventSenBF = isTFA ? 0 : vent.sensible * BF;
+  const ventLatBF = isTFA ? 0 : vent.latent * BF;
+  const erBase = env.sensible + int.sensible + ventSenBF;
   const para   = calculateParasiticGains(erBase, erBase, dPct, fPct);
   const ersh   = (erBase + para.ductGain + para.fanGain) * (1 + sPct / 100);
-  const erlh   = (int.latent + env.latent + vent.latent * BF) * (1 + lPct / 100);
-  const coilS  = ersh + vent.sensible * (1 - BF);
-  const coilL  = erlh + vent.latent   * (1 - BF);
+  const erlh   = (int.latent + env.latent + ventLatBF) * (1 + lPct / 100);
+  const oaSen  = isTFA ? 0 : vent.sensible * (1 - BF);
+  const oaLat  = isTFA ? 0 : vent.latent * (1 - BF);
+  const tfaOffSen = tfa ? tfa.spaceSensibleOffset : 0;
+  const tfaOffLat = tfa ? tfa.spaceLatentOffset : 0;
+  const coilS  = isTfaOnly ? 0 : (isTFA ? Math.max(0, ersh - tfaOffSen) : ersh + oaSen);
+  const coilL  = isTfaOnly ? 0 : (isTFA ? Math.max(0, erlh - tfaOffLat) : erlh + oaLat);
   const grand  = (coilS + coilL) * (1 + oPct / 100);
 
   const coil = calculateCoilParameters(coilS, coilL, dc.indoorTemp, dc.indoorHumidity, asNum(project?.altitude), BF, 35, 65, getMinAdp(project?.systemType, project?.adpBasis));
   const ach  = resolveTotalSupplyACH(getRecommendedAch(room.activityType ?? room.achProfile), asNum(room.facph), asNum(room.recircPct));
   const totCFM = (volume * ach) / 60;
   const freshAirCFM = (volume * asNum(room.facph)) / 60;
-  // Either/or supply basis (matches the app + PDF) — no longer max(dehumidified, ACH).
+  // Either/or supply basis (matches the app + PDF) — TFA-aware: the DOAS delivers the OA,
+  // so the space AHU is sized on the residual (post-credit) load / recirc balance.
   const supply = resolveSupplyCfm({
     basis: resolveRoomSupplyBasis(room.supplyCfmBasis, project?.supplyBasis),
-    isTFA: false, isTfaOnly: false,
+    isTFA, isTfaOnly,
     dehumidifiedCFM: coil.dehumidifiedCFM,
     minAdpSensibleCFM: coil.minAdpSensibleCFM,
-    totalSupplyCFM: totCFM, freshAirCFM, tfaCfm: 0,
+    totalSupplyCFM: totCFM, freshAirCFM, tfaCfm: tfa?.cfm ?? 0,
   });
   const desCFM = supply.designSupplyCFM;
   const heating = calculateHeatingLoad(rd, elements, dc);
@@ -483,6 +504,7 @@ function makeUnique(preferred: string, used: Set<string>): string {
 function toRoomRecords(
   project: any, systems: any[], zones: any[],
   rooms: Record<string, any[]>, elements: Record<string, EnvelopeElement[]>,
+  equipSystems: any[] = [],
 ): RoomRecord[] {
   const sysById  = new Map((systems || []).map(s => [s.id, s]));
   const zoneById = new Map((zones   || []).map(z => [z.id, z]));
@@ -500,8 +522,8 @@ function toRoomRecords(
     for (const room of (rooms[groupId] || [])) {
       const sheetName = makeUnique(`${zoneName}_${safeStr(room?.name, 'Room')}`, used);
       const els = elements?.[room.id] ?? [];
-      const sum = calcSeason(project, zos, room, els, 'summer');
-      const mon = project?.includeMonsoon ? calcSeason(project, zos, room, els, 'monsoon') : undefined;
+      const sum = calcSeason(project, zos, room, els, 'summer', equipSystems);
+      const mon = project?.includeMonsoon ? calcSeason(project, zos, room, els, 'monsoon', equipSystems) : undefined;
       const win = calcWinter(project, zos, room, els);
 
       // Plant TR is load-only — CFM/TR is a sanity ratio, not a sizing input.
@@ -1737,7 +1759,7 @@ export const generateExcelReport = (
   buildExcelStamp(project);
   const wb = XLSX.utils.book_new();
   const eq = equipSystems ?? [];
-  const records = toRoomRecords(project, systems, zones, rooms, envelopeElements);
+  const records = toRoomRecords(project, systems, zones, rooms, envelopeElements, eq);
   const refs: RoomSheetRefs[] = [];
 
   // Build room sheets first (their cell refs are needed by Load Summary)
