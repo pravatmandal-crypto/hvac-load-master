@@ -6955,17 +6955,20 @@ export default function EquipmentSelection({
                         <div className="divide-y divide-slate-100 dark:divide-slate-700">
                           {(rooms as any[]).map((room: any) => {
                             const reqs = getRoomReqs(room.id);
+                            // Governing (max summer/monsoon) — the season the unit must satisfy.
+                            const reqTR  = reqs.overallRequiredTR || reqs.requiredTR;
+                            const reqCFM = reqs.overallDesignCFM || reqs.designCFM;
                             const units: IDUSelection[] = (selectedSystem.roomSelections ?? {})[room.id] ?? [];
                             const totalUnitTR = units.reduce((s, u) => s + u.trCapacity, 0);
-                            const fits = totalUnitTR >= reqs.requiredTR * 0.98;
+                            const fits = totalUnitTR >= reqTR * 0.98;
                             return (
                               <div key={room.id} className="p-3 space-y-2">
                                 <div className="flex items-center justify-between">
                                   <div className="flex items-center gap-2">
                                     <span className="text-sm font-semibold text-slate-800 dark:text-slate-200">{room.name}</span>
                                     {room.floor && <span className="text-xs text-slate-400 dark:text-slate-500">{room.floor}</span>}
-                                    {reqs.requiredTR > 0 && (
-                                      <span className="text-sm font-mono text-slate-500 dark:text-slate-400">{reqs.requiredTR.toFixed(2)} TR req.</span>
+                                    {reqTR > 0 && (
+                                      <span className="text-sm font-mono text-slate-500 dark:text-slate-400">{reqTR.toFixed(2)} TR req.</span>
                                     )}
                                   </div>
                                   <div className="flex items-center gap-2">
@@ -6975,7 +6978,7 @@ export default function EquipmentSelection({
                                       </span>
                                     )}
                                     <Button size="sm" variant="outline" className="h-8 text-sm px-2 gap-0.5 border-teal-300 dark:border-teal-700 text-teal-700 dark:text-teal-400 hover:bg-teal-50 dark:hover:bg-teal-900/20"
-                                      onClick={() => setRoomUnitPicker({ roomId: room.id, roomName: room.name, reqTR: reqs.requiredTR, reqCFM: reqs.designCFM })}>
+                                      onClick={() => setRoomUnitPicker({ roomId: room.id, roomName: room.name, reqTR, reqCFM })}>
                                       + Add Unit
                                     </Button>
                                   </div>
@@ -7300,8 +7303,11 @@ export default function EquipmentSelection({
                             const zoneRooms = zone.roomIds
                               .map((id: string) => rooms.find((r: any) => r.id === id))
                               .filter(Boolean) as any[];
-                            const totalTR = zoneRooms.reduce((s: number, r: any) => s + (Number(r._calcRequiredTR) || 0), 0);
-                            const totalCFM = zoneRooms.reduce((s: number, r: any) => s + (Number(r._calcDesignCFM) || 0), 0);
+                            // Governing (max summer/monsoon) required TR & design CFM — the season
+                            // the equipment must actually satisfy. Using the summer-only _calc*
+                            // here under-sized monsoon-governing zones (picker + fit badge).
+                            const totalTR = zoneRooms.reduce((s: number, r: any) => s + (Number(r._calcOverallRequiredTR ?? r._calcRequiredTR) || 0), 0);
+                            const totalCFM = zoneRooms.reduce((s: number, r: any) => s + (Number(r._calcOverallDesignCFM ?? r._calcDesignCFM) || 0), 0);
                             return (
                               <React.Fragment key={zone.id}>
                                 <TableRow className="bg-teal-50/60 border-t-2 border-teal-200">
@@ -7339,12 +7345,15 @@ export default function EquipmentSelection({
                             .map(roomId => {
                             const room    = rooms.find(r => r.id === roomId);
                             const reqs    = getRoomReqs(roomId);
+                            // Governing (max summer/monsoon) — the season the unit must satisfy.
+                            const reqTR   = reqs.overallRequiredTR || reqs.requiredTR;
+                            const reqCFM  = reqs.overallDesignCFM || reqs.designCFM;
                             const qty     = roomQuantities[roomId] ?? 1;
-                            const trPerUnit = reqs.requiredTR > 0 ? reqs.requiredTR / qty : 0;
-                            const cfmPerUnit = reqs.designCFM > 0 ? reqs.designCFM / qty : 0;
+                            const trPerUnit = reqTR > 0 ? reqTR / qty : 0;
+                            const cfmPerUnit = reqCFM > 0 ? reqCFM / qty : 0;
                             const idus  = normalizeIDUList((selectedSystem.iduSelections as any)[roomId]);
                             const totalInstalledTR = idus.reduce((s, u) => s + u.trCapacity * (u.quantity ?? 1), 0);
-                            const fit   = idus.length > 0 ? getFitStatus(totalInstalledTR, 0, reqs.requiredTR, 0) : 'unknown';
+                            const fit   = idus.length > 0 ? getFitStatus(totalInstalledTR, 0, reqTR, 0) : 'unknown';
                             return room ? (
                               <TableRow key={roomId}
                                 className={cn(idus.length === 0 && 'bg-amber-50/30', zoneMode && zoneSelected.has(roomId) && 'bg-teal-50')}
@@ -7369,7 +7378,7 @@ export default function EquipmentSelection({
                                   </div>
                                 </TableCell>
                                 <TableCell className="text-xs text-slate-400">{room?.zoneName ?? '—'}</TableCell>
-                                <TableCell className="text-right font-mono text-sm">{reqs.requiredTR > 0 ? reqs.requiredTR.toFixed(2) : '—'}</TableCell>
+                                <TableCell className="text-right font-mono text-sm">{reqTR > 0 ? reqTR.toFixed(2) : '—'}</TableCell>
                                 <TableCell className="text-xs" colSpan={2}>
                                   {idus.length > 0 ? (
                                     <div className="flex flex-wrap gap-1">
@@ -7390,7 +7399,7 @@ export default function EquipmentSelection({
                                 <TableCell>
                                   <div className="flex gap-1 justify-end">
                                     <Button size="sm" variant="outline" className="h-8 text-sm px-2"
-                                      onClick={() => setIduPicker({ roomId, roomName: room?.name ?? roomId, reqTR: reqs.requiredTR, reqCFM: reqs.designCFM })}>
+                                      onClick={() => setIduPicker({ roomId, roomName: room?.name ?? roomId, reqTR, reqCFM })}>
                                       + Add IDU
                                     </Button>
                                   </div>
