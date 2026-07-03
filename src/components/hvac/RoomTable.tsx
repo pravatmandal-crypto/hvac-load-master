@@ -2598,6 +2598,8 @@ function calculateRoomStripMetrics(room: any, elements: any[], dc: DesignConditi
   const sensibleSafetyFactor = Number(room.sensibleSafetyPercent ?? 10) / 100;
   const latentSafetyFactor = Number(room.latentSafetyPercent ?? 5) / 100;
   const achCFM = (calculateRoomVolume(rd) * resolveTotalSupplyACH(getRecommendedAch(room.achProfile ?? room.activityType), rd.facph, Number(room.recircPct) || 0)) / 60;
+  const stripFreshAirCFM = (calculateRoomVolume(rd) * rd.facph) / 60;
+  const stripSupplyBasis = resolveRoomSupplyBasis(room.supplyCfmBasis, project?.supplyBasis);
 
   // TFA/DOAS: same shared resolver as everywhere else. When DOAS-served, the strip
   // shows the REDUCED primary (space) TR and the TFA coil separately.
@@ -2636,8 +2638,20 @@ function calculateRoomStripMetrics(room: any, elements: any[], dc: DesignConditi
       65,
       getMinAdp(project?.systemType, project?.adpBasis),
     );
-    // Fixed-system-ADP basis — matches Step-3 panel and ZoneList; see CLAUDE.md invariant.
-    const designSupplyCFM = Math.max(coil.minAdpSensibleCFM, achCFM);
+    // Space-coil supply CFM via the SHARED resolver — same path as useRoomCalc (room
+    // detail) and ZoneList (zone card), so the strip can't drift. Critically, for a
+    // DOAS-served room this subtracts the DOAS fresh-air (tfaCfm) from the air-change
+    // floor — the DOAS delivers that air, so the space coil isn't sized to move it too.
+    // (Old code used max(minAdpSensibleCFM, achCFM), double-counting the DOAS airflow.)
+    const designSupplyCFM = resolveSupplyCfm({
+      basis: stripSupplyBasis,
+      isTFA, isTfaOnly,
+      dehumidifiedCFM: coil.dehumidifiedCFM,
+      minAdpSensibleCFM: coil.minAdpSensibleCFM,
+      totalSupplyCFM: achCFM,
+      freshAirCFM: stripFreshAirCFM,
+      tfaCfm: tfa?.cfm ?? 0,
+    }).designSupplyCFM;
     const tfaCoilTR = tfa ? (tfa.coilSensible + tfa.coilLatent) / 12000 : 0;
     return { totalBTU: grandTotal, totalTR: grandTotal / 12000, designSupplyCFM, tfaCoilTR };
   };
