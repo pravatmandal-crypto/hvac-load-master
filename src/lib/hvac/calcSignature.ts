@@ -26,7 +26,12 @@
  * as stale and gets recomputed (generalises the hand-written engine-change traps).
  */
 
-export const CALC_VERSION = 1;
+// v2 (2026-07-03): force a re-flag of every room after the CFM/airflow stack + to sweep
+// pre-existing stale saved snapshots (e.g. Copy of GURT: saved 9.88 TR / 3,474 CFM vs live
+// 16.14 / 4,503 — OA missing from the coil on FA-on-AHU rooms). Bumping the version makes
+// every stored `v1:` sig mismatch, so the LC staleness banner prompts a one-click recompute
+// on every project regardless of whether its scalar inputs changed.
+export const CALC_VERSION = 2;
 
 /** Short, stable djb2 hash → base36 string. Keeps the persisted fingerprint tiny. */
 function hashString(s: string): string {
