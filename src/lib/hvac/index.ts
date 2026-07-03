@@ -77,6 +77,7 @@ export { calculateParasiticGains } from './parasitic';
 
 // Supply-air CFM basis resolver (DSCFM vs ACH preset)
 export { resolveSupplyCfm, computeAirflowSplit, resolveDesignMode, resolveRoomSupplyBasis, resolveTotalSupplyACH, type SupplyCfmBasis, type SupplyCfmResult, type DesignMode, type AirflowSplit, type AirflowSplitInputs } from './supplyCfm';
+export { buildAirflowSchedule, type AirflowScheduleZone, type AirflowScheduleRoom, type AirflowZoneInput, type AirflowMode } from './airflowSchedule';
 
 // ASHRAE 62.1 ventilation
 export {

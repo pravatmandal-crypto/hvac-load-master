@@ -15,7 +15,7 @@ import {
   getMinAdp,
   calculateSingleElementGain,
 } from '../lib/hvac-logic';
-import { resolveSupplyCfm, resolveRoomSupplyBasis, resolveTotalSupplyACH } from '../lib/hvac/supplyCfm';
+import { resolveSupplyCfm, resolveRoomSupplyBasis, resolveTotalSupplyACH, computeAirflowSplit } from '../lib/hvac/supplyCfm';
 
 // DOAS/TFA systems for the report currently being built. Set once at the top of
 // each (synchronous) report-generation entry point; read by computeDetailed to
@@ -1936,6 +1936,76 @@ export const generatePDFReport = (
             else if (s === 'Undersized') data.cell.styles.textColor = [180, 50, 50] as [number,number,number];
             else                    data.cell.styles.textColor = [120, 120, 120] as [number,number,number];
           }
+        },
+        margin: { left: PAGE.left, right: PAGE.right },
+      });
+    }
+  }
+
+  // ── Airflow Schedule (recirc / fresh air) for terminal & duct layout ──────
+  {
+    const afBody: any[][] = [];
+    let projRecirc = 0, projFacfm = 0, projTotal = 0;
+    for (const entity of entities) {
+      if (entity.rooms.length === 0) continue;
+      const sumDc = resolveEntityDC(entity, summer, project);
+      const monDc = monsoon ? resolveEntityDC(entity, monsoon, project) : null;
+      afBody.push([{ content: entity.name, colSpan: 5, styles: { fontStyle: 'bold' as const, fillColor: C.panelDark, textColor: C.ink, fontSize: 7.5 } }]);
+      let zRecirc = 0, zFacfm = 0, zTotal = 0;
+      for (const room of entity.rooms) {
+        const els = envelopeElements[room.id] || [];
+        const sm = computeDetailed(room, els, sumDc, project);
+        const govCfm = monDc
+          ? Math.max(sm.designCfm, computeDetailed(room, els, monDc, project).designCfm)
+          : sm.designCfm;
+        const split = computeAirflowSplit({
+          designSupplyCFM: govCfm,
+          freshAirCFM: sm.faCfm,
+          tfaCfm: sm.tfaCfm,
+          isTFA: sm.isTFA,
+          isTfaOnly: sm.isTfaOnly,
+        });
+        const modeLabel = sm.isTfaOnly ? 'TFA-only' : sm.isTFA ? 'Central TFA' : 'On unit';
+        afBody.push([`  ${room.name ?? 'Unnamed'}`, modeLabel, n0(split.recircCFM), n0(split.freshAirCFM), n0(split.totalSupplyCFM)]);
+        zRecirc += split.recircCFM; zFacfm += split.freshAirCFM; zTotal += split.totalSupplyCFM;
+      }
+      afBody.push([
+        { content: `${entity.name} subtotal`, colSpan: 2, styles: { fontStyle: 'bold' as const, halign: 'right' as const } },
+        { content: n0(zRecirc), styles: { fontStyle: 'bold' as const, halign: 'right' as const } },
+        { content: n0(zFacfm), styles: { fontStyle: 'bold' as const, halign: 'right' as const } },
+        { content: n0(zTotal), styles: { fontStyle: 'bold' as const, halign: 'right' as const } },
+      ]);
+      projRecirc += zRecirc; projFacfm += zFacfm; projTotal += zTotal;
+    }
+    if (afBody.length > 0) {
+      y = startBody(doc, project);
+      y = sectionBanner(doc, '3A.  AIRFLOW SCHEDULE  —  RECIRC / FRESH AIR (FACFM)', y, C);
+      y += 2;
+      doc.setFont('helvetica', 'italic');
+      doc.setFontSize(7);
+      doc.setTextColor(120, 120, 120);
+      doc.text('Recirc = Total - Fresh. Total supply = governing (worst-season) airflow. Sizes supply diffusers = Total; return/recirc = Recirc; OA intake or DOAS branch = FACFM.', PAGE.left, y);
+      doc.setFont('helvetica', 'normal');
+      y += 5;
+      afBody.push([
+        { content: 'PROJECT TOTAL', colSpan: 2, styles: { fontStyle: 'bold' as const, halign: 'right' as const } },
+        { content: n0(projRecirc), styles: { fontStyle: 'bold' as const, halign: 'right' as const } },
+        { content: n0(projFacfm), styles: { fontStyle: 'bold' as const, halign: 'right' as const } },
+        { content: n0(projTotal), styles: { fontStyle: 'bold' as const, halign: 'right' as const } },
+      ]);
+      autoTable(doc, {
+        startY: y,
+        head: [['Room', 'Fresh air', 'Recirc CFM', 'Fresh (FACFM)', 'Total Supply CFM']],
+        body: afBody,
+        theme: 'grid',
+        styles: { fontSize: 7, cellPadding: 1.5, textColor: C.ink },
+        headStyles: { fillColor: C.accent, textColor: C.headFg, fontStyle: 'bold' },
+        columnStyles: {
+          0: { cellWidth: 50 },
+          1: { cellWidth: 26 },
+          2: { halign: 'right' as const, cellWidth: 30 },
+          3: { halign: 'right' as const, cellWidth: 32 },
+          4: { halign: 'right' as const, cellWidth: 34 },
         },
         margin: { left: PAGE.left, right: PAGE.right },
       });

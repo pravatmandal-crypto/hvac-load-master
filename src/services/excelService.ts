@@ -29,6 +29,8 @@ import {
   resolveTotalSupplyACH,
   type DesignConditions,
   type EnvelopeElement,
+  buildAirflowSchedule,
+  type AirflowZoneInput,
 } from '../lib/hvac';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -1643,6 +1645,86 @@ function buildRoomSheet(
 
 // ─── Main export ──────────────────────────────────────────────────────────────
 
+// ─── Sheet: Airflow Schedule (recirc / fresh air, for terminal & duct layout) ──
+function buildAirflowScheduleSheet(
+  project: any,
+  systems: any[],
+  zones: any[],
+  rooms: Record<string, any[]>,
+  envelopeElements: Record<string, EnvelopeElement[]>,
+  equipSystems: any[],
+): XLSX.WorkSheet {
+  const ws: XLSX.WorkSheet = {};
+  const incMon = !!project?.includeMonsoon;
+  const COLS = 5;
+  let row = 1;
+
+  addMerge(ws, row, 1, row, COLS);
+  putV(ws, row, 1, `AIRFLOW SCHEDULE (RECIRC / FRESH AIR) — ${safeStr(project?.name, 'PROJECT').toUpperCase()}`, S.titleSm);
+  row++;
+  addMerge(ws, row, 1, row, COLS);
+  putV(ws, row, 1, `Date: ${fmtDate()}  |  Recirc = Total - Fresh.  Total = governing (worst-season) airflow.  Supply diffusers = Total  ·  Return/recirc = Recirc  ·  OA intake or DOAS branch = FACFM`, mkS({ sz: 9, italic: true }, CLR.sectionBg));
+  row += 2;
+
+  // Shared TFA-aware builder — same split (Recirc = Total - FACFM) as the app + PDF.
+  const zoneInputs: AirflowZoneInput[] = [];
+  for (const [zoneId, zoneRooms] of Object.entries(rooms)) {
+    const zos = zones.find((z: any) => z.id === zoneId) ?? systems.find((s: any) => s.id === zoneId);
+    zoneInputs.push({
+      zoneId,
+      zoneName: zos?.name ?? 'Zone',
+      summerDc: getDesignConditions(project, zos, 'summer'),
+      monsoonDc: incMon ? getDesignConditions(project, zos, 'monsoon') : null,
+      rooms: (zoneRooms as any[]).map((r) => ({ room: r, elements: envelopeElements[r.id] || [] })),
+    });
+  }
+  const schedule = buildAirflowSchedule({ zones: zoneInputs, project, equipSystems, zoneDocs: zones });
+
+  const hdrRow = row;
+  ['Room', 'Fresh Air', 'Recirc CFM', 'Fresh (FACFM)', 'Total Supply CFM'].forEach((h, i) => putV(ws, row, i + 1, h, S.tableHdr));
+  row++;
+  const dataStart = row;
+
+  let pRe = 0, pFa = 0, pTo = 0;
+  for (const z of schedule) {
+    addMerge(ws, row, 1, row, COLS);
+    putV(ws, row, 1, `▶  ${z.zoneName}`, S.greenHdr);
+    row++;
+    for (const r of z.rooms) {
+      const modeLabel = r.mode === 'tfa-only' ? 'TFA-only' : r.mode === 'tfa-served' ? 'Central TFA' : 'On unit';
+      putV(ws, row, 1, r.roomName, S.calc);
+      putV(ws, row, 2, modeLabel, S.calc);
+      putV(ws, row, 3, r0(r.recirc), S.calcC);
+      putV(ws, row, 4, r0(r.facfm), S.calcC);
+      putV(ws, row, 5, r0(r.totalSupply), S.calcC);
+      row++;
+    }
+    putV(ws, row, 1, `${z.zoneName} subtotal`, S.total);
+    putV(ws, row, 2, '', S.total);
+    putV(ws, row, 3, r0(z.recirc), S.total);
+    putV(ws, row, 4, r0(z.facfm), S.total);
+    putV(ws, row, 5, r0(z.totalSupply), S.total);
+    row++;
+    pRe += z.recirc; pFa += z.facfm; pTo += z.totalSupply;
+  }
+  if (row > dataStart) addBorders(ws, dataStart, 1, row - 1, COLS);
+
+  putV(ws, row, 1, 'PROJECT TOTAL', S.total);
+  putV(ws, row, 2, '', S.total);
+  putV(ws, row, 3, r0(pRe), S.total);
+  putV(ws, row, 4, r0(pFa), S.total);
+  putV(ws, row, 5, r0(pTo), S.total);
+  addBorders(ws, row, 1, row, COLS);
+  row++;
+
+  ws['!cols'] = [{ wch: 28 }, { wch: 14 }, { wch: 13 }, { wch: 15 }, { wch: 17 }];
+  ws['!rows'] = [{ hpt: 30 }];
+  (ws as any)['!freeze'] = { xSplit: 0, ySplit: hdrRow };
+  setRef(ws, row + 1, COLS);
+  (ws as any)['!pageSetup'] = { paperSize: 9, orientation: 'portrait', fitToWidth: 1, fitToHeight: 0 };
+  return ws;
+}
+
 export const generateExcelReport = (
   project: any,
   systems: any[],
@@ -1670,6 +1752,7 @@ export const generateExcelReport = (
   XLSX.utils.book_append_sheet(wb, buildCoverSheet(project, records, eq, userProfile), 'Cover');
   XLSX.utils.book_append_sheet(wb, buildDesignConditionsSheet(project), 'Design Conditions');
   XLSX.utils.book_append_sheet(wb, buildZoneSummarySheet(project, records, eq), 'Zone Summary');
+  XLSX.utils.book_append_sheet(wb, buildAirflowScheduleSheet(project, systems, zones, rooms, envelopeElements, eq), 'Airflow Schedule');
   XLSX.utils.book_append_sheet(wb, buildEquipmentScheduleSheet(project, eq, rooms), 'Equipment Schedule');
   XLSX.utils.book_append_sheet(wb, buildSummarySheet(project, refs), 'Load Summary');
 
@@ -1684,6 +1767,7 @@ export const generateExcelReport = (
       { Hidden: 0 as 0, TabColor: { rgb: '4472C4' } }, // Cover
       { Hidden: 0 as 0, TabColor: { rgb: '2E75B6' } }, // Design Conditions
       { Hidden: 0 as 0, TabColor: { rgb: '375623' } }, // Zone Summary
+      { Hidden: 0 as 0, TabColor: { rgb: '548235' } }, // Airflow Schedule
       { Hidden: 0 as 0, TabColor: { rgb: '7030A0' } }, // Equipment Schedule
       { Hidden: 0 as 0, TabColor: { rgb: 'C55A11' } }, // Load Summary
       ...roomSheets.map(() => ({ Hidden: 0 as 0, TabColor: { rgb: '1F4E79' } })),
