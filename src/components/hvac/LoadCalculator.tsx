@@ -1,5 +1,5 @@
 ﻿
-import { useState, useEffect, useMemo, useRef, useCallback, startTransition, forwardRef, useImperativeHandle } from 'react';
+import { useState, useEffect, useMemo, useRef, useCallback, startTransition, forwardRef, useImperativeHandle, Fragment } from 'react';
 import {
   DndContext,
   useSensors,
@@ -38,6 +38,7 @@ import {
   getRecommendedAch,
   getMinAdp,
   resolveSupplyCfm,
+  computeAirflowSplit,
   resolveRoomSupplyBasis,
   resolveTotalSupplyACH,
   resolveRoomTfa,
@@ -265,6 +266,7 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
   const [zoneConditionDraftOverrides, setZoneConditionDraftOverrides] = useState<Record<string, Partial<Zone>>>({});
   const [systemConditionDraftOverrides, setSystemConditionDraftOverrides] = useState<Record<string, Partial<HVACSystem>>>({});
   const [projectPsychroOpen, setProjectPsychroOpen] = useState(false);
+  const [airflowScheduleOpen, setAirflowScheduleOpen] = useState(false);
 
 
   const userRole = userProfile?.role;
@@ -930,6 +932,10 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
     // the sum-of-zone-peaks exceeds the plant block load — that difference is real
     // seasonal diversity, and it's why the zone strips can add up to more than the plant.
     let sumOfZonePeaksCooling = 0;
+    // Airflow schedule for terminal / duct layout — per room grouped by zone, plus
+    // zone subtotals. Recirc = total supply − FACFM via the shared computeAirflowSplit.
+    type AirflowRow = { roomId: string; roomName: string; totalSupply: number; recirc: number; facfm: number; mode: 'no-tfa' | 'tfa-served' | 'tfa-only' };
+    const airflowSchedule: Array<{ zoneId: string; zoneName: string; rooms: AirflowRow[]; totalSupply: number; recirc: number; facfm: number }> = [];
     // Phase D aggregations — TFA-side numbers split out from plant totals.
     let tfaCoilBTUH = 0;          // Σ TFA-served room OA conditioning (summer)
     let tfaMonsoonCoilBTUH = 0;   // Σ TFA-served room OA conditioning (monsoon)
@@ -1040,6 +1046,8 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
         grandTotal,
         designSupplyCFM,
         coilDehumCFM: designSupplyCFM,
+        freshAirCFM,
+        isTFA,
         heating: calculateHeatingLoad(rd, elements, dcEff),
         area: rd.length * rd.width,
         // Per-room TFA coil load — aggregated by the caller into project TFA totals.
@@ -1076,6 +1084,7 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
 
       let zoneSummerCooling = 0;   // this zone's summer coil load (for seasonal diversity)
       let zoneMonsoonCooling = 0;  // this zone's monsoon coil load (for seasonal diversity)
+      const zoneAirflowRows: AirflowRow[] = [];
       for (const room of (zoneRooms as any[])) {
         const elements = (liveEnvelopeElements[room.id] || []) as EnvelopeElement[];
         // Shared resolver: room.tfaMode drives TFA serving; legacy link as fallback.
@@ -1106,14 +1115,46 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
           }
         }
 
+        let monsoonDesignForRoom = 0;
         if (includeMonsoon) {
           const monsoonSnapshot = calculateCoolingSnapshot(room, elements, zoneMonsoonDc, doas);
+          monsoonDesignForRoom = monsoonSnapshot.designSupplyCFM;
           zoneMonsoonCooling += monsoonSnapshot.grandTotal;
           monsoonCooling += monsoonSnapshot.grandTotal;
           monsoonDesignCfm += monsoonSnapshot.designSupplyCFM;
           monsoonCoilDehumCfm += monsoonSnapshot.coilDehumCFM;
           if (doas) tfaMonsoonCoilBTUH += monsoonSnapshot.tfaCoilBTUH;
         }
+
+        // Airflow schedule row — governing (cross-season) space CFM + shared split.
+        const govDesignCFM = includeMonsoon
+          ? Math.max(summerSnapshot.designSupplyCFM, monsoonDesignForRoom)
+          : summerSnapshot.designSupplyCFM;
+        const split = computeAirflowSplit({
+          designSupplyCFM: govDesignCFM,
+          freshAirCFM: summerSnapshot.freshAirCFM,
+          tfaCfm: summerSnapshot.tfaCfm,
+          isTFA: summerSnapshot.isTFA,
+          isTfaOnly: summerSnapshot.isTfaOnly,
+        });
+        zoneAirflowRows.push({
+          roomId: room.id,
+          roomName: room.name ?? 'Unnamed',
+          totalSupply: split.totalSupplyCFM,
+          recirc: split.recircCFM,
+          facfm: split.freshAirCFM,
+          mode: summerSnapshot.isTfaOnly ? 'tfa-only' : summerSnapshot.isTFA ? 'tfa-served' : 'no-tfa',
+        });
+      }
+      if (zoneAirflowRows.length > 0) {
+        airflowSchedule.push({
+          zoneId,
+          zoneName: zoneRecord?.name ?? 'Unzoned',
+          rooms: zoneAirflowRows,
+          totalSupply: zoneAirflowRows.reduce((s, r) => s + r.totalSupply, 0),
+          recirc: zoneAirflowRows.reduce((s, r) => s + r.recirc, 0),
+          facfm: zoneAirflowRows.reduce((s, r) => s + r.facfm, 0),
+        });
       }
       // This zone's peak = its own worst season (non-coincident with other zones).
       sumOfZonePeaksCooling += includeMonsoon
@@ -1162,6 +1203,7 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
       governingCfmTR,
       seasonalDiversityTR,
       sumOfZonePeaksTR,
+      airflowSchedule,
       cfmPerTRRatio,
       cfmRatioOutOfRange,
       summer: {
@@ -3486,18 +3528,88 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
                     </p>
                   )}
                 </div>
-                <Button
-                  type="button"
-                  size="sm"
-                  variant="outline"
-                  onClick={() => setProjectPsychroOpen((prev) => !prev)}
-                  aria-expanded={projectPsychroOpen}
-                  className="text-xs h-8 shrink-0"
-                >
-                  {projectPsychroOpen ? 'Hide Project Psychrometric' : 'Show Project Psychrometric'}
-                </Button>
+                <div className="flex items-center gap-2 shrink-0">
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    onClick={() => setAirflowScheduleOpen((prev) => !prev)}
+                    aria-expanded={airflowScheduleOpen}
+                    className="text-xs h-8"
+                  >
+                    {airflowScheduleOpen ? 'Hide Airflow Schedule' : 'Airflow Schedule (layout)'}
+                  </Button>
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    onClick={() => setProjectPsychroOpen((prev) => !prev)}
+                    aria-expanded={projectPsychroOpen}
+                    className="text-xs h-8"
+                  >
+                    {projectPsychroOpen ? 'Hide Project Psychrometric' : 'Show Project Psychrometric'}
+                  </Button>
+                </div>
               </div>
             </div>
+
+            {airflowScheduleOpen && (
+              <div className="border-t border-slate-200/80 dark:border-slate-700/80 p-4 bg-white/90 dark:bg-slate-800/90">
+                <div className="mx-auto w-full max-w-5xl space-y-2">
+                  <div>
+                    <h3 className="font-semibold text-gray-900 dark:text-slate-100 text-sm">Airflow Schedule — for air-terminal &amp; duct layout</h3>
+                    <p className="text-xs text-gray-400 mt-0.5">
+                      Per room &amp; zone. <strong>Total supply</strong> sizes supply diffusers / main duct · <strong>Recirc</strong> sizes the return/recirc path · <strong>Fresh air (FACFM)</strong> sizes the OA intake or DOAS branch. Recirc = Total − Fresh; Total supply is the governing (worst-season) airflow.
+                    </p>
+                  </div>
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-xs border-collapse">
+                      <thead>
+                        <tr className="border-b border-slate-300 dark:border-slate-600 text-slate-500 dark:text-slate-400 text-[10px] uppercase tracking-wide">
+                          <th className="text-left py-1.5 pr-2 font-semibold">Room</th>
+                          <th className="text-left py-1.5 px-2 font-semibold">Fresh air</th>
+                          <th className="text-right py-1.5 px-2 font-semibold">Recirc CFM</th>
+                          <th className="text-right py-1.5 px-2 font-semibold">Fresh (FACFM)</th>
+                          <th className="text-right py-1.5 pl-2 font-semibold">Total supply</th>
+                        </tr>
+                      </thead>
+                      <tbody className="font-mono">
+                        {projectTotals.airflowSchedule.map((z) => (
+                          <Fragment key={z.zoneId}>
+                            <tr className="bg-slate-100 dark:bg-slate-800/80">
+                              <td colSpan={5} className="py-1 px-2 font-sans font-semibold text-slate-700 dark:text-slate-200">{z.zoneName}</td>
+                            </tr>
+                            {z.rooms.map((r) => (
+                              <tr key={r.roomId} className="border-b border-slate-100 dark:border-slate-800">
+                                <td className="py-1 pr-2 font-sans text-slate-700 dark:text-slate-300">{r.roomName}</td>
+                                <td className="py-1 px-2 font-sans text-[10px] text-slate-400">
+                                  {r.mode === 'tfa-served' ? 'Central TFA' : r.mode === 'tfa-only' ? 'TFA-only' : 'On unit'}
+                                </td>
+                                <td className="py-1 px-2 text-right text-slate-700 dark:text-slate-300">{Math.round(r.recirc).toLocaleString()}</td>
+                                <td className="py-1 px-2 text-right text-teal-700 dark:text-teal-400">{Math.round(r.facfm).toLocaleString()}</td>
+                                <td className="py-1 pl-2 text-right font-semibold text-slate-900 dark:text-slate-100">{Math.round(r.totalSupply).toLocaleString()}</td>
+                              </tr>
+                            ))}
+                            <tr className="border-b-2 border-slate-300 dark:border-slate-600 text-slate-600 dark:text-slate-300">
+                              <td className="py-1 pr-2 font-sans font-semibold text-right" colSpan={2}>{z.zoneName} subtotal</td>
+                              <td className="py-1 px-2 text-right font-semibold">{Math.round(z.recirc).toLocaleString()}</td>
+                              <td className="py-1 px-2 text-right font-semibold text-teal-700 dark:text-teal-400">{Math.round(z.facfm).toLocaleString()}</td>
+                              <td className="py-1 pl-2 text-right font-semibold">{Math.round(z.totalSupply).toLocaleString()}</td>
+                            </tr>
+                          </Fragment>
+                        ))}
+                        <tr className="text-slate-900 dark:text-slate-100">
+                          <td className="py-1.5 pr-2 font-sans font-bold text-right" colSpan={2}>Project total</td>
+                          <td className="py-1.5 px-2 text-right font-bold">{Math.round(projectTotals.airflowSchedule.reduce((s, z) => s + z.recirc, 0)).toLocaleString()}</td>
+                          <td className="py-1.5 px-2 text-right font-bold text-teal-700 dark:text-teal-400">{Math.round(projectTotals.airflowSchedule.reduce((s, z) => s + z.facfm, 0)).toLocaleString()}</td>
+                          <td className="py-1.5 pl-2 text-right font-bold">{Math.round(projectTotals.airflowSchedule.reduce((s, z) => s + z.totalSupply, 0)).toLocaleString()}</td>
+                        </tr>
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              </div>
+            )}
 
             {projectPsychroOpen && (
               <div className="border-t border-slate-200/80 dark:border-slate-700/80 p-4 bg-white/90 dark:bg-slate-800/90">

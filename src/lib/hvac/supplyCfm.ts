@@ -104,6 +104,49 @@ export interface SupplyCfmResult {
   governedBy: SupplyCfmBasis;
 }
 
+/**
+ * Airflow split for air-terminal / duct layout — the practical breakdown a designer needs
+ * per room (and rolled up per zone): total air the room receives, the fresh-air (FACFM)
+ * portion, and the recirculated remainder. Recirc is defined as Total supply − FACFM, so
+ * Supply = Recirc + Fresh always balances (decision 2026-07-03, per Pravat).
+ *
+ *  • non-TFA ("fresh air on unit"): supply = space Design CFM; FACFM = the OA the unit
+ *    introduces (facph); recirc = Design CFM − FACFM.
+ *  • TFA-served: the DOAS delivers the OA, the space coil recirculates — supply =
+ *    Design CFM + DOAS CFM; FACFM = DOAS CFM; recirc = Design CFM.
+ *  • tfa-only (corridor): fed entirely by the DOAS — supply = FACFM = DOAS CFM; recirc = 0.
+ */
+export interface AirflowSplitInputs {
+  /** Governing (cross-season) space-coil supply CFM — resolveSupplyCfm().designSupplyCFM. */
+  designSupplyCFM: number;
+  /** Outdoor air the space unit introduces itself (facph × vol / 60) — used when NOT TFA. */
+  freshAirCFM: number;
+  /** DOAS outdoor-air CFM (0 when not TFA). */
+  tfaCfm: number;
+  isTFA: boolean;
+  isTfaOnly?: boolean;
+}
+
+export interface AirflowSplit {
+  /** Total air the room receives (sizes the supply diffusers / main supply duct). */
+  totalSupplyCFM: number;
+  /** Fresh-air CFM (FACFM) — sizes the OA intake / DOAS branch. */
+  freshAirCFM: number;
+  /** Recirculated CFM = total − fresh (sizes the return / recirc path). */
+  recircCFM: number;
+}
+
+export function computeAirflowSplit(i: AirflowSplitInputs): AirflowSplit {
+  const facfm = i.isTFA ? i.tfaCfm : i.freshAirCFM;
+  const totalSupplyCFM = i.isTfaOnly
+    ? i.tfaCfm
+    : i.isTFA
+      ? i.designSupplyCFM + i.tfaCfm
+      : i.designSupplyCFM;
+  const recircCFM = Math.max(0, totalSupplyCFM - facfm);
+  return { totalSupplyCFM, freshAirCFM: facfm, recircCFM };
+}
+
 export function resolveSupplyCfm(i: SupplyCfmInputs): SupplyCfmResult {
   // The DOAS supplies the OA only when it serves a room that still has its own coil.
   const subtractTfaCfm = i.isTFA && !i.isTfaOnly;
