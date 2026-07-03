@@ -2653,7 +2653,11 @@ function calculateRoomStripMetrics(room: any, elements: any[], dc: DesignConditi
       tfaCfm: tfa?.cfm ?? 0,
     }).designSupplyCFM;
     const tfaCoilTR = tfa ? (tfa.coilSensible + tfa.coilLatent) / 12000 : 0;
-    return { totalBTU: grandTotal, totalTR: grandTotal / 12000, designSupplyCFM, tfaCoilTR };
+    // Reheat flag — same room-SHF basis as the room-detail box (calculateReheat(ersh, erlh)).
+    // Design CFM excludes reheat by design; the strip badge signals the room needs it.
+    const reheat = isTfaOnly ? { needed: false, reheatBTU: 0 } : calculateReheat(ersh, erlh);
+    const reheatBTU = reheat.needed && isFinite(reheat.reheatBTU) ? reheat.reheatBTU : 0;
+    return { totalBTU: grandTotal, totalTR: grandTotal / 12000, designSupplyCFM, tfaCoilTR, reheatBTU };
   };
 
   const summer = computeSeason(dc);
@@ -2669,6 +2673,7 @@ function calculateRoomStripMetrics(room: any, elements: any[], dc: DesignConditi
         totalTR: Math.max(summer.totalTR, monsoon.totalTR),
         designSupplyCFM: Math.max(summer.designSupplyCFM, monsoon.designSupplyCFM),
         tfaCoilTR: Math.max(summer.tfaCoilTR, monsoon.tfaCoilTR),
+        reheatBTU: Math.max(summer.reheatBTU, monsoon.reheatBTU),
       }
     : summer;
 }
@@ -2689,7 +2694,7 @@ function DraggableRoomHeader({
   onToggle: () => void;
   room: any;
   elementCount: number;
-  metrics: { totalBTU: number; totalTR: number; designSupplyCFM: number; tfaCoilTR?: number };
+  metrics: { totalBTU: number; totalTR: number; designSupplyCFM: number; tfaCoilTR?: number; reheatBTU?: number };
   onDelete: () => void;
   equipSystems?: any[];
   setRoomFreshAir?: (room: any, mode: 'no-tfa' | 'tfa-served' | 'tfa-only', doasId?: string) => void;
@@ -2754,6 +2759,11 @@ function DraggableRoomHeader({
       <span className="text-[10px] bg-emerald-50 dark:bg-emerald-950/30 text-emerald-700 dark:text-emerald-400 border border-emerald-200 dark:border-emerald-800 rounded px-1.5 py-0.5">
         {Math.round(metrics.designSupplyCFM)} Design CFM
       </span>
+      {metrics.reheatBTU != null && metrics.reheatBTU > 0 && (
+        <span className="text-[10px] bg-orange-50 dark:bg-orange-950/30 text-orange-700 dark:text-orange-400 border border-orange-300 dark:border-orange-800 rounded px-1.5 py-0.5" title="Reheat duty needed (low SHF) — separate coil load, not in Design CFM or cooling TR. Open the room for the per-season figure.">
+          +{Math.round(metrics.reheatBTU).toLocaleString()} reheat
+        </span>
+      )}
 
       {setRoomFreshAir && (
         <select
@@ -2808,6 +2818,7 @@ const MemoDraggableRoomHeader = memo(DraggableRoomHeader, (prev, next) => {
     prev.metrics.totalBTU === next.metrics.totalBTU &&
     prev.metrics.totalTR === next.metrics.totalTR &&
     prev.metrics.designSupplyCFM === next.metrics.designSupplyCFM &&
+    prev.metrics.reheatBTU === next.metrics.reheatBTU &&
     prev.room?.name === next.room?.name &&
     prev.room?.floor === next.room?.floor &&
     prev.room?.length === next.room?.length &&

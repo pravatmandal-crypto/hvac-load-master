@@ -13,6 +13,7 @@ import {
   calculateCoilParameters,
   calculateParasiticGains,
   calculateHeatingLoad,
+  calculateReheat,
   getRecommendedAch,
   resolveSupplyCfm,
   resolveRoomSupplyBasis,
@@ -64,6 +65,12 @@ function computeZoneTotals(
   let totalSupplyCfm = 0;
   let totalDesignCfm = 0;
   let totalArea = 0;
+  // Reheat rollup for this season — Σ per-room reheat duty (BTU/h) + count of rooms needing it.
+  // Mirrors the room-detail "Reheat Requirement" box (calculateReheat on room SHF), so the
+  // zone figure = sum of what each room shows. The Design CFM is sized "w/o reheat"; this
+  // surfaces the reheat that the airflow number deliberately excludes.
+  let totalReheatBTU = 0;
+  let reheatRoomCount = 0;
   // Per-room required TR (post overall-safety, governed by max of load TR and CFM TR) summed
   // across rooms. Mirrors EquipmentSelection.computeRoomReqs so the LC zone-strip "Equipment"
   // tile matches the SD "Required TR" for the same zone.
@@ -127,6 +134,15 @@ function computeZoneTotals(
 
       const ersh = (erSensible + parasitic.ductGain + parasitic.fanGain) * (1 + sensibleSafetyPct / 100);
       const erlh = erLatent * (1 + latentSafetyPct / 100);
+      // Reheat: same room-SHF basis as the room-detail box (calculateReheat(ersh, erlh)).
+      // tfa-only rooms have no own space coil to reheat, so they don't contribute.
+      if (!isTfaOnly) {
+        const reheat = calculateReheat(ersh, erlh);
+        if (reheat.needed && isFinite(reheat.reheatBTU) && reheat.reheatBTU > 0) {
+          totalReheatBTU += reheat.reheatBTU;
+          reheatRoomCount++;
+        }
+      }
       const oaSensible = isTFA ? 0 : vent.sensible * (1 - BF);
       const oaLatent = isTFA ? 0 : vent.latent * (1 - BF);
       const tfaOffSen = tfa ? tfa.spaceSensibleOffset : 0;
@@ -203,6 +219,8 @@ function computeZoneTotals(
     totalSupplyCfm,
     totalDesignCfm,
     totalArea,
+    totalReheatBTU,
+    reheatRoomCount,
     totalRequiredTR,
   };
 }
@@ -338,6 +356,13 @@ function ZoneSummaryBar({
     : summerTotals.totalRequiredTR;
   const achGovernsAirflow = governingCfmTR >= governingLoadTR;
   const governingRoomInfo = peakSeason === 'Monsoon' && monsoonGoverningRoom ? monsoonGoverningRoom : summerGoverningRoom;
+  // Reheat rollup — the Design CFM above is sized "w/o reheat"; surface the reheat duty that
+  // the airflow deliberately excludes, per season (latent-heavy monsoon is the usual driver).
+  const summerReheatBTU = summerTotals.totalReheatBTU;
+  const monsoonReheatBTU = monsoonTotals ? monsoonTotals.totalReheatBTU : 0;
+  const summerReheatRooms = summerTotals.reheatRoomCount;
+  const monsoonReheatRooms = monsoonTotals ? monsoonTotals.reheatRoomCount : 0;
+  const anyReheat = summerReheatBTU > 0 || monsoonReheatBTU > 0;
 
   const zoneRoomIdSet = new Set(zoneRooms.map((r: any) => r.id));
   // Some equipment zones have empty roomIds (e.g. created via the new SD flow where
@@ -452,6 +477,32 @@ function ZoneSummaryBar({
                 )}
               </div>
             </div>
+
+            {anyReheat && (
+              <div className="mt-3 rounded-lg border border-orange-300 dark:border-orange-800 bg-orange-50 dark:bg-orange-950/20 px-3 py-2 text-[11px]">
+                <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1">
+                  <p className="font-semibold uppercase tracking-wider text-orange-700 dark:text-orange-400 text-[10px]">
+                    Reheat required (excluded from Design CFM)
+                  </p>
+                  <div className="flex flex-wrap items-center gap-x-4 gap-y-0.5 font-mono text-orange-800 dark:text-orange-300">
+                    {monsoonReheatBTU > 0 && (
+                      <span title="Σ per-room reheat duty at monsoon conditions">
+                        Monsoon <strong>{n(monsoonReheatBTU)}</strong> BTU/h · {monsoonReheatRooms} {monsoonReheatRooms === 1 ? 'room' : 'rooms'}
+                      </span>
+                    )}
+                    {summerReheatBTU > 0 && (
+                      <span title="Σ per-room reheat duty at summer conditions">
+                        Summer <strong>{n(summerReheatBTU)}</strong> BTU/h · {summerReheatRooms} {summerReheatRooms === 1 ? 'room' : 'rooms'}
+                      </span>
+                    )}
+                  </div>
+                </div>
+                <p className="mt-1 font-normal text-orange-600 dark:text-orange-400 leading-snug">
+                  Latent-heavy season(s): the coil over-cools sensible while drying the air, so reheat is needed to hold room temperature.
+                  This is a separate coil duty — it is NOT in the Design CFM or the cooling TR. Open a flagged room to see its per-season reheat.
+                </p>
+              </div>
+            )}
 
             {includeMonsoon && monsoonTotals ? (
               <div className="mt-3 grid grid-cols-1 gap-2 lg:grid-cols-3">
