@@ -251,7 +251,6 @@ const n0  = (v: number) => Math.round(v).toLocaleString();
 const n1  = (v: number) => v.toFixed(1);
 const n2  = (v: number) => v.toFixed(2);
 const n4  = (v: number) => v.toFixed(4);
-const dash = (v: number) => v > 0 ? n0(v) : '-';
 // Temperature helpers — report shows °F and °C side by side.
 const fToC   = (f: number) => (f - 32) * 5 / 9;
 const dualT0 = (f: number) => `${Math.round(f)} / ${fToC(f).toFixed(1)}`;        // cell value; unit (°F / °C) lives in the row label
@@ -374,7 +373,7 @@ const getSeasonProfiles = (project: any): SeasonProfile[] => {
   return profiles;
 };
 
-const buildEntityRecords = (project: any, systems: any[], zones: any[], rooms: Record<string, any[]>, equipSystems: any[] = []): EntityRecord[] => {
+const buildEntityRecords = (_project: any, systems: any[], zones: any[], rooms: Record<string, any[]>, equipSystems: any[] = []): EntityRecord[] => {
   // Use zones when available — all project types now use flat zone architecture.
   // Fallback to systems only for legacy VRF projects that have systems but no separate zones.
   if (zones.length > 0) {
@@ -537,35 +536,6 @@ const computeTotalInstalledIDU = (eqSystems: any[]): { tr: number; cfm: number }
 // Compute total installed plant/ODU capacity broken down by system type and Working/Standby role.
 // Only the outdoor/plant equipment is counted (not IDUs/FCUs).
 // For chillers, uses Actual TR (site-condition, OEM-confirmed) when available, else Nominal.
-// Compute a chiller zone's coil duty TR (thermal load on the coil) and design CFM
-// (dehumidified airflow), summed from the rooms assigned to the zone. These are the
-// project-specific design values the OEM needs to build the coil to — NOT the catalog
-// rating of the selected AHU/FCU model.
-//
-// Coil duty = max(summer thermal load TR, monsoon thermal load TR) across rooms.
-// Design CFM = max(summer design CFM, monsoon design CFM) across rooms.
-// Returns null if no calc data is found on the rooms (offline / not yet calculated).
-const computeZoneCoilDuty = (zone: any, flatRooms: any[]): { coilTR: number; designCFM: number } | null => {
-  const roomIds = new Set<string>(zone.roomIds ?? []);
-  if (roomIds.size === 0) return null;
-  let trSum = 0;
-  let cfmSum = 0;
-  let foundAny = false;
-  for (const r of flatRooms) {
-    if (!roomIds.has(r.id)) continue;
-    const summerTR  = Number(r._calcLoadTR ?? 0);
-    const monsoonTR = Number(r._calcMonsoonLoadTR ?? 0);
-    const thermalTR = Math.max(summerTR, monsoonTR);
-    const summerCFM  = Number(r._calcDesignCFM ?? r.designSupplyCFM ?? 0);
-    const monsoonCFM = Number(r._calcMonsoonDesignCFM ?? 0);
-    const designCFM = Math.max(summerCFM, monsoonCFM);
-    if (thermalTR > 0 || designCFM > 0) foundAny = true;
-    trSum += thermalTR;
-    cfmSum += designCFM;
-  }
-  return foundAny ? { coilTR: trSum, designCFM: cfmSum } : null;
-};
-
 // Returns a per-system diversity line: indoor space load × design DF + non-diverse
 // outdoor-air load (room fresh air + chiller-fed TFA), versus installed plant TR.
 // Diversity is applied to the INDOOR calc only — fresh air is continuous and carried
@@ -620,6 +590,7 @@ const formatDiversitySummary = (
   flatRooms: any[],
   roomIndoorTR: Map<string, number>,
   roomNonDiverseTR?: Map<string, number>,
+  roomChillerTfaTR?: Map<string, number>,
 ): string => {
   const parts: string[] = [];
   for (const sys of systems) {
@@ -644,11 +615,12 @@ const formatDiversitySummary = (
 
     // Sum of room TR for rooms tied to this system — indoor (diversifiable) and the
     // non-diverse outdoor-air load (room fresh air + any chiller-fed TFA coil).
-    let sumIndoorTR = 0, sumOaTR = 0;
+    let sumIndoorTR = 0, sumOaTR = 0, sumTfaTR = 0;
     for (const r of flatRooms) {
       if (r.systemId === sys.id || r.zoneId === sys.id || r.hvacSystemId === sys.id) {
         sumIndoorTR += roomIndoorTR.get(r.id) ?? 0;
         sumOaTR     += roomNonDiverseTR?.get(r.id) ?? 0;
+        sumTfaTR    += roomChillerTfaTR?.get(r.id) ?? 0;
       }
     }
     if (sumIndoorTR <= 0 && sumOaTR <= 0) continue;
@@ -659,7 +631,10 @@ const formatDiversitySummary = (
     // space-load indoor before any unit is selected. Mirrors EquipmentSelection.
     const df = Math.max(0, Math.min(1, Number(sys.diversityFactor ?? 0.75)));
     const connected = connectedIduTR(sys);
-    const indoorBasis = connected > 0 ? Math.max(0, connected - sumOaTR) : sumIndoorTR;
+    // Subtract only the on-unit fresh air (oa − chiller-fed TFA) from the connected AHU
+    // capacity — the chiller-fed TFA coil is a separate DOAS unit, not inside the AHU TR.
+    const onUnitOa = Math.max(0, sumOaTR - sumTfaTR);
+    const indoorBasis = connected > 0 ? Math.max(0, connected - onUnitOa) : sumIndoorTR;
     const requiredTR = indoorBasis * df + sumOaTR;
     if (requiredTR <= 0 || installedTR <= 0) continue;
 
@@ -683,23 +658,31 @@ const computePlantRequiredTR = (
   flatRooms: any[],
   roomIndoorTR: Map<string, number>,
   roomNonDiverseTR?: Map<string, number>,
+  roomChillerTfaTR?: Map<string, number>,
 ): number => {
   let total = 0;
   for (const sys of systems) {
     const t = String(sys.type ?? '');
     if (t !== 'VRF' && t !== 'Chiller') continue;
-    let indoor = 0, oa = 0;
+    let indoor = 0, oa = 0, tfa = 0;
     for (const r of flatRooms) {
       if (r.systemId === sys.id || r.zoneId === sys.id || r.hvacSystemId === sys.id) {
         indoor += roomIndoorTR.get(r.id) ?? 0;
         oa     += roomNonDiverseTR?.get(r.id) ?? 0;
+        tfa    += roomChillerTfaTR?.get(r.id) ?? 0;
       }
     }
     const df = Math.max(0, Math.min(1, Number(sys.diversityFactor ?? 0.75)));
-    // Indoor basis = selected AHU/IDU capacity less its OA share (matches the app); fall back
-    // to space-load indoor when no unit is selected yet.
+    // Indoor basis = selected AHU/IDU capacity less the OA it actually carries. Only the room
+    // fresh air riding ON the space AHU (= oa − chiller-fed TFA) sits inside that connected
+    // capacity; the chiller-fed TFA coil is a SEPARATE DOAS unit and must NOT be subtracted
+    // from the AHU capacity. Subtracting the whole OA (incl. TFA) drove the indoor basis to
+    // zero when the TFA coil exceeded the AHU TR, leaving only OA — the R85 "47.84 TR"
+    // artifact. Falls back to space-load indoor when no unit is selected yet. Mirrors
+    // EquipmentSelection.chillerPlantRequiredTR.
+    const onUnitOa = Math.max(0, oa - tfa);
     const connected = connectedIduTR(sys);
-    const indoorBasis = connected > 0 ? Math.max(0, connected - oa) : indoor;
+    const indoorBasis = connected > 0 ? Math.max(0, connected - onUnitOa) : indoor;
     total += indoorBasis * df + oa;
   }
   return total;
@@ -893,7 +876,11 @@ const computeDetailed = (room: any, elements: any[], dc: DC, project: any): Deta
   const envelope  = calculateEnvelopeGain(elements, dcEff);
   const internal  = calculateInternalGains(room);
   const vent      = calculateVentilationLoad(room, dcEff);
-  const heating   = calculateHeatingLoad(room, elements, dc);
+  // Winter heating must use the TFA-aware DC: for DOAS-served rooms the mechanical fresh
+  // air is heated by the DOAS coil, so the space unit covers ONLY genuine infiltration
+  // (winterInfiltrationACH), not the full FACPH. Passing the raw `dc` here made the space
+  // re-heat the entire fresh-air rate that the DOAS coil already handles — a double count.
+  const heating   = calculateHeatingLoad(room, elements, dcEff);
   const tfa       = isTFA ? calculateTFALoad(room, dcEff) : null;
 
   const area = asNum(room?.length, 0) * asNum(room?.width, 0);
@@ -1044,7 +1031,7 @@ const computeDetailed = (room: any, elements: any[], dc: DC, project: any): Deta
 
 // ─── Page management ─────────────────────────────────────────────────────────
 
-const startBody = (doc: jsPDF, project: any) => {
+const startBody = (doc: jsPDF, _project: any) => {
   doc.addPage();
   return PAGE.top + 4;
 };
@@ -1396,7 +1383,6 @@ export const generatePDFReport = (
 
   const doc      = new jsPDF({ unit: 'mm', format: 'a4' });
   const pageW    = doc.internal.pageSize.getWidth();
-  const pageH    = doc.internal.pageSize.getHeight();
   const seasons  = getSeasonProfiles(project);
   const entities = buildEntityRecords(project, effectiveSystems, effectiveZones, effectiveRooms, effectiveEquipSystems);
   const includeMonsoon = seasons.some((s) => s.key === 'monsoon');
@@ -1607,12 +1593,17 @@ export const generatePDFReport = (
   const roomIndoorTR = new Map<string, number>();      // diversifiable indoor: envelope+people+lights+equip (erh)
   const roomNonDiverseTR = new Map<string, number>();   // OA / fresh air (+ chiller-fed TFA) — never diversified
   const roomChillerTfaTR = new Map<string, number>();   // chiller-fed TFA coil only — carved out of plant for the diversity check
+  // Project total of the TFA / DOAS fresh-air branch airflow (season-independent, ACH-based).
+  // The space design CFM (submissionCFM) is the recirc/AHU air and already includes any
+  // on-unit fresh air; the separate DOAS branch is NOT in it, so it is summed here and shown
+  // added on top of the space CFM in the submission basis (space + TFA = total supply).
+  let projectTfaFreshCFM = 0;
   const coolingSeasonsForRoom = seasons.filter(s => s.key !== 'winter');
   entities.forEach((entity) => {
     entity.rooms.forEach((room) => {
       const rdoas = findReportDoasForRoom(room);
       const roomChillerFed = !!rdoas && ((rdoas.tfaCoolingSource ?? 'own-unit') === 'chiller-plant');
-      let bestTotal = -1, govIndoor = 0, govNonDiverse = 0, govTfa = 0;
+      let bestTotal = -1, govIndoor = 0, govNonDiverse = 0, govTfa = 0, roomTfaCfm = 0;
       for (const season of coolingSeasonsForRoom) {
         const dc = resolveEntityDC(entity, season, project);
         const m = computeDetailed(room, envelopeElements[room.id] || [], dc, project);
@@ -1621,21 +1612,23 @@ export const generatePDFReport = (
         const tfaTr = roomChillerFed ? (m.tfaCoilSensible + m.tfaCoilLatent) / 12000 : 0;
         const nonDiverse = oaTr + tfaTr;                             // all OA landing on this plant, un-diversified
         const total = indoorTr + nonDiverse;
+        roomTfaCfm = m.tfaCfm;                                       // DOAS branch airflow (0 for non-TFA rooms; season-independent)
         if (total > bestTotal) { bestTotal = total; govIndoor = indoorTr; govNonDiverse = nonDiverse; govTfa = tfaTr; }
       }
       roomIndoorTR.set(room.id, govIndoor);
       roomNonDiverseTR.set(room.id, govNonDiverse);
       roomChillerTfaTR.set(room.id, govTfa);
+      projectTfaFreshCFM += roomTfaCfm;
     });
   });
-  const diversityStr = formatDiversitySummary(activeEquipSystems, flatRoomDocs, roomIndoorTR, roomNonDiverseTR);
+  const diversityStr = formatDiversitySummary(activeEquipSystems, flatRoomDocs, roomIndoorTR, roomNonDiverseTR, roomChillerTfaTR);
   // Installed-equipment check: achieved diversity (working plant ÷ connected IDU) vs design DF.
   // Chiller-fed TFA coil is carved OUT of the plant first (TFA is non-diverse) — only the
   // space AHUs vs the remaining plant get the diversity ratio.
   const plantDiversityStr = formatPlantDiversityCheck(activeEquipSystems, flatRoomDocs, roomChillerTfaTR);
   // Single diversity-applied plant-required figure used by BOTH the submission basis
   // and the diversity line, so they always agree (indoor×df + OA/fresh air).
-  const plantRequiredTR = computePlantRequiredTR(activeEquipSystems, flatRoomDocs, roomIndoorTR, roomNonDiverseTR);
+  const plantRequiredTR = computePlantRequiredTR(activeEquipSystems, flatRoomDocs, roomIndoorTR, roomNonDiverseTR, roomChillerTfaTR);
   // Submission basis reflects what's actually being INSTALLED: working plant TR (144,
   // not the 135.54 load figure) and the design airflow rounded up to a clean hundred for
   // submission (41,958 -> 42,000). Falls back to the load figure if no plant is selected.
@@ -1644,6 +1637,15 @@ export const generatePDFReport = (
     ? installedWorkingPlantTR
     : (plantRequiredTR > 0 ? plantRequiredTR : recTR);
   const submissionCFMRounded = Math.ceil(submissionCFM / 100) * 100;
+  // CFM basis: the space/recirc AHU design airflow plus the separate DOAS fresh-air branch,
+  // totalled so the client sees the full supply air (space + TFA = total), not just the
+  // space CFM. Total design supply matches the 3A Airflow Schedule PROJECT TOTAL.
+  const tfaFreshCFMRounded   = Math.ceil(projectTfaFreshCFM / 100) * 100;
+  const totalSupplyCFM       = submissionCFM + projectTfaFreshCFM;
+  const totalSupplyCFMRounded = Math.ceil(totalSupplyCFM / 100) * 100;
+  const submissionCFMStr = projectTfaFreshCFM > 0.5
+    ? `${n0(submissionCFMRounded)} space + ${n0(tfaFreshCFMRounded)} TFA = ${n0(totalSupplyCFMRounded)} CFM total`
+    : `${n0(submissionCFMRounded)} CFM`;
   autoTable(doc, {
     startY: y,
     body: [
@@ -1655,12 +1657,12 @@ export const generatePDFReport = (
       ['Total Zones',                      n0(entities.length)],
       ['Total Rooms',                      n0(allRooms.length)],
       ['Peak Governing Season',            chillerFedTfa
-        ? `${plantSeasonPeak.season}  (${n2(plantRequiredTR)} TR plant, diversity applied  ·  ${n0(recCFM)} CFM)`
-        : `${peakSeason.season}  (${n2(peakSeason.loadTr)} TR space  ·  ${n0(peakSeason.cfm)} CFM)`],
+        ? `${plantSeasonPeak.season}  (${n2(plantRequiredTR)} TR plant, diversity applied  ·  ${n0(totalSupplyCFM)} CFM total)`
+        : `${peakSeason.season}  (${n2(peakSeason.loadTr)} TR space  ·  ${n0(recCFM)} CFM)`],
       ['Recommended Submission Basis',     chillerFedTfa
-        ? `Space + TFA coil on one plant:  ${n2(submissionBasisTR)} TR (installed)  ·  ${n0(submissionCFMRounded)} CFM`
+        ? `Space + TFA coil on one plant:  ${n2(submissionBasisTR)} TR (installed)  ·  ${submissionCFMStr}`
         : hasTfa
-          ? `Chiller ${n2(submissionBasisTR)} TR (installed)  +  separate TFA unit ${n2(projectTfaCoilTR)} TR  ·  ${n0(submissionCFMRounded)} CFM`
+          ? `Chiller ${n2(submissionBasisTR)} TR (installed)  +  separate TFA unit ${n2(projectTfaCoilTR)} TR  ·  ${submissionCFMStr}`
           : `${n2(submissionBasisTR)} TR  and  ${n0(submissionCFMRounded)} CFM`],
       ...(hasTfa ? [['TFA / DOAS Coil Capacity', `${n2(projectTfaCoilTR)} TR  (outdoor-air coil, governing season)${chillerFedTfa ? ' — on main chiller plant' : ' — dedicated TFA unit'}`]] as [string,string][] : []),
       ...(hasTfa && projectTfaReheatBTUH > 0 ? [['TFA / DOAS Reheat Coil', `${n0(projectTfaReheatBTUH)} BTU/h  (${n2(projectTfaReheatBTUH / 12000)} TR · cool-to-ADP then reheat to supply temp)`]] as [string,string][] : []),
@@ -2300,13 +2302,25 @@ export const generatePDFReport = (
 
           const envRows = elems.map((el: any) => {
             const gain = calculateSingleElementGain(el, dc);
+            const uA = asNum(el.uValue, 0) * asNum(el.area, 0);
+            // CLTD/SCL column:
+            //  • Glass — the solar factor (SCL/SHGF) that drives the solar gain.
+            //  • Opaque — the EFFECTIVE CLTD actually used (ASHRAE altitude / temp-base /
+            //    color / latitude-month corrections applied), backed out of the conduction so
+            //    U × A × CLTD reconciles with the Cond BTU/h column. Previously this showed the
+            //    stored el.solarFactor, which is the uncorrected value and did NOT reproduce Cond.
+            const cltdScl = isWinter
+              ? '—'
+              : String(el.type) === 'Glass'
+                ? n2(asNum(el.solarFactor, 0))
+                : n2(uA !== 0 ? gain.conduction / uA : 0);
             return [
               String(el.type || '—'),
               String(el.description || el.wallTypeId || '—'),
               String(el.orientation || '—'),
               n0(asNum(el.area, 0)),
               asNum(el.uValue, 0).toFixed(3),
-              isWinter ? '—' : n2(asNum(el.solarFactor, 0)),
+              cltdScl,
               n0(gain.conduction),
               isWinter ? '—' : n0(gain.radiation),
               n0(gain.total),
@@ -3051,8 +3065,8 @@ const renderEquipmentScheduleBody = (
     if (group.length === 1) return group[0];
     // Multiple docs with the same type+name → keep the most recently updated one
     return group.reduce((best: any, s: any) => {
-      const tBest = best.updatedAt?.seconds ?? best.updatedAt?.toMillis?.() / 1000 ?? 0;
-      const tS    = s.updatedAt?.seconds    ?? s.updatedAt?.toMillis?.()    / 1000 ?? 0;
+      const tBest = best.updatedAt?.seconds ?? (best.updatedAt?.toMillis ? best.updatedAt.toMillis() / 1000 : 0);
+      const tS    = s.updatedAt?.seconds    ?? (s.updatedAt?.toMillis    ? s.updatedAt.toMillis()    / 1000 : 0);
       return tS > tBest ? s : best;
     }, group[0]);
   });
