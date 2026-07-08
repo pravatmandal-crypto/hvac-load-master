@@ -653,7 +653,9 @@ const formatDiversitySummary = (
 // chillerPlantRequiredTR: (Σ indoor room load × design diversity) + Σ non-diverse OA
 // (room fresh air + chiller-fed TFA coil). Same inputs as formatDiversitySummary so the
 // headline submission basis and the diversity line always agree.
-const computePlantRequiredTR = (
+// Exported for the regression test net (Step-1 safety net, 2026-07-08) — locks the
+// R85 "47.84 TR" plant-artifact fix. No behavior change; was previously module-private.
+export const computePlantRequiredTR = (
   systems: any[],
   flatRooms: any[],
   roomIndoorTR: Map<string, number>,

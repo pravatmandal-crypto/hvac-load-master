@@ -9,6 +9,8 @@ npm run dev        # Start Vite dev server (port 3000)
 npm run build      # Production bundle
 npm run lint       # TypeScript type-check (tsc --noEmit) — run after every change
 npm run preview    # Preview production build locally
+npm test           # Run the Vitest suite once (regression + golden nets)
+npm run test:watch # Vitest in watch mode
 ```
 
 After editing Firestore rules, deploy with:
@@ -16,7 +18,26 @@ After editing Firestore rules, deploy with:
 npx firebase deploy --only firestore:rules
 ```
 
-No automated test suite exists. Verify changes manually in the browser.
+### Test net (Vitest — added 2026-07-08)
+
+A pure-function safety net lives in `src/lib/hvac/__tests__/`. It exists to catch drift
+when the duplicated calc glue (`reportService` / `excelService` / `loadCalculationService`
+/ `airflowSchedule`) is consolidated. Run `npm test` after any change to `src/lib/hvac/*`
+or the report/excel calc paths.
+
+- `regression-r85-fixes.test.ts` — locks the three R85→R86 root-cause fixes (commit
+  `d0f999b`): DOAS winter heating uses `winterInfiltrationACH` not `facph`; opaque CLTD
+  display reconciles with conduction (`U·A·CLTD == Cond`); plant TR carves the chiller-fed
+  TFA coil out of on-unit OA (the "47.84 TR" artifact). Expected numbers are hand-derived
+  from the ASHRAE constants — an independent check, not program output.
+- `golden-real-projects.test.ts` — feeds three REAL rooms (single-AHU chiller, DOAS/TFA
+  chiller, VRF) captured from the 2026-07-03 backup through the pure engine and asserts it
+  reproduces the persisted `analysis` breakdown to the cent. Fixtures in
+  `__tests__/fixtures/real-project-rooms.json`.
+
+Config: `vitest.config.ts` (deliberately separate from `vite.config.ts` — does not load the
+React/Tailwind/PWA plugins). `computePlantRequiredTR` is exported from `reportService.ts`
+solely so the regression net can call it; no behavior change.
 
 ## Architecture
 

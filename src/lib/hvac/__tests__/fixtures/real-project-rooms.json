@@ -1,0 +1,346 @@
+[
+  {
+    "project": "TEZPUR, SSC COMPLEX",
+    "archetype": "single-ahu-chiller",
+    "label": "UWO Office — single-AHU chiller, no DOAS",
+    "systemType": "Chiller",
+    "room": {
+      "id": "UWO'S Office (A)",
+      "name": "UWO'S Office (A)",
+      "floor": "1st",
+      "length": 20,
+      "width": 18,
+      "height": 10.5,
+      "hasFalseCeiling": false,
+      "falseCeilingHeight": 10,
+      "facph": 1.5,
+      "peopleCount": 4,
+      "activityType": "office",
+      "lightsWattsPerSqft": 1,
+      "equipmentKW": 0.15,
+      "othersKW": 0
+    },
+    "envelopeElements": [
+      {
+        "_id": "2RgkmX4rCCkRcKKoPKY0",
+        "color": "Dark",
+        "description": "New Wall",
+        "wallTypeId": "w1",
+        "type": "Wall",
+        "isOverride": false,
+        "uValue": 0.35,
+        "area": 170,
+        "orientation": "E",
+        "solarFactor": 48.18779294386148
+      },
+      {
+        "_id": "C9HUqjuvDzghc8yUgQIr",
+        "area": 360,
+        "isOverride": false,
+        "orientation": "H",
+        "color": "Dark",
+        "description": "New Floor",
+        "solarFactor": 10,
+        "uValue": 0.3,
+        "type": "Floor"
+      },
+      {
+        "_id": "RyNrIlAI9IWbJHo7XAbs",
+        "type": "Glass",
+        "wallTypeId": "g2",
+        "color": "Dark",
+        "description": "New Glass",
+        "uValue": 0.5,
+        "shgc": 0.7,
+        "isOverride": false,
+        "area": 20,
+        "solarFactor": 68.31924800456451,
+        "orientation": "E"
+      },
+      {
+        "_id": "eQzJBkfFMxgvaNxfiPrV",
+        "type": "Roof",
+        "solarFactor": 38.95,
+        "uValue": 0.3,
+        "color": "Dark",
+        "orientation": "H",
+        "description": "New Roof",
+        "area": 360,
+        "isOverride": false
+      },
+      {
+        "_id": "inydtfTptyln859Llmp5",
+        "type": "Partition",
+        "orientation": "N",
+        "area": 189,
+        "uValue": 0.35,
+        "solarFactor": 8.4,
+        "description": "New Partition",
+        "isOverride": false,
+        "color": "Dark",
+        "wallTypeId": "w1"
+      }
+    ],
+    "designConditions": {
+      "outdoorTemp": 94,
+      "indoorTemp": 72,
+      "outdoorHumidity": 59,
+      "indoorHumidity": 50,
+      "altitude": 259,
+      "latitude": 26.61,
+      "longitude": 92.783,
+      "winterOutdoorTemp": 52,
+      "winterOutdoorHumidity": 80,
+      "winterIndoorTemp": 72,
+      "winterIndoorHumidity": 50,
+      "includeWinter": true
+    },
+    "expected": {
+      "envelope": {
+        "sensible": 10889.360771577494,
+        "breakdown": {
+          "walls": 2867.1736801597576,
+          "roof": 4641.616893643135,
+          "glassTransmission": 220,
+          "glassSolar": 1099.3901977746013,
+          "partitions": 873.1799999999998,
+          "floor": 1188
+        }
+      },
+      "internal": {
+        "sensible": 2720.12,
+        "latent": 820
+      },
+      "ventilation": {
+        "sensible": 2245.32,
+        "latent": 5484.8469847985625
+      }
+    }
+  },
+  {
+    "project": "TEZPUR , BOCC COMPLEX",
+    "archetype": "doas-tfa-chiller",
+    "label": "COO ORD — DOAS/TFA chiller (tfa-cold)",
+    "systemType": "Chiller",
+    "room": {
+      "id": "COO ORD",
+      "name": "COO ORD",
+      "floor": "Ground",
+      "length": 25,
+      "width": 20,
+      "height": 20.5,
+      "hasFalseCeiling": true,
+      "falseCeilingHeight": 10.5,
+      "facph": 1,
+      "peopleCount": 10,
+      "activityType": "office",
+      "lightsWattsPerSqft": 1,
+      "equipmentKW": 0.15,
+      "othersKW": 0
+    },
+    "envelopeElements": [
+      {
+        "_id": "53xO5X4WpVUngtwNsZIF",
+        "type": "Roof",
+        "orientation": "H",
+        "area": 500,
+        "uValue": 0.3,
+        "solarFactor": 38.977934200399396,
+        "description": "New Roof",
+        "isOverride": false,
+        "color": "Dark"
+      },
+      {
+        "_id": "6EAl2s9SakASQoZ3RJHE",
+        "type": "Partition",
+        "orientation": "N",
+        "area": 518,
+        "uValue": 0.35,
+        "solarFactor": 8.4,
+        "description": "New Partition",
+        "isOverride": false,
+        "color": "Dark",
+        "wallTypeId": "w1"
+      },
+      {
+        "_id": "G5yi5q7mMzlfZ9u3y2vC",
+        "type": "Floor",
+        "orientation": "H",
+        "area": 500,
+        "uValue": 0.3,
+        "solarFactor": 10,
+        "description": "New Floor",
+        "isOverride": false,
+        "color": "Dark"
+      },
+      {
+        "_id": "s7zHNd7Q0IdWwCCbYFK8",
+        "type": "Wall",
+        "orientation": "N",
+        "area": 468,
+        "uValue": 0.35,
+        "solarFactor": 29.112675766316887,
+        "description": "New Wall",
+        "isOverride": false,
+        "color": "Dark",
+        "wallTypeId": "w1"
+      },
+      {
+        "_id": "yLsPsB8uOjBbjUt3D9vB",
+        "type": "Glass",
+        "orientation": "N",
+        "area": 50,
+        "uValue": 0.5,
+        "solarFactor": 26.12206541350996,
+        "description": "New Glass",
+        "isOverride": false,
+        "color": "Dark",
+        "shgc": 0.7,
+        "wallTypeId": "g2"
+      }
+    ],
+    "designConditions": {
+      "outdoorTemp": 94,
+      "indoorTemp": 72,
+      "outdoorHumidity": 59,
+      "indoorHumidity": 50,
+      "altitude": 259,
+      "latitude": 26.61,
+      "longitude": 92.783,
+      "winterOutdoorTemp": 40,
+      "winterOutdoorHumidity": 30,
+      "winterIndoorTemp": 70,
+      "winterIndoorHumidity": 30,
+      "includeWinter": false,
+      "ventilationStrategy": "tfa-cold",
+      "tfaSupplyTemp": 55,
+      "tfaSupplyHumidity": 90,
+      "ervSensibleEffectiveness": 0,
+      "ervLatentEffectiveness": 0,
+      "tfaWinterSupplyTemp": null
+    },
+    "expected": {
+      "envelope": {
+        "sensible": 17516.13213384209,
+        "breakdown": {
+          "walls": 5425.394314732931,
+          "roof": 6446.690130059909,
+          "glassTransmission": 550,
+          "glassSolar": 1050.8876890492513,
+          "partitions": 2393.16,
+          "floor": 1650
+        }
+      },
+      "internal": {
+        "sensible": 4667.8,
+        "latent": 2050
+      },
+      "ventilation": {
+        "sensible": 2079,
+        "latent": 5078.5620229616325
+      }
+    }
+  },
+  {
+    "project": "R&R RESORT",
+    "archetype": "vrf",
+    "label": "Bar Area — VRF",
+    "systemType": "VRF",
+    "room": {
+      "id": "Bar Area",
+      "name": "Bar Area",
+      "floor": "Level - 2",
+      "length": 18,
+      "width": 12,
+      "height": 18.3,
+      "hasFalseCeiling": true,
+      "falseCeilingHeight": 17,
+      "facph": 1.5,
+      "peopleCount": 4,
+      "activityType": "office",
+      "lightsWattsPerSqft": 1,
+      "equipmentKW": 0.15,
+      "othersKW": 0
+    },
+    "envelopeElements": [
+      {
+        "_id": "744sqGd1sG7J2CYCCTx3",
+        "isOverride": false,
+        "area": 216,
+        "uValue": 0.31,
+        "description": "New Floor",
+        "orientation": "H",
+        "solarFactor": 10,
+        "type": "Floor"
+      },
+      {
+        "_id": "YyFAk1GRvk8aMvoFtONS",
+        "orientation": "H",
+        "color": "Light",
+        "solarFactor": 33.95,
+        "type": "Roof",
+        "area": 216,
+        "isOverride": true,
+        "uValue": 0.31,
+        "description": "New Roof"
+      },
+      {
+        "_id": "ZtuUnTKt1oOQEiEBVcfG",
+        "type": "Wall",
+        "solarFactor": 29,
+        "orientation": "E",
+        "uValue": 0.35,
+        "description": "New Wall",
+        "area": 113,
+        "isOverride": true,
+        "wallTypeId": "w1"
+      },
+      {
+        "_id": "xSwjmL3Yt8HstBJSGdLA",
+        "uValue": 0.35,
+        "description": "New Partition",
+        "area": 517,
+        "isOverride": false,
+        "wallTypeId": "w1",
+        "type": "Partition",
+        "solarFactor": 12,
+        "orientation": "N"
+      }
+    ],
+    "designConditions": {
+      "outdoorTemp": 86,
+      "indoorTemp": 75,
+      "outdoorHumidity": 65,
+      "indoorHumidity": 55,
+      "altitude": 2543,
+      "latitude": 27.29416,
+      "longitude": 88.58963,
+      "winterOutdoorTemp": 40,
+      "winterOutdoorHumidity": 80,
+      "winterIndoorTemp": 75,
+      "winterIndoorHumidity": 55,
+      "includeWinter": false
+    },
+    "expected": {
+      "envelope": {
+        "sensible": 4982.7919999999995,
+        "breakdown": {
+          "walls": 1146.9499999999998,
+          "roof": 2273.292,
+          "glassTransmission": 0,
+          "glassSolar": 0,
+          "partitions": 1194.2699999999998,
+          "floor": 368.28
+        }
+      },
+      "internal": {
+        "sensible": 2228.792,
+        "latent": 820
+      },
+      "ventilation": {
+        "sensible": 1090.584,
+        "latent": 3486.4899137825446
+      }
+    }
+  }
+]
