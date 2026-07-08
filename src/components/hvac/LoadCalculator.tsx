@@ -888,96 +888,32 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
         ...(Number(room.slabFFactor) > 0 ? { slabFFactor: Number(room.slabFFactor) } : {}),
       };
 
-      // TFA-aware design conditions — when DOAS-served, attach strategy + supply
-      // params so vent / TFA load functions use the same branch as the persist path.
-      const isTFA = !!doas;
-      const dcEff: any = isTFA
-        ? {
-            ...zoneDc,
-            ventilationStrategy: 'tfa-cold',
-            tfaSupplyTemp: doas.tfaSupplyTemp,
-            tfaSupplyHumidity: doas.tfaSupplyHumidity,
-            ervSensibleEffectiveness: doas.ervSensibleEffectiveness,
-            ervLatentEffectiveness: doas.ervLatentEffectiveness,
-          }
-        : zoneDc;
-
-      const envelope = calculateEnvelopeGain(elements, dcEff);
-      const internal = calculateInternalGains(rd);
-      const vent = calculateVentilationLoad(rd, dcEff);
-      const tfa = isTFA ? calculateTFALoad(rd, dcEff) : null;
-      // Effective mode from the shared resolver (room.tfaMode primary, link fallback).
-      const effectiveModeSnap = resolveRoomTfa(room, equipSystems, zones).mode;
-      const isTfaOnly = effectiveModeSnap === 'tfa-only';
-
-      // Bypass-OA terms zero out when TFA is active — OA goes to the DOAS unit.
-      const erVentSensible = isTFA ? 0 : vent.sensible * BF_LOCAL;
-      const erVentLatent = isTFA ? 0 : vent.latent * BF_LOCAL;
-      const erSensible = envelope.sensible + internal.sensible + erVentSensible;
-      const erLatent = internal.latent + erVentLatent;
-      const ductPct = Number(room.ductGainPct) || 2;
-      const fanPct = Number(room.fanGainPct) || 3;
-      const sensibleSafetyPct = Number(room.sensibleSafetyPercent ?? room.sensibleSafetyFactor ?? 10);
-      const latentSafetyPct = Number(room.latentSafetyPercent ?? room.latentSafetyFactor ?? 5);
-      const overallSafetyPct = Number(room.overallSafetyPercent ?? room.grandTotalSafetyFactor ?? 3);
-      const parasitic = calculateParasiticGains(erSensible, erSensible, ductPct, fanPct);
-
-      const ersh = (erSensible + parasitic.ductGain + parasitic.fanGain) * (1 + sensibleSafetyPct / 100);
-      const erlh = erLatent * (1 + latentSafetyPct / 100);
-      const oaSensible = isTFA ? 0 : vent.sensible * (1 - BF_LOCAL);
-      const oaLatent = isTFA ? 0 : vent.latent * (1 - BF_LOCAL);
-      const tfaOffSen = tfa ? tfa.spaceSensibleOffset : 0;
-      const tfaOffLat = tfa ? tfa.spaceLatentOffset : 0;
-      const coilSensible = isTfaOnly ? 0 : (isTFA ? Math.max(0, ersh - tfaOffSen) : ersh + oaSensible);
-      const coilLatent = isTfaOnly ? 0 : (isTFA ? Math.max(0, erlh - tfaOffLat) : erlh + oaLatent);
-      const grandTotal = coilSensible + coilLatent;
-
-      const coilLocal = calculateCoilParameters(
-        coilSensible,
-        coilLatent,
-        dcEff.indoorTemp,
-        dcEff.indoorHumidity,
-        dcEff.altitude || 0,
-        BF_LOCAL,
-        35,
-        65,
-        getMinAdp(project?.systemType, project?.adpBasis),
-      );
-      const presetTotalACH = getRecommendedAch(room.achProfile ?? room.activityType);
-      const totalSupplyACH = resolveTotalSupplyACH(presetTotalACH, rd.facph, Number(room.recircPct) || 0);
-      const totalSupplyCFM = (calculateRoomVolume(rd) * totalSupplyACH) / 60;
-      const freshAirCFM = (calculateRoomVolume(rd) * rd.facph) / 60;
-      // Supply-air basis: 'dscfm' (DEFAULT) vs 'ach' (legacy). See lib/hvac/supplyCfm.
-      const designSupplyCFM = resolveSupplyCfm({
-        basis: resolveRoomSupplyBasis(room.supplyCfmBasis, project?.supplyBasis),
-        isTFA, isTfaOnly,
-        dehumidifiedCFM: coilLocal.dehumidifiedCFM,
-        minAdpSensibleCFM: coilLocal.minAdpSensibleCFM,
-        totalSupplyCFM, freshAirCFM,
-        tfaCfm: tfa?.cfm ?? 0,
-      }).designSupplyCFM;
-
-      // Phase D: carrying capacity used by tfa-only rooms (and reported for
-      // all TFA-served rooms as a sanity check). Deficit > 0 = undersized.
-      const tfaCarryingBTUH = tfa ? 1.08 * tfa.cfm * (dcEff.indoorTemp - tfa.supplyTemp) : 0;
-      const tfaCarryingDeficit = isTfaOnly ? Math.max(0, ersh - tfaCarryingBTUH) : 0;
+      // Single shared engine (Step-2) — same TFA resolution + physics as the persist
+      // and report paths. calcRoom carries coerced numerics (rd) plus the TFA linkage
+      // fields (room.tfaMode/doasId/systemId/zoneId) the resolver reads, so its DOAS
+      // resolution matches the `doas` the caller passed in.
+      const calcRoom = { ...room, ...rd };
+      const snap = computeRoomLoad(calcRoom, elements, zoneDc, { equipSystems, project, zoneDocs: zones });
+      // Phase D: carrying capacity used by tfa-only rooms (and reported for all
+      // TFA-served rooms as a sanity check). Deficit > 0 = undersized.
+      const tfaCarryingBTUH = snap.tfa ? 1.08 * snap.tfa.cfm * (snap.dcEff.indoorTemp - snap.tfa.supplyTemp) : 0;
       return {
-        grandTotal,
-        designSupplyCFM,
-        coilDehumCFM: designSupplyCFM,
-        freshAirCFM,
-        isTFA,
-        heating: calculateHeatingLoad(rd, elements, dcEff),
-        area: rd.length * rd.width,
+        grandTotal: snap.grandTotal,
+        designSupplyCFM: snap.designCfm,
+        coilDehumCFM: snap.designCfm,
+        freshAirCFM: snap.freshAirCFM,
+        isTFA: snap.isTFA,
+        heating: snap.heating,
+        area: snap.area,
         // Per-room TFA coil load — aggregated by the caller into project TFA totals.
-        tfaCoilBTUH: tfa ? tfa.coilSensible + tfa.coilLatent : 0,
-        tfaCfm: tfa ? tfa.cfm : 0,
-        isTfaOnly,
+        tfaCoilBTUH: snap.tfaCoilSensible + snap.tfaCoilLatent,
+        tfaCfm: snap.tfaCfm,
+        isTfaOnly: snap.isTfaOnly,
         tfaCarryingBTUH,
-        tfaCarryingDeficit,
+        tfaCarryingDeficit: snap.isTfaOnly ? Math.max(0, snap.ersh - tfaCarryingBTUH) : 0,
         // tfa-only rooms remove their full envelope+internal load via TFA carrying;
         // the caller uses this to size the TFA aggregate vs the chiller plant.
-        tfaOnlyRoomLoad: isTfaOnly ? (ersh + erlh) : 0,
+        tfaOnlyRoomLoad: snap.isTfaOnly ? (snap.ersh + snap.erlh) : 0,
       };
     };
 

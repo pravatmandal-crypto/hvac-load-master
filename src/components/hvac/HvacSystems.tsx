@@ -235,6 +235,17 @@ function RoomEditPanel({ room, projectId, zone, project, onClose, onSaved }: Roo
       }
 
       const dc = resolveDesignConditions(project, zone);
+      // Load the project's equipment systems (the DOAS lives in /equipmentSystems/) so
+      // the shared engine resolves TFA the same way the LoadCalculator recompute does.
+      // Without this, a DOAS-served room saved here would be computed as non-TFA. Non-DOAS
+      // rooms resolve to no DOAS → identical numbers.
+      let equipSystems: any[] = [];
+      try {
+        const esSnap = await getDocs(collection(db, 'projects', projectId, 'equipmentSystems'));
+        equipSystems = esSnap.docs.map((d) => ({ id: d.id, ...d.data() }));
+      } catch {
+        // No equipment systems yet — room computes as non-TFA (unchanged behaviour).
+      }
       const result = await calculateAndPersistRoom(
         projectId,
         room.id,
@@ -244,6 +255,7 @@ function RoomEditPanel({ room, projectId, zone, project, onClose, onSaved }: Roo
         project.systemType,
         (project as any).adpBasis,
         (project as any).supplyBasis,
+        equipSystems,
       );
 
       const updated: RoomDoc = { ...form, ...result };
