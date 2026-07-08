@@ -75,6 +75,8 @@ src/types/          → Equipment system interfaces (IDUSelection, ODUSelection,
 
 **Critical invariant:** Always use `minAdpSensibleCFM` (CFM at the fixed system design ADP) for the 400 CFM/TR checkpoint — never `sensibleCFM` (which uses the floating `indicatedADP` and inflates for high-sensible rooms). This was an intentional fix; do not revert it.
 
+**Shared orchestrator (`lib/hvac/computeRoomLoad.ts`, 2026-07-08):** steps 1–7 above (the per-room cooling/coil/CFM sequence) live in ONE pure function, `computeRoomLoad(room, elements, dc, { equipSystems, project })` → `RoomLoadResult`. It resolves TFA/DOAS from `equipSystems` via `resolveRoomTfa` (no module globals). **`reportService.computeDetailed` and `airflowSchedule.roomDesignCfm` delegate to it** — change the physics here, not in those copies. NOT yet migrated (still hold their own hand-copied version): `loadCalculationService.calculateAndPersistRoom` (the production persist path — detects TFA differently, via `dc.ventilationStrategy`) and `excelService`. Migrating those changes persisted/exported numbers where they diverge, so do it deliberately behind the golden tests, not casually.
+
 ### Equipment Selection
 
 `EquipmentSelection.tsx` is the main equipment UI (~2700 lines). It reads room load results (`_calcRequiredTR`, `designSupplyCFM`) and lets users assign VRF / Chiller / Package / DOAS systems. Equipment systems are stored in `projects/{id}/hvacSystems/{systemId}`.
