@@ -1,33 +1,28 @@
-import React, { useRef, useState } from 'react';
-import jsPDF from 'jspdf';
-import { toCanvas } from 'html-to-image';
-import { toast } from 'sonner';
+import { useState, type ReactNode } from 'react';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../ui/card';
-import { BookOpen, Calculator, Thermometer, Wind, Shield, Info, FlaskConical, Zap, AlertTriangle, ChevronDown, ChevronRight, FileDown, Loader2 } from 'lucide-react';
+import { BookOpen, Calculator, Thermometer, Wind, Shield, Info, FlaskConical, Zap, AlertTriangle, ChevronDown, ChevronRight, Printer } from 'lucide-react';
 
 /* ─────────────────────────────────────────────────────────────────────────── */
 /* Methodology.tsx — Complete engineering methodology documentation             */
 /* Based on: ASHRAE Fundamentals 2017, Carrier HAP, Trane Trace methodology   */
 /* ─────────────────────────────────────────────────────────────────────────── */
 
-// Context that forces every CollapseSection open during PDF canvas capture
-const PdfCtx = React.createContext(false);
-
 // ── Collapsible section wrapper ──────────────────────────────────────────────
-function CollapseSection({ title, children, defaultOpen = true }: { title: string; children: React.ReactNode; defaultOpen?: boolean }) {
-  const pdfMode = React.useContext(PdfCtx);
+// The body is always mounted and only hidden with the `hidden` class when collapsed.
+// Print / Ctrl+P (see the `@media print` block in index.css) reveals every section, so
+// the printout is always the full, expanded document without touching React state.
+function CollapseSection({ title, children, defaultOpen = true }: { title: string; children: ReactNode; defaultOpen?: boolean }) {
   const [open, setOpen] = useState(defaultOpen);
-  const isOpen = pdfMode || open;
   return (
     <div className="border border-gray-100 rounded-xl overflow-hidden">
       <button
         onClick={() => setOpen(o => !o)}
-        className="w-full flex items-center justify-between px-4 py-3 bg-gray-50 hover:bg-gray-100 text-left text-sm font-semibold text-gray-800 transition-colors"
+        className="collapse-toggle w-full flex items-center justify-between px-4 py-3 bg-gray-50 hover:bg-gray-100 text-left text-sm font-semibold text-gray-800 transition-colors"
       >
         {title}
-        {isOpen ? <ChevronDown className="w-4 h-4 text-gray-400" /> : <ChevronRight className="w-4 h-4 text-gray-400" />}
+        {open ? <ChevronDown className="w-4 h-4 text-gray-400" /> : <ChevronRight className="w-4 h-4 text-gray-400" />}
       </button>
-      {isOpen && <div className="p-4 space-y-3">{children}</div>}
+      <div className={`collapse-body p-4 space-y-3 ${open ? '' : 'hidden'}`}>{children}</div>
     </div>
   );
 }
@@ -54,172 +49,24 @@ function CalcRow({ label, formula, result, unit = '', highlight = false }: { lab
   );
 }
 
+// Static methodology — printed via the browser's own engine (window.print / Ctrl+P),
+// so there is no PDF-generation code here. Print styling lives in index.css (@media print).
+
 export default function Methodology({ userRole }: { userRole?: string | null }) {
-  const contentRef = useRef<HTMLDivElement>(null);
-  const [generating, setGenerating] = useState(false);
-  const [pdfMode, setPdfMode] = useState(false);
-
-  const handleDownloadPDF = async () => {
-    if (!contentRef.current || generating) return;
-    setGenerating(true);
-    setPdfMode(true);
-    // Wait one frame for React to re-render all CollapseSection as expanded
-    await new Promise(r => setTimeout(r, 350));
-    try {
-      const pageW = 210;
-      const pageH = 297;
-      const marginL = 6, marginR = 6, marginT = 8, marginB = 10;
-      const contentW = pageW - marginL - marginR;   // 198 mm
-      const contentH = pageH - marginT - marginB;   // 279 mm
-
-      const doc = new jsPDF({ unit: 'mm', format: 'a4', compress: true });
-
-      // ── Cover page (page 1) ─────────────────────────────────────────────────
-      doc.setFillColor(15, 80, 160);
-      doc.rect(0, 0, pageW, 85, 'F');
-      doc.setFont('helvetica', 'bold');
-      doc.setFontSize(26);
-      doc.setTextColor(255, 255, 255);
-      doc.text('HVAC LOAD MASTER', 14, 28);
-      doc.setFontSize(17);
-      doc.text('Engineering Methodology', 14, 42);
-      doc.setFont('helvetica', 'normal');
-      doc.setFontSize(9.5);
-      doc.setTextColor(195, 218, 255);
-      doc.text('Complete step-by-step documentation of the cooling load calculation engine', 14, 55);
-      doc.text('CLTD / SHGF / CLF  ·  ASHRAE Psychrometrics  ·  ADP / Bypass-Factor Analysis', 14, 62);
-      doc.text('Reheat  ·  Dehumidification  ·  Equipment Sizing  ·  Full Worked Examples', 14, 69);
-
-      const refs = ['ASHRAE Fundamentals 2017', 'ASHRAE 1997 Ch. 26', 'Carrier Design Manual Pt. 1', 'ASHRAE Std 62.1-2022'];
-      let bx = 14;
-      doc.setFontSize(7.5);
-      doc.setTextColor(255, 255, 255);
-      refs.forEach((r) => {
-        const tw = doc.getTextWidth(r) + 6;
-        doc.setDrawColor(180, 210, 255);
-        doc.setFillColor(30, 100, 190);
-        doc.roundedRect(bx, 76, tw, 6.5, 1.5, 1.5, 'FD');
-        doc.text(r, bx + 3, 80.5);
-        bx += tw + 3;
-      });
-
-      doc.setFont('helvetica', 'normal');
-      doc.setFontSize(9);
-      doc.setTextColor(40, 55, 80);
-      doc.text('This document describes the full engineering methodology implemented in the HVAC Load Master', 14, 100);
-      doc.text('calculation engine — covering psychrometrics, envelope loads, internal gains, ADP analysis,', 14, 107);
-      doc.text('equipment sizing, moisture management, reheat, and three complete real-life worked examples.', 14, 114);
-
-      doc.setFont('helvetica', 'bold');
-      doc.setFontSize(9);
-      doc.setTextColor(15, 80, 160);
-      doc.text('Contents', 14, 130);
-      doc.setDrawColor(15, 80, 160);
-      doc.setLineWidth(0.4);
-      doc.line(14, 132, 196, 132);
-      const contents = [
-        'Step 1 — Psychrometrics',
-        'Step 2 — Envelope Loads (CLTD / SHGF / CLF)',
-        'Step 3 — Internal Gains (People, Lighting, Equipment)',
-        'Step 4 — Ventilation Load & Bypass Factor Split',
-        'Step 5 — Load Assembly (ERSH / ERLH → CSH / CLH → GTH)',
-        'Step 6 — ADP Search & Dehumidified CFM',
-        'Step 7 — Equipment Sizing (Load TR vs CFM TR)',
-        'Step 8 — Reheat Analysis & Moisture Management',
-        'Step 9 — Seasonal Design Comparison (Monsoon / Winter)',
-        'Worked Example — Conference Room, Salt Lake, Kolkata',
-        'Worked Example — Monsoon Design Scenario',
-        'Worked Example — Gangtok High-Altitude Comparison',
-        'Older Methods — Not Used Here & Why',
-        'Assumptions, Constants & Known Limitations',
-        'ASHRAE References',
-      ];
-      doc.setFont('helvetica', 'normal');
-      doc.setFontSize(8.5);
-      doc.setTextColor(40, 55, 80);
-      contents.forEach((line, i) => {
-        doc.text(`${i + 1}.  ${line}`, 16, 140 + i * 8);
-      });
-
-      doc.setDrawColor(200, 210, 225);
-      doc.setLineWidth(0.2);
-      doc.line(14, pageH - 18, pageW - 14, pageH - 18);
-      doc.setFontSize(7.5);
-      doc.setTextColor(100, 115, 140);
-      doc.text('© CREATIVE CONCEPT  ·  HVAC Load Master', 14, pageH - 12);
-      doc.text(
-        new Date().toLocaleDateString('en-GB', { day: '2-digit', month: 'long', year: 'numeric' }),
-        pageW - 14, pageH - 12, { align: 'right' },
-      );
-
-      // ── Render content to canvas, then split into A4 pages ─────────────────
-      // Using html2canvas directly avoids jsPDF's broken dynamic-import path.
-      const canvas = await toCanvas(contentRef.current, {
-        pixelRatio: 2,
-        backgroundColor: '#ffffff',
-      });
-
-      // How many canvas pixels fit in one PDF content row (279mm)
-      const pxPerMm = canvas.width / contentW;
-      const pageHeightPx = Math.round(contentH * pxPerMm);
-      const totalContentPages = Math.ceil(canvas.height / pageHeightPx);
-
-      const scratch = document.createElement('canvas');
-      scratch.width = canvas.width;
-
-      for (let i = 0; i < totalContentPages; i++) {
-        doc.addPage();
-
-        const srcY = i * pageHeightPx;
-        const srcH = Math.min(pageHeightPx, canvas.height - srcY);
-        scratch.height = srcH;
-        const ctx = scratch.getContext('2d')!;
-        ctx.clearRect(0, 0, scratch.width, scratch.height);
-        ctx.drawImage(canvas, 0, srcY, canvas.width, srcH, 0, 0, canvas.width, srcH);
-
-        const imgData = scratch.toDataURL('image/jpeg', 0.88);
-        const imgHmm = (srcH / pxPerMm);
-        doc.addImage(imgData, 'JPEG', marginL, marginT, contentW, imgHmm);
-
-        // Footer
-        doc.setFont('helvetica', 'normal');
-        doc.setFontSize(6);
-        doc.setTextColor(130, 140, 160);
-        doc.text(
-          '© CREATIVE CONCEPT  ·  HVAC Load Master  ·  Engineering Methodology  ·  ASHRAE Fundamentals 2017',
-          8, pageH - 4,
-        );
-        doc.text(`Page ${i + 1} of ${totalContentPages}`, pageW - 8, pageH - 4, { align: 'right' });
-      }
-
-      doc.save('HVAC_Load_Master_Methodology.pdf');
-
-    } catch (err) {
-      console.error('Methodology PDF generation failed:', err);
-      const msg = err instanceof Error ? err.message : String(err);
-      toast.error(`PDF failed: ${msg.slice(0, 120)}`);
-    } finally {
-      setPdfMode(false);
-      setGenerating(false);
-    }
-  };
+  const handlePrint = () => window.print();
 
   return (
-    <PdfCtx.Provider value={pdfMode}>
     <div className="methodology-theme max-w-5xl mx-auto space-y-8 pb-12">
       <div className="flex flex-col gap-2">
         <div className="flex items-start justify-between gap-4">
           <h2 className="text-3xl font-bold text-gray-900">Engineering Methodology</h2>
           {userRole === 'Super' && (
             <button
-              onClick={handleDownloadPDF}
-              disabled={generating}
-              className="flex-shrink-0 flex items-center gap-2 px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-700 disabled:bg-indigo-400 text-white text-sm font-semibold shadow transition-colors"
-              title="Download full methodology as PDF (Super only)"
+              onClick={handlePrint}
+              className="no-print flex-shrink-0 flex items-center gap-2 px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-semibold shadow transition-colors"
+              title="Print or save the methodology as a PDF"
             >
-              {generating
-                ? <><Loader2 className="w-4 h-4 animate-spin" /> Generating…</>
-                : <><FileDown className="w-4 h-4" /> Download PDF</>}
+              <Printer className="w-4 h-4" /> Print / Save as PDF
             </button>
           )}
         </div>
@@ -235,7 +82,7 @@ export default function Methodology({ userRole }: { userRole?: string | null }) 
           ))}
         </div>
       </div>
-      <div ref={contentRef} className={pdfMode ? 'pdf-export' : undefined}>
+      <div>
 
       {/* ── STEP 1 ── Psychrometrics ─────────────────────────────────────── */}
       <Card className="border-none shadow-sm overflow-hidden">
@@ -2011,8 +1858,7 @@ convective, making CLF < 1.0 even less significant.`,
       <div className="text-center pt-8">
         <p className="text-[10px] text-gray-400 uppercase tracking-widest">HVAC Load Master • Engineering Documentation • v2.1 • ASHRAE 2017</p>
       </div>
-      </div>{/* end contentRef */}
+      </div>
     </div>
-    </PdfCtx.Provider>
   );
 }

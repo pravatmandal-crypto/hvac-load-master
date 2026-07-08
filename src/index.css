@@ -4,6 +4,52 @@
 
 @custom-variant dark (&:is(.dark *));
 
+/* ── Print / "Save as PDF" for the Engineering Methodology page ─────────────────
+   The methodology is static documentation. Instead of rasterising it into a PDF, we
+   let the browser print the live DOM — crisp, selectable, vector text. These rules
+   isolate the methodology, expand every collapsed section, and tidy page breaks so
+   the Print button (window.print) / Ctrl+P produces a clean document.               */
+@media print {
+  /* Hide the whole app, then reveal only the methodology document */
+  body * { visibility: hidden !important; }
+  .methodology-theme, .methodology-theme * { visibility: visible !important; }
+  .methodology-theme {
+    position: absolute !important;
+    left: 0 !important;
+    top: 0 !important;
+    width: 100% !important;
+    max-width: none !important;
+    margin: 0 !important;
+    padding: 0 !important;
+  }
+
+  /* Let the page flow naturally onto multiple sheets */
+  html, body { height: auto !important; overflow: visible !important; }
+
+  /* Never print on-screen controls */
+  .no-print { display: none !important; }
+  .collapse-toggle svg { display: none !important; }
+
+  /* Expand every collapsed section so the whole document prints */
+  .collapse-body { display: block !important; }
+
+  /* Wide tables must lay out fully instead of clipping inside a scroll box */
+  .methodology-theme .overflow-x-auto { overflow: visible !important; }
+  .methodology-theme table { width: 100% !important; }
+
+  /* Keep small blocks and table rows from splitting across a page break */
+  .methodology-theme thead,
+  .methodology-theme tr,
+  .methodology-theme .rounded-lg { break-inside: avoid; }
+  .methodology-theme h2,
+  .methodology-theme h3 { break-after: avoid; }
+
+  /* Print background colours and coloured section headers faithfully */
+  * { -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; }
+}
+
+@page { size: A4; margin: 12mm; }
+
 @theme inline {
     --font-heading: var(--font-sans);
     --font-sans: 'Geist Variable', sans-serif;
