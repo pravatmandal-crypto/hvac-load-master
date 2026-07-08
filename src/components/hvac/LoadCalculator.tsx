@@ -46,6 +46,7 @@ import {
   pickCoolingSource,
   TFA_SUPPLY_DEFAULTS,
   computeRoomInputSig,
+  computeRoomLoad,
   type RoomDetails,
 } from '../../lib/hvac';
 import { EnvelopeElement, ACTIVITY_TYPES, ACTIVITY_ACH_RECOMMENDATIONS } from '../../lib/hvac/constants';
@@ -563,124 +564,42 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
     };
 
     const elements = (elementsOverride ?? envelopeElements[roomId] ?? []) as EnvelopeElement[];
-    const envelope = calculateEnvelopeGain(elements, dc);
-    const internal = calculateInternalGains(rd);
-    const vent = calculateVentilationLoad(rd, dc);
-    const tfa = isTFA ? calculateTFALoad(rd, dc) : null;
-    const heating = calculateHeatingLoad(rd, elements, dc);
-
-    const bf = 0.15;
-    // OA bypass-factor model only applies when OA enters the primary coil.
-    // In TFA mode, OA is conditioned by DOAS — primary sees no raw OA.
-    const erVentSensible = isTFA ? 0 : vent.sensible * bf;
-    const erVentLatent = isTFA ? 0 : vent.latent * bf;
-    const erSensible = envelope.sensible + internal.sensible + erVentSensible;
-    const erLatent = internal.latent + erVentLatent;
-    const ductPct = Number(roomSource.ductGainPct) || 2;
-    const fanPct = Number(roomSource.fanGainPct) || 3;
-    const sensibleSafetyPct = Number(roomSource.sensibleSafetyPercent ?? roomSource.sensibleSafetyFactor ?? 10);
-    const latentSafetyPct = Number(roomSource.latentSafetyPercent ?? roomSource.latentSafetyFactor ?? 5);
-    const overallSafetyPct = Number(roomSource.overallSafetyPercent ?? roomSource.grandTotalSafetyFactor ?? 3);
-    const parasitic = calculateParasiticGains(erSensible, erSensible, ductPct, fanPct);
-
-    const ershRaw = erSensible + parasitic.ductGain + parasitic.fanGain;
-    const erlhRaw = erLatent;
-    const ersh = ershRaw * (1 + sensibleSafetyPct / 100);
-    const erlh = erlhRaw * (1 + latentSafetyPct / 100);
-    const erh = ersh + erlh;
-    const oaSensible = isTFA ? 0 : vent.sensible * (1 - bf);
-    const oaLatent = isTFA ? 0 : vent.latent * (1 - bf);
-    const oaTotal = oaSensible + oaLatent;
-    // Cold-DOAS credit (engineering-correct, per locked decision 5).
-    const tfaOffsetSensible = tfa ? tfa.spaceSensibleOffset : 0;
-    const tfaOffsetLatent = tfa ? tfa.spaceLatentOffset : 0;
-    // Phase D: tfa-only rooms contribute zero to primary; room sensible is
-    // carried by the TFA supply air's reserve (1.08 × CFM × ΔT). Engine warns
-    // if carrying < ersh; designer decides whether to bump CFM or supply temp.
-    const isTfaOnly = isTFA && roomTfaMode === 'tfa-only';
+    // ── Single shared engine (Step-2 consolidation 2026-07-08) ──────────────────
+    // Per-room cooling/coil/CFM physics lives in lib/hvac/computeRoomLoad; this handler
+    // only layers on the persistence extras (moisture, reheat, the tfa-only carrying
+    // check, the analysis snapshot). computeRoomLoad re-resolves TFA from the same
+    // equipSystems + zones, so its isTFA/tfa match what this handler resolved above.
+    // calcRoom carries the coerced numerics (rd) AND the TFA linkage fields (roomSource
+    // tfaMode/doasId + systemId/zoneId) the resolver needs.
+    const calcRoom = { ...roomSource, ...rd, systemId, zoneId };
+    const s = computeRoomLoad(calcRoom, elements, dc, { equipSystems: equipForTfa, project, zoneDocs: zones });
+    const { envelope, internal, vent, tfa, coil, heating } = s;
+    const ersh = s.ersh, erlh = s.erlh, erh = s.erh;
+    const oaSensible = s.oaSensible, oaLatent = s.oaLatent, oaTotal = oaSensible + oaLatent;
+    const coilSensible = s.coilSensible, coilLatent = s.coilLatent;
+    const grandTotal = s.grandTotal, grandTotalTR = s.loadTr;
+    const rshf = coilSensible > 0 ? coilSensible / Math.max(1, (coilSensible + coilLatent)) : 1;
+    const designSupplyCFM = s.designCfm, cfmTR = s.cfmTr;
+    const governingTR = s.governingTr, requiredTR = s.requiredTr;
+    const ductPct = s.ductPct, fanPct = s.fanPct;
+    const sensibleSafetyPct = s.sSafetyPct, latentSafetyPct = s.lSafetyPct, overallSafetyPct = s.oSafetyPct;
+    // Phase D: tfa-only rooms contribute zero to the primary coil; the room sensible is
+    // carried by the TFA supply air's reserve (1.08 × CFM × ΔT). Engine warns when the
+    // carrying capacity is short of ersh — designer bumps CFM or supply temp.
+    const isTfaOnly = s.isTfaOnly;
     const tfaCarryingBTUH = tfa ? 1.08 * tfa.cfm * (dc.indoorTemp - tfa.supplyTemp) : 0;
     const tfaCarryingDeficit = isTfaOnly ? Math.max(0, ersh - tfaCarryingBTUH) : 0;
-    const coilSensible = isTfaOnly ? 0 : (isTFA ? Math.max(0, ersh - tfaOffsetSensible) : ersh + oaSensible);
-    const coilLatent = isTfaOnly ? 0 : (isTFA ? Math.max(0, erlh - tfaOffsetLatent) : erlh + oaLatent);
-    const grandTotal = isTfaOnly ? 0 : (isTFA ? coilSensible + coilLatent : erh + oaTotal);
-    const grandTotalTR = grandTotal / 12000;
-    const rshf = coilSensible > 0 ? coilSensible / Math.max(1, (coilSensible + coilLatent)) : 1;
 
-    const coil = calculateCoilParameters(
-      coilSensible,
-      coilLatent,
-      dc.indoorTemp,
-      dc.indoorHumidity,
-      dc.altitude || 0,
-      bf,
-      35,
-      65,
-      getMinAdp(project?.systemType, project?.adpBasis),
-    );
-    const presetTotalACH = getRecommendedAch(roomSource.achProfile ?? roomSource.activityType);
-    const totalSupplyACH = resolveTotalSupplyACH(presetTotalACH, rd.facph, Number(roomSource.recircPct) || 0);
-    const totalSupplyCFM = (calculateRoomVolume(rd) * totalSupplyACH) / 60;
-    const freshAirCFM = (calculateRoomVolume(rd) * rd.facph) / 60;
-    // Supply-air basis: 'dscfm' (DEFAULT, dehumidified-air) vs 'ach' (legacy ACH-preset).
-    // DSCFM is the default — only an explicit 'ach' opts out. The DOAS is independent of this
-    // — it always sizes off the OA FACPH. See lib/hvac/supplyCfm.
-    const supplyCfmBasis = resolveRoomSupplyBasis(roomSource.supplyCfmBasis, project?.supplyBasis);
-    const supply = resolveSupplyCfm({
-      basis: supplyCfmBasis,
-      isTFA, isTfaOnly,
-      dehumidifiedCFM: coil.dehumidifiedCFM,
-      minAdpSensibleCFM: coil.minAdpSensibleCFM,
-      totalSupplyCFM, freshAirCFM,
-      tfaCfm: tfa?.cfm ?? 0,
-    });
-    const designSupplyCFM = supply.designSupplyCFM;
-    // Plant TR is load-only (2026-05-20). cfmTR retained as sanity ratio.
-    const cfmTR = designSupplyCFM / 400;
-    const governingTR = grandTotalTR;
-    const requiredTR = governingTR * (1 + overallSafetyPct / 100);
-
-    // Monsoon snapshot — always computed so EquipmentSelection can compare seasons
+    // Monsoon snapshot — same engine at monsoon conditions (always computed so
+    // EquipmentSelection can compare seasons).
     const monsoonDc: any = { ...dc, outdoorTemp: monsoonDesignTemp, outdoorHumidity: monsoonDesignHumidity };
-    const monsoonEnvelope = calculateEnvelopeGain(elements, monsoonDc);
-    const monsoonVent = calculateVentilationLoad(rd, monsoonDc);
-    const monsoonTfa = isTFA ? calculateTFALoad(rd, monsoonDc) : null;
-    const monsoonErVentSen = isTFA ? 0 : monsoonVent.sensible * bf;
-    const monsoonErVentLat = isTFA ? 0 : monsoonVent.latent * bf;
-    const monsoonErSensible = monsoonEnvelope.sensible + internal.sensible + monsoonErVentSen;
-    const monsoonErLatent = internal.latent + monsoonErVentLat;
-    const monsoonParasitic = calculateParasiticGains(monsoonErSensible, monsoonErSensible, ductPct, fanPct);
-    const monsoonErshRaw = monsoonErSensible + monsoonParasitic.ductGain + monsoonParasitic.fanGain;
-    const monsoonErsh = monsoonErshRaw * (1 + sensibleSafetyPct / 100);
-    const monsoonErlh = monsoonErLatent * (1 + latentSafetyPct / 100);
-    const monsoonOaSen = isTFA ? 0 : monsoonVent.sensible * (1 - bf);
-    const monsoonOaLat = isTFA ? 0 : monsoonVent.latent * (1 - bf);
-    const monsoonTfaOffsetSen = monsoonTfa ? monsoonTfa.spaceSensibleOffset : 0;
-    const monsoonTfaOffsetLat = monsoonTfa ? monsoonTfa.spaceLatentOffset : 0;
-    const monsoonCoilSen = isTfaOnly
-      ? 0
-      : (isTFA ? Math.max(0, monsoonErsh - monsoonTfaOffsetSen) : monsoonErsh + monsoonOaSen);
-    const monsoonCoilLat = isTfaOnly
-      ? 0
-      : (isTFA ? Math.max(0, monsoonErlh - monsoonTfaOffsetLat) : monsoonErlh + monsoonOaLat);
-    const monsoonGrandTotal = monsoonCoilSen + monsoonCoilLat;
-    const monsoonGrandTotalTR = monsoonGrandTotal / 12000;
-    const monsoonCoilParams = calculateCoilParameters(
-      monsoonCoilSen, monsoonCoilLat,
-      dc.indoorTemp, dc.indoorHumidity, dc.altitude || 0,
-      bf, 35, 65, getMinAdp(project?.systemType, project?.adpBasis),
-    );
-    const monsoonSupply = resolveSupplyCfm({
-      basis: supplyCfmBasis,
-      isTFA, isTfaOnly,
-      dehumidifiedCFM: monsoonCoilParams.dehumidifiedCFM,
-      minAdpSensibleCFM: monsoonCoilParams.minAdpSensibleCFM,
-      totalSupplyCFM, freshAirCFM,
-      tfaCfm: monsoonTfa?.cfm ?? 0,
-    });
-    const monsoonDesignCFM = monsoonSupply.designSupplyCFM;
-    const monsoonCfmTR = monsoonDesignCFM / 400;
-    const monsoonGoverningTR = monsoonGrandTotalTR;
-    const monsoonRequiredTR = monsoonGoverningTR * (1 + overallSafetyPct / 100);
+    const mres = computeRoomLoad(calcRoom, elements, monsoonDc, { equipSystems: equipForTfa, project, zoneDocs: zones });
+    const monsoonTfa = mres.tfa;
+    const monsoonOaSen = mres.oaSensible, monsoonOaLat = mres.oaLatent;
+    const monsoonCoilLat = mres.coilLatent;
+    const monsoonGrandTotalTR = mres.loadTr;
+    const monsoonDesignCFM = mres.designCfm, monsoonCfmTR = mres.cfmTr;
+    const monsoonGoverningTR = mres.governingTr, monsoonRequiredTR = mres.requiredTr;
     const overallGoverningTR = includeMonsoon ? Math.max(governingTR, monsoonGoverningTR) : governingTR;
     const overallRequiredTR  = includeMonsoon ? Math.max(requiredTR, monsoonRequiredTR) : requiredTR;
     const overallDesignCFM   = includeMonsoon ? Math.max(designSupplyCFM, monsoonDesignCFM) : designSupplyCFM;

@@ -11,21 +11,9 @@
 import { doc, updateDoc } from 'firebase/firestore';
 import { db } from '../lib/firebase';
 import {
-  calculateEnvelopeGain,
-  calculateInternalGains,
-  calculateVentilationLoad,
-  calculateParasiticGains,
-  calculateHeatingLoad,
   calculatePsychrometrics,
-  calculateCoilParameters,
-  calculateRoomVolume,
   calculateReheat,
-  calculateTFALoad,
-  getRecommendedAch,
-  getMinAdp,
-  resolveSupplyCfm,
-  resolveRoomSupplyBasis,
-  resolveTotalSupplyACH,
+  computeRoomLoad,
   type SupplyCfmBasis,
   type RoomDetails,
 } from '../lib/hvac';
@@ -126,6 +114,7 @@ export async function calculateAndPersistRoom(
   systemType?: string,
   adpBasis?: string,
   projectSupplyBasis?: string,
+  equipSystems: any[] = [],
 ): Promise<RoomCalcResult> {
   const rd: RoomDetails = {
     id: room.id,
@@ -147,155 +136,61 @@ export async function calculateAndPersistRoom(
     ...(Number(room.slabFFactor) > 0 ? { slabFFactor: Number(room.slabFFactor) } : {}),
   };
 
-  const bf = 0.15;
   const ductPct = Number(room.ductGainPct) || 2;
   const fanPct = Number(room.fanGainPct) || 3;
   const sensibleSafetyPct = Number(room.sensibleSafetyPercent ?? room.sensibleSafetyFactor ?? 10);
   const latentSafetyPct = Number(room.latentSafetyPercent ?? room.latentSafetyFactor ?? 5);
   const overallSafetyPct = Number(room.overallSafetyPercent ?? room.grandTotalSafetyFactor ?? 3);
-  const minAdp = getMinAdp(systemType, adpBasis);
 
-  // ── Strategy: primary (default, current behavior) vs tfa-cold ────────────
-  // When TFA/DOAS is active, OA is conditioned by a separate unit. The
-  // primary coil sees no raw OA; instead the cold dry supply offsets a
-  // portion of the room load.
-  const isTFA = dc.ventilationStrategy === 'tfa-cold';
-
-  // ── Summer calc ───────────────────────────────────────────────────────────
-  const envelope = calculateEnvelopeGain(elements, dc);
-  const internal = calculateInternalGains(rd);
-  const vent = calculateVentilationLoad(rd, dc);
-  const tfa = isTFA ? calculateTFALoad(rd, dc) : null;
-  const heating = dc.includeWinter ? calculateHeatingLoad(rd, elements, dc) : null;
-  // Apply same overall safety factor that cooling pipeline uses, so heating output
-  // mirrors the cooling-side margin. Stored alongside the raw value for transparency.
+  // ── Summer calc — single shared engine (Step-2 consolidation 2026-07-08) ─────
+  // computeRoomLoad runs the canonical envelope→internal→vent→TFA-credit→coil→
+  // resolveSupplyCfm sequence. TFA/DOAS is resolved from equipSystems; when the
+  // caller passes none (the current HvacSystems SD-save call), resolveRoomTfa finds
+  // no DOAS → bit-identical to the previous dc.ventilationStrategy path for non-DOAS
+  // rooms. Wire equipSystems through the caller to make the SD-save path TFA-aware.
+  const clProject = { systemType, adpBasis, supplyBasis: projectSupplyBasis };
+  const s = computeRoomLoad(room, elements, dc, { equipSystems, project: clProject });
+  const isTFA = s.isTFA;
+  const { envelope, internal, vent, tfa, coil } = s;
+  const ersh = s.ersh, erlh = s.erlh, erh = s.erh;
+  const oaSensible = s.oaSensible, oaLatent = s.oaLatent, oaTotal = oaSensible + oaLatent;
+  const coilSensible = s.coilSensible, coilLatent = s.coilLatent;
+  const grandTotal = s.grandTotal, grandTotalTR = s.loadTr;
+  // GSHF stored on the coil summary — same formula the app has always persisted.
+  const rshf = coilSensible > 0 ? coilSensible / Math.max(1, coilSensible + coilLatent) : 1;
+  const designSupplyCFM = s.designCfm, cfmTR = s.cfmTr;
+  const governingTR = s.governingTr, requiredTR = s.requiredTr;
+  const supplyCfmBasis: SupplyCfmBasis = s.supplyCfmBasis;
+  const freshAirCFM = s.freshAirCFM;
+  // Heating only when the winter block is requested; safety mirrors the cooling margin.
+  const heating = dc.includeWinter ? s.heating : null;
   const heatingTotalWithSafety = heating
     ? heating.totalHeatingLoad * (1 + overallSafetyPct / 100)
     : 0;
 
-  // Bypass-OA model only applies when OA enters the primary coil.
-  // TFA mode: OA bypasses the primary entirely → zero ventilation in ER and OA legs.
-  const erVentSensible = isTFA ? 0 : vent.sensible * bf;
-  const erVentLatent = isTFA ? 0 : vent.latent * bf;
-  const erSensible = envelope.sensible + internal.sensible + erVentSensible;
-  const erLatent = internal.latent + erVentLatent;
-  const parasitic = calculateParasiticGains(erSensible, erSensible, ductPct, fanPct);
-
-  const ershRaw = erSensible + parasitic.ductGain + parasitic.fanGain;
-  const erlhRaw = erLatent;
-  const ersh = ershRaw * (1 + sensibleSafetyPct / 100);
-  const erlh = erlhRaw * (1 + latentSafetyPct / 100);
-  const erh = ersh + erlh;
-  const oaSensible = isTFA ? 0 : vent.sensible * (1 - bf);
-  const oaLatent = isTFA ? 0 : vent.latent * (1 - bf);
-  const oaTotal = oaSensible + oaLatent;
-  // Cold-DOAS credit (engineering-correct, per locked decision 5).
-  const tfaOffsetSensible = tfa ? tfa.spaceSensibleOffset : 0;
-  const tfaOffsetLatent = tfa ? tfa.spaceLatentOffset : 0;
-  const coilSensible = isTFA
-    ? Math.max(0, ersh - tfaOffsetSensible)
-    : ersh + oaSensible;
-  const coilLatent = isTFA
-    ? Math.max(0, erlh - tfaOffsetLatent)
-    : erlh + oaLatent;
-  const grandTotal = isTFA ? coilSensible + coilLatent : erh + oaTotal;
-  const grandTotalTR = grandTotal / 12000;
-  const rshf = coilSensible > 0 ? coilSensible / Math.max(1, coilSensible + coilLatent) : 1;
-
-  const coil = calculateCoilParameters(
-    coilSensible, coilLatent,
-    dc.indoorTemp, dc.indoorHumidity, dc.altitude || 0,
-    bf, 35, 65, minAdp,
-  );
-
-  const presetTotalACH = getRecommendedAch(room.achProfile ?? room.activityType);
-  const totalSupplyACH = resolveTotalSupplyACH(presetTotalACH, rd.facph, Number(room.recircPct) || 0);
-  const totalSupplyCFM = (calculateRoomVolume(rd) * totalSupplyACH) / 60;
-  // Fresh-air (OA) the room introduces — used to floor the space AHU under the DSCFM basis.
-  const freshAirCFM = (calculateRoomVolume(rd) * rd.facph) / 60;
-  // Supply-air basis: 'dscfm' (DEFAULT, Carrier/ASHRAE dehumidified-air) vs 'ach' (legacy
-  // ACH-preset). DSCFM is the default — only an explicit 'ach' opts out. The DOAS is
-  // independent of this — it always sizes off the OA FACPH.
-  const supplyCfmBasis: SupplyCfmBasis = resolveRoomSupplyBasis(room.supplyCfmBasis, projectSupplyBasis);
-  const supply = resolveSupplyCfm({
-    basis: supplyCfmBasis,
-    isTFA,
-    isTfaOnly: false,
-    dehumidifiedCFM: coil.dehumidifiedCFM,
-    minAdpSensibleCFM: coil.minAdpSensibleCFM,
-    totalSupplyCFM,
-    freshAirCFM,
-    tfaCfm: tfa?.cfm ?? 0,
-  });
-  const designSupplyCFM = supply.designSupplyCFM;
-  // cfmTR is a SANITY RATIO only — kept for display/warning. It does NOT
-  // govern plant sizing. The 400 CFM/TR rule is rule-of-thumb air-system
-  // sizing; OEM unit ratings already enforce the TR↔CFM coupling, and
-  // chiller plants are sized by coil load only. (Decision: 2026-05-20.)
-  const cfmTR = designSupplyCFM / 400;
-  const governingTR = grandTotalTR;
-  const requiredTR = grandTotalTR * (1 + overallSafetyPct / 100);
-
-  // ── Monsoon calc ─────────────────────────────────────────────────────────
+  // ── Monsoon calc — same shared engine at monsoon conditions ──────────────────
   const hasMonsoon = !!(dc.monsoonOutdoorTemp && dc.monsoonOutdoorHumidity);
   const monsoonDc = {
     ...dc,
     outdoorTemp: dc.monsoonOutdoorTemp ?? dc.outdoorTemp,
     outdoorHumidity: dc.monsoonOutdoorHumidity ?? dc.outdoorHumidity,
   };
-  const monsoonEnvelope = calculateEnvelopeGain(elements, monsoonDc);
-  const monsoonVent = calculateVentilationLoad(rd, monsoonDc);
-  const monsoonTfa = isTFA ? calculateTFALoad(rd, monsoonDc) : null;
-  const monsoonErVentSensible = isTFA ? 0 : monsoonVent.sensible * bf;
-  const monsoonErVentLatent = isTFA ? 0 : monsoonVent.latent * bf;
-  const monsoonErSensible = monsoonEnvelope.sensible + internal.sensible + monsoonErVentSensible;
-  const monsoonErLatent = internal.latent + monsoonErVentLatent;
-  const monsoonParasitic = calculateParasiticGains(monsoonErSensible, monsoonErSensible, ductPct, fanPct);
-  const monsoonErshRaw = monsoonErSensible + monsoonParasitic.ductGain + monsoonParasitic.fanGain;
-  const monsoonErsh = monsoonErshRaw * (1 + sensibleSafetyPct / 100);
-  const monsoonErlh = monsoonErLatent * (1 + latentSafetyPct / 100);
-  const monsoonOaSensible = isTFA ? 0 : monsoonVent.sensible * (1 - bf);
-  const monsoonOaLatent = isTFA ? 0 : monsoonVent.latent * (1 - bf);
-  const monsoonTfaOffsetSen = monsoonTfa ? monsoonTfa.spaceSensibleOffset : 0;
-  const monsoonTfaOffsetLat = monsoonTfa ? monsoonTfa.spaceLatentOffset : 0;
-  const monsoonCoilSen = isTFA
-    ? Math.max(0, monsoonErsh - monsoonTfaOffsetSen)
-    : monsoonErsh + monsoonOaSensible;
-  const monsoonCoilLat = isTFA
-    ? Math.max(0, monsoonErlh - monsoonTfaOffsetLat)
-    : monsoonErlh + monsoonOaLatent;
-  const monsoonGrandTotal = monsoonCoilSen + monsoonCoilLat;
-  const monsoonGrandTotalTR = monsoonGrandTotal / 12000;
-  const monsoonCoilParams = calculateCoilParameters(
-    monsoonCoilSen, monsoonCoilLat,
-    dc.indoorTemp, dc.indoorHumidity, dc.altitude || 0,
-    bf, 35, 65, minAdp,
-  );
-  const monsoonSupply = resolveSupplyCfm({
-    basis: supplyCfmBasis,
-    isTFA,
-    isTfaOnly: false,
-    dehumidifiedCFM: monsoonCoilParams.dehumidifiedCFM,
-    minAdpSensibleCFM: monsoonCoilParams.minAdpSensibleCFM,
-    totalSupplyCFM,
-    freshAirCFM,
-    tfaCfm: monsoonTfa?.cfm ?? 0,
-  });
-  const monsoonDesignCFM = monsoonSupply.designSupplyCFM;
-  const monsoonCfmTR = monsoonDesignCFM / 400;
-  const monsoonGoverningTR = monsoonGrandTotalTR;
-  const monsoonRequiredTR = monsoonGrandTotalTR * (1 + overallSafetyPct / 100);
+  const m = computeRoomLoad(room, elements, monsoonDc, { equipSystems, project: clProject });
+  const monsoonTfa = m.tfa;
+  const monsoonOaSensible = m.oaSensible, monsoonOaLatent = m.oaLatent;
+  const monsoonCoilLat = m.coilLatent;
+  const monsoonGrandTotalTR = m.loadTr;
+  const monsoonDesignCFM = m.designCfm;
+  const monsoonCfmTR = m.cfmTr;
+  const monsoonGoverningTR = m.governingTr;
+  const monsoonRequiredTR = m.requiredTr;
 
   const overallGoverningTR = hasMonsoon ? Math.max(governingTR, monsoonGoverningTR) : governingTR;
   const overallRequiredTR = hasMonsoon ? Math.max(requiredTR, monsoonRequiredTR) : requiredTR;
   const overallDesignCFM = hasMonsoon ? Math.max(designSupplyCFM, monsoonDesignCFM) : designSupplyCFM;
   // Governing candidates for each basis (max across cooling seasons) — feed the UI read-out.
-  const dscfmBasisCFM = hasMonsoon
-    ? Math.max(supply.dscfmBasisCFM, monsoonSupply.dscfmBasisCFM)
-    : supply.dscfmBasisCFM;
-  const achBasisCFM = hasMonsoon
-    ? Math.max(supply.achBasisCFM, monsoonSupply.achBasisCFM)
-    : supply.achBasisCFM;
+  const dscfmBasisCFM = hasMonsoon ? Math.max(s.dscfmBasisCFM, m.dscfmBasisCFM) : s.dscfmBasisCFM;
+  const achBasisCFM = hasMonsoon ? Math.max(s.achBasisCFM, m.achBasisCFM) : s.achBasisCFM;
 
   // ── Analysis snapshot ────────────────────────────────────────────────────
   const outdoorPsych = calculatePsychrometrics(dc.outdoorTemp, dc.outdoorHumidity, dc.altitude || 0);

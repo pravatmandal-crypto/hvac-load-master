@@ -26,7 +26,7 @@ import { calculateVentilationLoad, calculateHeatingLoad, calculateTFALoad } from
 import { calculatePsychrometrics, calculateCoilParameters } from './psychrometrics';
 import { calculateParasiticGains } from './parasitic';
 import { resolveRoomTfa } from './tfa';
-import { resolveSupplyCfm, resolveRoomSupplyBasis, resolveTotalSupplyACH } from './supplyCfm';
+import { resolveSupplyCfm, resolveRoomSupplyBasis, resolveTotalSupplyACH, type SupplyCfmBasis } from './supplyCfm';
 
 const asNum = (v: any, fb: number) => { const n = Number(v); return Number.isFinite(n) ? n : fb; };
 
@@ -86,6 +86,11 @@ export interface RoomLoadResult {
   totalSupplyCfm: number;
   designCfm: number;
   cfmTr: number;
+  /** Resolved supply-air basis actually used ('dscfm' | 'ach'). */
+  supplyCfmBasis: SupplyCfmBasis;
+  /** Candidate CFM under each basis + the fresh-air floor (for the Basis read-out). */
+  dscfmBasisCFM: number;
+  achBasisCFM: number;
 
   // ── TR (load-only governing) ──
   governingTr: number;
@@ -175,15 +180,17 @@ export const computeRoomLoad = (
   const totalAch     = resolveTotalSupplyACH(getRecommendedAch(room?.achProfile ?? room?.activityType), asNum(room?.facph, 0), asNum(room?.recircPct, 0));
   const totalSupplyCfm = (calculateRoomVolume(room) * totalAch) / 60;
   // Supply-air basis: 'dscfm' (DEFAULT, dehumidified-air) vs 'ach' (legacy ACH-preset).
-  const designCfm    = resolveSupplyCfm({
-    basis: resolveRoomSupplyBasis(room?.supplyCfmBasis, project?.supplyBasis),
+  const supplyCfmBasis = resolveRoomSupplyBasis(room?.supplyCfmBasis, project?.supplyBasis);
+  const supply       = resolveSupplyCfm({
+    basis: supplyCfmBasis,
     isTFA, isTfaOnly,
     dehumidifiedCFM: coil.dehumidifiedCFM,
     minAdpSensibleCFM: coil.minAdpSensibleCFM,
     totalSupplyCFM: totalSupplyCfm,
     freshAirCFM: faCfm,
     tfaCfm: tfa?.cfm ?? 0,
-  }).designSupplyCFM;
+  });
+  const designCfm    = supply.designSupplyCFM;
   const cfmTr        = designCfm / 400;
   // Plant TR is LOAD-ONLY (locked policy 2026-05-20). cfmTr is a sanity ratio only.
   const governingTr  = loadTr;
@@ -206,6 +213,7 @@ export const computeRoomLoad = (
     coilSensible, coilLatent, grandTotal, loadTr,
     coil,
     totalAch, totalSupplyCfm, designCfm, cfmTr,
+    supplyCfmBasis, dscfmBasisCFM: supply.dscfmBasisCFM, achBasisCFM: supply.achBasisCFM,
     governingTr, requiredTr,
     tfaCoilSensible, tfaCoilLatent, tfaCoilTr, tfaCfm, tfaReheat, tfaCoilADP,
     bf: BF, sSafetyPct, lSafetyPct, oSafetyPct, ductPct, fanPct,
