@@ -1,0 +1,355 @@
+[
+  {
+    "project": "TEZPUR, SSC COMPLEX",
+    "archetype": "single-ahu-chiller",
+    "label": "UWO Office — single-AHU chiller (comfort ADP, ACH basis)",
+    "wantTfa": false,
+    "room": {
+      "id": "UWO'S Office (A)",
+      "name": "UWO'S Office (A)",
+      "floor": "1st",
+      "length": 20,
+      "width": 18,
+      "height": 10.5,
+      "hasFalseCeiling": false,
+      "falseCeilingHeight": 10,
+      "facph": 1.5,
+      "peopleCount": 4,
+      "activityType": "office",
+      "achProfile": "office",
+      "lightsWattsPerSqft": 1,
+      "equipmentKW": 0.15,
+      "othersKW": 0,
+      "systemId": "FpIYhzt3Qv4aiTlnxzLi",
+      "zoneId": "zone-1778245754572",
+      "supplyCfmBasis": "ach",
+      "sensibleSafetyPercent": 10,
+      "latentSafetyPercent": 5,
+      "overallSafetyPercent": 3,
+      "ductGainPct": 2,
+      "fanGainPct": 3
+    },
+    "envelopeElements": [
+      {
+        "_id": "2RgkmX4rCCkRcKKoPKY0",
+        "color": "Dark",
+        "description": "New Wall",
+        "wallTypeId": "w1",
+        "type": "Wall",
+        "isOverride": false,
+        "uValue": 0.35,
+        "area": 170,
+        "orientation": "E",
+        "solarFactor": 48.18779294386148
+      },
+      {
+        "_id": "C9HUqjuvDzghc8yUgQIr",
+        "area": 360,
+        "isOverride": false,
+        "orientation": "H",
+        "color": "Dark",
+        "description": "New Floor",
+        "solarFactor": 10,
+        "uValue": 0.3,
+        "type": "Floor"
+      },
+      {
+        "_id": "RyNrIlAI9IWbJHo7XAbs",
+        "type": "Glass",
+        "wallTypeId": "g2",
+        "color": "Dark",
+        "description": "New Glass",
+        "uValue": 0.5,
+        "shgc": 0.7,
+        "isOverride": false,
+        "area": 20,
+        "solarFactor": 68.31924800456451,
+        "orientation": "E"
+      },
+      {
+        "_id": "eQzJBkfFMxgvaNxfiPrV",
+        "type": "Roof",
+        "solarFactor": 38.95,
+        "uValue": 0.3,
+        "color": "Dark",
+        "orientation": "H",
+        "description": "New Roof",
+        "area": 360,
+        "isOverride": false
+      },
+      {
+        "_id": "inydtfTptyln859Llmp5",
+        "type": "Partition",
+        "orientation": "N",
+        "area": 189,
+        "uValue": 0.35,
+        "solarFactor": 8.4,
+        "description": "New Partition",
+        "isOverride": false,
+        "color": "Dark",
+        "wallTypeId": "w1"
+      }
+    ],
+    "baseDc": {
+      "outdoorTemp": 94,
+      "indoorTemp": 72,
+      "outdoorHumidity": 59,
+      "indoorHumidity": 50,
+      "altitude": 259,
+      "latitude": 26.61,
+      "longitude": 92.783,
+      "winterOutdoorTemp": 52,
+      "winterOutdoorHumidity": 80,
+      "winterIndoorTemp": 72,
+      "winterIndoorHumidity": 50,
+      "includeWinter": true
+    },
+    "equipSystems": [],
+    "projectParams": {
+      "systemType": "Chiller",
+      "adpBasis": "comfort",
+      "supplyBasis": "ach"
+    },
+    "expected": {
+      "coilSensible": 18016.47398117201,
+      "coilLatent": 6386.983337184552,
+      "grandTotalTR": 2.0336214431963797,
+      "selectedADP": 54,
+      "minAdpSensibleCFM": 1090.3215916952317,
+      "tfa": null
+    }
+  },
+  {
+    "project": "TEZPUR , BOCC COMPLEX",
+    "archetype": "doas-tfa-chiller",
+    "label": "COO ORD — DOAS/TFA chiller",
+    "wantTfa": true,
+    "room": {
+      "id": "COO ORD",
+      "name": "COO ORD",
+      "floor": "Ground",
+      "length": 25,
+      "width": 20,
+      "height": 20.5,
+      "hasFalseCeiling": true,
+      "falseCeilingHeight": 10.5,
+      "facph": 1,
+      "peopleCount": 10,
+      "activityType": "office",
+      "achProfile": "walking",
+      "lightsWattsPerSqft": 1,
+      "equipmentKW": 0.15,
+      "othersKW": 0,
+      "tfaMode": "tfa-served",
+      "systemId": "DQ9bafQsjnZ2BeOJqaoF",
+      "zoneId": "zone-1778917182986",
+      "sensibleSafetyPercent": 10,
+      "latentSafetyPercent": 5,
+      "overallSafetyPercent": 3,
+      "ductGainPct": 2,
+      "fanGainPct": 3
+    },
+    "envelopeElements": [
+      {
+        "_id": "53xO5X4WpVUngtwNsZIF",
+        "type": "Roof",
+        "orientation": "H",
+        "area": 500,
+        "uValue": 0.3,
+        "solarFactor": 38.977934200399396,
+        "description": "New Roof",
+        "isOverride": false,
+        "color": "Dark"
+      },
+      {
+        "_id": "6EAl2s9SakASQoZ3RJHE",
+        "type": "Partition",
+        "orientation": "N",
+        "area": 518,
+        "uValue": 0.35,
+        "solarFactor": 8.4,
+        "description": "New Partition",
+        "isOverride": false,
+        "color": "Dark",
+        "wallTypeId": "w1"
+      },
+      {
+        "_id": "G5yi5q7mMzlfZ9u3y2vC",
+        "type": "Floor",
+        "orientation": "H",
+        "area": 500,
+        "uValue": 0.3,
+        "solarFactor": 10,
+        "description": "New Floor",
+        "isOverride": false,
+        "color": "Dark"
+      },
+      {
+        "_id": "s7zHNd7Q0IdWwCCbYFK8",
+        "type": "Wall",
+        "orientation": "N",
+        "area": 468,
+        "uValue": 0.35,
+        "solarFactor": 29.112675766316887,
+        "description": "New Wall",
+        "isOverride": false,
+        "color": "Dark",
+        "wallTypeId": "w1"
+      },
+      {
+        "_id": "yLsPsB8uOjBbjUt3D9vB",
+        "type": "Glass",
+        "orientation": "N",
+        "area": 50,
+        "uValue": 0.5,
+        "solarFactor": 26.12206541350996,
+        "description": "New Glass",
+        "isOverride": false,
+        "color": "Dark",
+        "shgc": 0.7,
+        "wallTypeId": "g2"
+      }
+    ],
+    "baseDc": {
+      "outdoorTemp": 94,
+      "indoorTemp": 72,
+      "outdoorHumidity": 59,
+      "indoorHumidity": 50,
+      "altitude": 259,
+      "latitude": 26.61,
+      "longitude": 92.783,
+      "winterOutdoorTemp": 40,
+      "winterOutdoorHumidity": 30,
+      "winterIndoorTemp": 70,
+      "winterIndoorHumidity": 30,
+      "includeWinter": false,
+      "tfaWinterSupplyTemp": null
+    },
+    "equipSystems": [
+      {
+        "id": "doas1",
+        "type": "DOAS",
+        "tfaSupplyTemp": 55,
+        "tfaSupplyHumidity": 90,
+        "ervSensibleEffectiveness": 0,
+        "ervLatentEffectiveness": 0
+      }
+    ],
+    "projectParams": {
+      "systemType": "Chiller",
+      "adpBasis": null,
+      "supplyBasis": null
+    },
+    "expected": {
+      "coilSensible": 24015.941614587617,
+      "coilLatent": 2121.0837766426484,
+      "grandTotalTR": 2.178085449269189,
+      "selectedADP": 51,
+      "minAdpSensibleCFM": 934.3270158180678,
+      "tfa": {
+        "coilSensible": 3685.5,
+        "coilLatent": 5109.978246318984,
+        "cfm": 87.5
+      }
+    }
+  },
+  {
+    "project": "R&R RESORT",
+    "archetype": "vrf",
+    "label": "Bar Area — VRF",
+    "wantTfa": false,
+    "room": {
+      "id": "Bar Area",
+      "name": "Bar Area",
+      "floor": "Level - 2",
+      "length": 18,
+      "width": 12,
+      "height": 18.3,
+      "hasFalseCeiling": true,
+      "falseCeilingHeight": 17,
+      "facph": 1.5,
+      "peopleCount": 4,
+      "activityType": "office",
+      "lightsWattsPerSqft": 1,
+      "equipmentKW": 0.15,
+      "othersKW": 0,
+      "systemId": "Goh1DCO6PvTljz3IkDQ9",
+      "zoneId": "zone-1778741831931",
+      "ductGainPct": 2,
+      "fanGainPct": 3
+    },
+    "envelopeElements": [
+      {
+        "_id": "744sqGd1sG7J2CYCCTx3",
+        "isOverride": false,
+        "area": 216,
+        "uValue": 0.31,
+        "description": "New Floor",
+        "orientation": "H",
+        "solarFactor": 10,
+        "type": "Floor"
+      },
+      {
+        "_id": "YyFAk1GRvk8aMvoFtONS",
+        "orientation": "H",
+        "color": "Light",
+        "solarFactor": 33.95,
+        "type": "Roof",
+        "area": 216,
+        "isOverride": true,
+        "uValue": 0.31,
+        "description": "New Roof"
+      },
+      {
+        "_id": "ZtuUnTKt1oOQEiEBVcfG",
+        "type": "Wall",
+        "solarFactor": 29,
+        "orientation": "E",
+        "uValue": 0.35,
+        "description": "New Wall",
+        "area": 113,
+        "isOverride": true,
+        "wallTypeId": "w1"
+      },
+      {
+        "_id": "xSwjmL3Yt8HstBJSGdLA",
+        "uValue": 0.35,
+        "description": "New Partition",
+        "area": 517,
+        "isOverride": false,
+        "wallTypeId": "w1",
+        "type": "Partition",
+        "solarFactor": 12,
+        "orientation": "N"
+      }
+    ],
+    "baseDc": {
+      "outdoorTemp": 86,
+      "indoorTemp": 75,
+      "outdoorHumidity": 65,
+      "indoorHumidity": 55,
+      "altitude": 2543,
+      "latitude": 27.29416,
+      "longitude": 88.58963,
+      "winterOutdoorTemp": 40,
+      "winterOutdoorHumidity": 80,
+      "winterIndoorTemp": 75,
+      "winterIndoorHumidity": 55,
+      "includeWinter": false
+    },
+    "equipSystems": [],
+    "projectParams": {
+      "systemType": "VRF",
+      "adpBasis": null,
+      "supplyBasis": null
+    },
+    "expected": {
+      "coilSensible": 9445.319598,
+      "coilLatent": 4373.638588135914,
+      "grandTotalTR": 1.1515798488446596,
+      "selectedADP": 51,
+      "minAdpSensibleCFM": 311.7884596949891,
+      "tfa": null
+    }
+  }
+]

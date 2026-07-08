@@ -14,6 +14,7 @@ import {
   getRecommendedAch,
   getMinAdp,
   calculateSingleElementGain,
+  computeRoomLoad,
 } from '../lib/hvac-logic';
 import { resolveSupplyCfm, resolveRoomSupplyBasis, resolveTotalSupplyACH, computeAirflowSplit } from '../lib/hvac/supplyCfm';
 
@@ -857,88 +858,22 @@ const resolveEntityDC = (entity: EntityRecord, season: SeasonProfile, project: a
 };
 
 const computeDetailed = (room: any, elements: any[], dc: DC, project: any): DetailedMetrics => {
-  const BF        = 0.15;
-  const sSafetyPct = asNum(room?.sensibleSafetyPercent ?? room?.sensibleSafetyFactor, 10);
-  const lSafetyPct = asNum(room?.latentSafetyPercent   ?? room?.latentSafetyFactor,   5);
-  const oSafetyPct = asNum(room?.overallSafetyPercent  ?? room?.grandTotalSafetyFactor, 3);
-  const ductPct   = asNum(room?.ductGainPct, 2);
-  const fanPct    = asNum(room?.fanGainPct,  3);
-
-  // TFA/DOAS: when this room is DOAS-served, the outdoor air is conditioned by the
-  // TFA unit, NOT the primary coil. Recompute with the cold-DOAS branch so the
-  // primary COIL loads — and therefore ADP, RSHF, GSHF, supply-air state,
-  // dehumidified CFM and reheat — reflect the reduced (sensible-leaning) coil.
-  const { doas, mode: effTfaMode } = resolveRoomTfa(room, reportEquipSystems);
-  const isTFA = !!doas;
-  const isTfaOnly = effTfaMode === 'tfa-only';
-  const dcEff: any = isTFA
-    ? { ...dc, ventilationStrategy: 'tfa-cold', tfaSupplyTemp: doas.tfaSupplyTemp, tfaSupplyHumidity: doas.tfaSupplyHumidity, ervSensibleEffectiveness: doas.ervSensibleEffectiveness, ervLatentEffectiveness: doas.ervLatentEffectiveness }
-    : dc;
-
-  const envelope  = calculateEnvelopeGain(elements, dcEff);
-  const internal  = calculateInternalGains(room);
-  const vent      = calculateVentilationLoad(room, dcEff);
-  // Winter heating must use the TFA-aware DC: for DOAS-served rooms the mechanical fresh
-  // air is heated by the DOAS coil, so the space unit covers ONLY genuine infiltration
-  // (winterInfiltrationACH), not the full FACPH. Passing the raw `dc` here made the space
-  // re-heat the entire fresh-air rate that the DOAS coil already handles — a double count.
-  const heating   = calculateHeatingLoad(room, elements, dcEff);
-  const tfa       = isTFA ? calculateTFALoad(room, dcEff) : null;
-
-  const area = asNum(room?.length, 0) * asNum(room?.width, 0);
-  const faCfm = (calculateRoomVolume(room) * asNum(room?.facph, 0)) / 60;
-
-  // In TFA mode the bypass-OA terms go to the DOAS unit, not the primary coil.
-  const erVentSenBF   = isTFA ? 0 : vent.sensible * BF;
-  const erVentLatBF   = isTFA ? 0 : vent.latent   * BF;
-  const erSensibleRaw = envelope.sensible + internal.sensible + erVentSenBF;
-  const erLatentRaw   = internal.latent   + erVentLatBF;
-  const parasitic     = calculateParasiticGains(erSensibleRaw, erSensibleRaw, ductPct, fanPct);
-  const ersh          = (erSensibleRaw + parasitic.ductGain + parasitic.fanGain) * (1 + sSafetyPct / 100);
-  const erlh          = erLatentRaw * (1 + lSafetyPct / 100);
-  const erh           = ersh + erlh;
-  const oaSensible    = isTFA ? 0 : vent.sensible * (1 - BF);
-  const oaLatent      = isTFA ? 0 : vent.latent   * (1 - BF);
-  // Cold-DOAS supply offsets a portion of the space coil load (engineering credit).
-  const tfaOffSen     = tfa ? tfa.spaceSensibleOffset : 0;
-  const tfaOffLat     = tfa ? tfa.spaceLatentOffset   : 0;
-  const coilSensible  = isTfaOnly ? 0 : (isTFA ? Math.max(0, ersh - tfaOffSen) : ersh + oaSensible);
-  const coilLatent    = isTfaOnly ? 0 : (isTFA ? Math.max(0, erlh - tfaOffLat) : erlh + oaLatent);
-  const grandTotal    = coilSensible + coilLatent;
-  const loadTr        = grandTotal / 12000;
-
-  // Coil recomputed from the (TFA-reduced) loads — drives ADP / RSHF / supply air.
-  const coil = calculateCoilParameters(coilSensible, coilLatent, dcEff.indoorTemp, dcEff.indoorHumidity, dcEff.altitude, BF, 35, 65, getMinAdp(project?.systemType, project?.adpBasis));
-
-  const totalAch     = resolveTotalSupplyACH(getRecommendedAch(room?.achProfile ?? room?.activityType), asNum(room?.facph, 0), asNum(room?.recircPct, 0));
-  const totalSupplyCfm = (calculateRoomVolume(room) * totalAch) / 60;
-  // TFA-served space coils are sized by thermal (sensible-at-ADP) airflow only — the
-  // recommended-ACH air-change duty belongs to the DOAS. tfa-only corridors keep the
-  // air-change airflow (≈ the TFA supply CFM).
-  // Supply-air basis: 'dscfm' (DEFAULT, dehumidified-air) vs 'ach' (legacy ACH-preset).
-  // DSCFM is the default — only an explicit 'ach' opts out. The DOAS is independent — it
-  // always sizes off the OA FACPH. Mirrors lib/hvac/supplyCfm + the LC/RoomTable/ZoneList paths.
-  const designCfm    = resolveSupplyCfm({
-    basis: resolveRoomSupplyBasis(room?.supplyCfmBasis, project?.supplyBasis),
+  // Cooling / coil / CFM physics now lives in ONE place — the shared pure engine.
+  // computeDetailed keeps only the report-specific presentation extras (heating safety
+  // split + humidification) layered on top of that shared result. (Step-2 consolidation
+  // 2026-07-08 — this used to be a hand-copied duplicate of the same sequence.)
+  const r = computeRoomLoad(room, elements, dc, { equipSystems: reportEquipSystems, project });
+  const {
     isTFA, isTfaOnly,
-    dehumidifiedCFM: coil.dehumidifiedCFM,
-    minAdpSensibleCFM: coil.minAdpSensibleCFM,
-    totalSupplyCFM: totalSupplyCfm,
-    freshAirCFM: faCfm,
-    tfaCfm: tfa?.cfm ?? 0,
-  }).designSupplyCFM;
-  const cfmTr        = designCfm / 400;
-  // Plant TR is LOAD-ONLY (locked policy 2026-05-20). cfmTr is a sanity ratio only.
-  const governingTr  = loadTr;
-  const requiredTr   = governingTr * (1 + oSafetyPct / 100);
-  // TFA/DOAS coil duty (outdoor-air conditioning) handled by the DOAS unit.
-  const tfaCoilSensible = tfa ? tfa.coilSensible : 0;
-  const tfaCoilLatent   = tfa ? tfa.coilLatent   : 0;
-  const tfaCoilTr       = (tfaCoilSensible + tfaCoilLatent) / 12000;
-  const tfaCfm          = tfa ? tfa.cfm : 0;
-  // Summer dehumidification reheat coil on the DOAS (cool-to-ADP then reheat to supply).
-  const tfaReheat       = tfa ? (tfa.reheatCoilSensible || 0) : 0;
-  const tfaCoilADP      = tfa ? tfa.coilADP : 0;
+    envelope, internal, vent, heating, tfa,
+    area, freshAirCFM: faCfm,
+    erSensibleRaw, erLatentRaw, parasitic,
+    ersh, erlh, erh, oaSensible, oaLatent, tfaOffSen, tfaOffLat,
+    coilSensible, coilLatent, grandTotal, loadTr,
+    coil, totalAch, totalSupplyCfm, designCfm, cfmTr, governingTr, requiredTr,
+    tfaCoilSensible, tfaCoilLatent, tfaCoilTr, tfaCfm, tfaReheat, tfaCoilADP,
+    bf: BF, sSafetyPct, lSafetyPct, oSafetyPct,
+  } = r;
 
   // ── Heating safety + humidification (used when called with winter DC) ──────
   const heatingSafetyPct  = asNum(room?.heatingSafetyPercent, 10);

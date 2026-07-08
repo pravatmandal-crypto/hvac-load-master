@@ -115,3 +115,6 @@ export {
 } from './tfa';
 
 export { CALC_VERSION, computeRoomInputSig, roomSigParts, type RoomSigInput } from './calcSignature';
+
+// Single-source per-room cooling/coil/CFM orchestrator (report + airflow delegate here).
+export { computeRoomLoad, ROOM_LOAD_BF, type RoomLoadResult, type RoomLoadOptions } from './computeRoomLoad';

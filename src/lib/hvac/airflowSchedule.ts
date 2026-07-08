@@ -11,27 +11,15 @@
  * space Design CFM is taken as the governing (worst-season) value, matching the strips/detail.
  */
 import {
-  getMinAdp,
-  getRecommendedAch,
   type DesignConditions,
   type RoomDetails,
   type EnvelopeElement,
 } from './constants';
 import { calculateRoomVolume } from './geometry';
-import { calculateInternalGains } from './internalGains';
-import { calculateEnvelopeGain } from './envelope';
-import { calculateVentilationLoad, calculateTFALoad } from './ventilation';
-import { calculateCoilParameters } from './psychrometrics';
-import { calculateParasiticGains } from './parasitic';
+import { calculateTFALoad } from './ventilation';
 import { resolveRoomTfa } from './tfa';
-import {
-  resolveSupplyCfm,
-  resolveRoomSupplyBasis,
-  resolveTotalSupplyACH,
-  computeAirflowSplit,
-} from './supplyCfm';
-
-const BF = 0.15;
+import { computeAirflowSplit } from './supplyCfm';
+import { computeRoomLoad } from './computeRoomLoad';
 
 export type AirflowMode = 'no-tfa' | 'tfa-served' | 'tfa-only';
 
@@ -78,66 +66,20 @@ const toRd = (room: any): RoomDetails => ({
   othersKW: Number(room.othersKW) || 0,
 });
 
-/** Space-coil Design CFM for one room at one season — mirrors computeZoneTotals. */
+/**
+ * Space-coil Design CFM for one room at one season — delegates to the shared engine
+ * (computeRoomLoad), which resolves TFA from equipSystems exactly as the report does, so
+ * the airflow schedule and the load report always size the space coil identically.
+ */
 function roomDesignCfm(
   rd: RoomDetails,
   elements: EnvelopeElement[],
   dc: DesignConditions,
-  doas: any | null,
-  isTfaOnly: boolean,
+  equipSystems: any[],
+  zoneDocs: any[] | undefined,
   project: any,
 ): number {
-  const isTFA = !!doas;
-  const dcEff: any = isTFA
-    ? {
-        ...dc,
-        ventilationStrategy: 'tfa-cold',
-        tfaSupplyTemp: doas.tfaSupplyTemp,
-        tfaSupplyHumidity: doas.tfaSupplyHumidity,
-        ervSensibleEffectiveness: doas.ervSensibleEffectiveness,
-        ervLatentEffectiveness: doas.ervLatentEffectiveness,
-      }
-    : dc;
-  const envelope = calculateEnvelopeGain(elements, dcEff);
-  const internal = calculateInternalGains(rd);
-  const vent = calculateVentilationLoad(rd, dcEff);
-  const tfa = isTFA ? calculateTFALoad(rd, dcEff) : null;
-  const erVentSen = isTFA ? 0 : vent.sensible * BF;
-  const erVentLat = isTFA ? 0 : vent.latent * BF;
-  const erSensible = envelope.sensible + internal.sensible + erVentSen;
-  const erLatent = internal.latent + erVentLat;
-  const ductPct = Number((rd as any).ductGainPct) || 2;
-  const fanPct = Number((rd as any).fanGainPct) || 3;
-  const parasitic = calculateParasiticGains(erSensible, erSensible, ductPct, fanPct);
-  const sensSafety = Number((rd as any).sensibleSafetyPercent ?? 10) / 100;
-  const latSafety = Number((rd as any).latentSafetyPercent ?? 5) / 100;
-  const ersh = (erSensible + parasitic.ductGain + parasitic.fanGain) * (1 + sensSafety);
-  const erlh = erLatent * (1 + latSafety);
-  const oaSensible = isTFA ? 0 : vent.sensible * (1 - BF);
-  const oaLatent = isTFA ? 0 : vent.latent * (1 - BF);
-  const tfaOffSen = tfa ? tfa.spaceSensibleOffset : 0;
-  const tfaOffLat = tfa ? tfa.spaceLatentOffset : 0;
-  const coilSensible = isTfaOnly ? 0 : (isTFA ? Math.max(0, ersh - tfaOffSen) : ersh + oaSensible);
-  const coilLatent = isTfaOnly ? 0 : (isTFA ? Math.max(0, erlh - tfaOffLat) : erlh + oaLatent);
-  const coil = calculateCoilParameters(
-    coilSensible, coilLatent, dcEff.indoorTemp, dcEff.indoorHumidity, dcEff.altitude || 0,
-    BF, 35, 65, getMinAdp(project?.systemType, project?.adpBasis),
-  );
-  const totalAch = resolveTotalSupplyACH(
-    getRecommendedAch((rd as any).achProfile ?? rd.activityType),
-    rd.facph,
-    Number((rd as any).recircPct) || 0,
-  );
-  const totalSupplyCFM = (calculateRoomVolume(rd) * totalAch) / 60;
-  const freshAirCFM = (calculateRoomVolume(rd) * rd.facph) / 60;
-  return resolveSupplyCfm({
-    basis: resolveRoomSupplyBasis((rd as any).supplyCfmBasis, project?.supplyBasis),
-    isTFA, isTfaOnly,
-    dehumidifiedCFM: coil.dehumidifiedCFM,
-    minAdpSensibleCFM: coil.minAdpSensibleCFM,
-    totalSupplyCFM, freshAirCFM,
-    tfaCfm: tfa?.cfm ?? 0,
-  }).designSupplyCFM;
+  return computeRoomLoad(rd, elements, dc, { equipSystems, project, zoneDocs }).designCfm;
 }
 
 export function buildAirflowSchedule(params: {
@@ -159,9 +101,9 @@ export function buildAirflowSchedule(params: {
         const { doas, mode } = resolveRoomTfa(room, equipSystems, zoneDocs);
         const isTFA = !!doas;
         const isTfaOnly = mode === 'tfa-only';
-        const summerCfm = roomDesignCfm(rd, elements, z.summerDc, doas, isTfaOnly, project);
+        const summerCfm = roomDesignCfm(rd, elements, z.summerDc, equipSystems, zoneDocs, project);
         const govCfm = z.monsoonDc
-          ? Math.max(summerCfm, roomDesignCfm(rd, elements, z.monsoonDc, doas, isTfaOnly, project))
+          ? Math.max(summerCfm, roomDesignCfm(rd, elements, z.monsoonDc, equipSystems, zoneDocs, project))
           : summerCfm;
         const tfa = isTFA ? calculateTFALoad(rd, z.summerDc) : null;
         const freshAirCFM = (calculateRoomVolume(rd) * rd.facph) / 60;
