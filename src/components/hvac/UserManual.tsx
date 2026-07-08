@@ -650,7 +650,7 @@ export default function UserManual() {
                 </tr></thead>
                 <tbody>
                   {[
-                    ['Governing TR', 'max(Load TR from heat-gain calc, CFM TR where CFM TR = Design CFM ÷ 400). This is the minimum installed cooling capacity required.', 'Set the floor for IDU selection. Your Inst. TR must be ≥ this.'],
+                    ['Governing TR', 'Grand total heat gain ÷ 12,000 — LOAD-ONLY (the higher of summer/monsoon). This is the minimum installed plant/coil capacity required. CFM/TR (Design CFM ÷ 400) is a separate cross-check, NOT part of this figure.', 'Set the floor for IDU/plant selection. Your Inst. TR must be ≥ this.'],
                     ['Design CFM', 'Total required supply airflow for the zone at peak load.', 'Verify the IDU rated CFM ≥ this value. CFM can govern even when TR is small.'],
                     ['Summer TR / Monsoon TR', 'Separate TR values for each season (if Monsoon enabled in project settings).', 'Confirm which season governs — Governing TR is the higher of the two.'],
                     ['No. of Rooms', 'Count of rooms assigned to this zone.', 'Sanity check — if fewer rooms than expected, a room assignment may be missing.'],
@@ -666,13 +666,13 @@ export default function UserManual() {
               </table>
             </div>
             <div className="rounded-lg bg-slate-50 border border-slate-200 p-3 space-y-1">
-              <p className="text-xs font-bold text-slate-700">Governing TR formula</p>
+              <p className="text-xs font-bold text-slate-700">Governing TR — load-only</p>
               <p className="text-xs font-mono bg-white rounded px-3 py-2 border border-slate-200 text-slate-800 leading-relaxed">
-                CFM TR = Design CFM ÷ 400<br />
-                Governing TR = max(Load TR, CFM TR)<br />
-                <span className="text-slate-400">Example: Load TR = 4.2, Design CFM = 2,000 → CFM TR = 5.0 → Governing TR = 5.0 TR</span>
+                Governing TR = Grand Total Heat ÷ 12,000  (LOAD-ONLY)<br />
+                CFM/TR = Design CFM ÷ 400  (sanity cross-check only — NOT a governor)<br />
+                <span className="text-slate-400">Example: Load TR = 4.2 → Governing TR = 4.2 TR. A high CFM/TR (say 5.0) does NOT raise the tonnage — it just means airflow, not load, drives the AHU/fan.</span>
               </p>
-              <p className="text-xs text-gray-500">In high-ventilation spaces (conference rooms, hospitals, OTs with high ACH), CFM TR often exceeds Load TR. The unit must deliver the required airflow even when the thermal load is modest.</p>
+              <p className="text-xs text-gray-500">In high-ventilation spaces (conference rooms, hospitals, OTs with high ACH), CFM/TR often exceeds Load TR. That does <strong>not</strong> increase the plant tonnage — the coil is still sized on load only. It means the AHU/fan and ductwork must deliver the airflow, which is enforced separately by requiring <strong>Inst. CFM ≥ Design CFM</strong> (the CFM/TR ratio is only a 350–450 sanity band).</p>
             </div>
           </div>
         </div>
@@ -1093,7 +1093,7 @@ export default function UserManual() {
                     [
                       'Ignoring Design CFM when it governs',
                       'IDU may show ✅ Fits for TR but 🔴 Under for CFM — space is under-ventilated even though TR looks OK.',
-                      'Always verify Inst. CFM ≥ Design CFM. If CFM TR exceeds Load TR, CFM is your sizing criterion.',
+                      'Always verify Inst. CFM ≥ Design CFM. If CFM/TR exceeds Load TR, airflow — not tonnage — is what the AHU/fan must satisfy; plant TR stays load-only.',
                     ],
                     [
                       'Not applying VRF diversity factor to the ODU',
@@ -1649,7 +1649,7 @@ export default function UserManual() {
           </div>
           <div className="space-y-1">
             <div className="flex items-center gap-2"><StepBadge n={3} /><p className="text-sm font-semibold">Set Fresh Air Rate Per Zone</p></div>
-            <p className="text-xs text-gray-500 ml-9">DOAS zones carry only the outdoor air fraction. In Load Calculator, the ventilation load (BF = 0.15 room portion vs OA unbypassed coil load) is already split correctly. DOAS handles the unbypassed OA portion.</p>
+            <p className="text-xs text-gray-500 ml-9">When a room is DOAS-served, the primary coil sees <strong>no</strong> ventilation outdoor air — the full fresh-air (FACPH) stream goes to the DOAS coil, which delivers cold, dry supply that also offsets part of the space load. The room's bypass-OA terms are zeroed on the primary; the DOAS conditions all of the OA (sensible + latent).</p>
           </div>
           <div className="space-y-1">
             <div className="flex items-center gap-2"><StepBadge n={4} /><p className="text-sm font-semibold">Equipment Selection → Energy Recovery Unit</p></div>
@@ -1658,7 +1658,7 @@ export default function UserManual() {
         </div>
 
         <Tip>
-          The bypass factor (BF = 0.15) in this tool represents the fraction of room air that bypasses the coil unconditioned. In a DOAS setup, the outdoor air (unbypassed portion) is handled by the DOAS coil. The VRF/Chiller handles the room recirculation load only. Both TR values are shown separately in the report.
+          The bypass factor (BF = 0.15) in this tool represents the fraction of room air that bypasses the coil unconditioned. In a DOAS setup, the primary coil sees no raw outdoor air at all — the DOAS coil conditions the full fresh-air (FACPH) stream and delivers cold, dry supply. The VRF/Chiller then handles the space load only, less the credit that cold DOAS supply gives back to the room. Both TR values are shown separately in the report.
         </Tip>
         <Note>DOAS is increasingly required by ASHRAE 90.1 and local energy codes in high-humidity climates. It improves latent control and enables better IAQ without oversizing the primary system.</Note>
       </SectionCard>
@@ -1695,7 +1695,7 @@ export default function UserManual() {
               <Settings className="w-3.5 h-3.5" /> Equipment Selection
             </p>
             {[
-              ['Governing TR vs Load TR', 'Governing TR = max(Load TR, CFM TR). CFM TR = Design CFM ÷ 400. If your design CFM drives a higher TR than the heat load, the unit must be sized for CFM, not just the thermal load.'],
+              ['Governing TR is load-only', 'Governing/plant TR = grand heat gain ÷ 12,000 (LOAD-ONLY). CFM/TR = Design CFM ÷ 400 is a sanity cross-check, never a governor. If design CFM implies a higher CFM/TR than the load TR, size the AHU/fan and ducts for that airflow — the tonnage stays load-only. Verify Inst. CFM ≥ Design CFM separately.'],
               ['Installed TR must be ≥ Governing TR', 'The report shows green/red traffic-light comparison. Never accept red — resize the unit until all zones are green.'],
               ['VRF Diversity', 'Simultaneous demand is rarely 100%. Apply 0.80–0.85 diversity to get ODU TR. E.g. 25 TR zone total × 0.85 = 21.25 TR ODU minimum.'],
               ['Chiller N+1', 'For critical loads, specify 2 × 60% capacity chillers instead of 1 × 100%. Ensures redundancy without significant capital penalty.'],

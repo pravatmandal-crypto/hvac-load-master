@@ -1034,7 +1034,7 @@ const buildEngineeringReview = (
       severity: 'critical',
       scope: 'Project',
       title: `Summer indoor RH ${sIndoorRH}% exceeds typical comfort RH (45-55%)`,
-      description: `RH above 55% drives mold/IAQ risk and a very low coil SHR — meaning very large reheat or desiccant systems are needed.`,
+      description: `RH above 55% drives mould/IAQ risk and a very low coil SHR — meaning very large reheat or desiccant systems are needed.`,
       recommendation: `Reduce indoor RH target to 50% (standard) or 45% (drier-comfort spaces). Verify with the client before sizing equipment.`,
     });
   }
@@ -1354,7 +1354,7 @@ export const generatePDFReport = (
   doc.setFontSize(10);
   doc.setTextColor(...C.coverText);
   doc.text('Technical Submission Document for Design Approval', PAGE.left, 40);
-  doc.text('Calculated per ASHRAE Fundamentals Handbook 2017 (IP Units)', PAGE.left, 47);
+  doc.text('Calculated per ASHRAE Fundamentals 2017 (IP Units)', PAGE.left, 47);
 
   // Project info card
   autoTable(doc, {
@@ -1364,7 +1364,7 @@ export const generatePDFReport = (
       ['Location',       String(project?.location  || '-')],
       ['System Type',    String(project?.systemType|| '-')],
       ['Altitude',       alt  ? `${n0(alt)} ft`  : '-'],
-      ['Coordinates',    lat  ? `${n1(lat)}° N, ${n1(Math.abs(lon))}° ${lon >= 0 ? 'E' : 'W'}` : '-'],
+      ['Coordinates',    lat  ? `${n1(Math.abs(lat))}° ${lat >= 0 ? 'N' : 'S'}, ${n1(Math.abs(lon))}° ${lon >= 0 ? 'E' : 'W'}` : '-'],
       ['Design Basis',   [
         'Summer',
         ...(includeMonsoon ? ['Monsoon'] : []),
@@ -1934,7 +1934,7 @@ export const generatePDFReport = (
       ]);
       autoTable(doc, {
         startY: y,
-        head: [['Room', 'Fresh air', 'Recirc CFM', 'Fresh (FACFM)', 'Total Supply CFM']],
+        head: [['Room', 'FA Mode', 'Recirc CFM', 'Fresh (FACFM)', 'Total Supply CFM']],
         body: afBody,
         theme: 'grid',
         styles: { fontSize: 7, cellPadding: 1.5, textColor: C.ink },
@@ -1995,7 +1995,7 @@ export const generatePDFReport = (
       ...(entityHasTfa ? ['TFA Coil TR', 'TFA CFM'] : []),
       ...(includeWinter ? ['Winter BTU/h'] : []),
       ...(includeWinter && entityHasTfa ? ['TFA Heat BTU/h'] : []),
-      'Gov TR', 'Inst. TR', 'Inst. CFM',
+      'Gov. TR', 'Inst. TR', 'Inst. CFM',
     ];
 
     const sumDcE = resolveEntityDC(entity, summer, project);
@@ -2469,7 +2469,7 @@ export const generatePDFReport = (
             ['Enthalpy h (BTU/lb)',      n2(outdoorPsycho.enthalpy),             n2(indoorPsycho.enthalpy),              n2(hSup),           `RSHF = ${n2(cSHR)}  ·  GSHF = ${n2(m.rshf)}`],
             ['Moisture Action',          moisAct,                                 '—',                                    '—',                `Coil condensate = ${moisRate.toFixed(2)} lbs/hr  (= coil latent / 1061 BTU/lb; size drain)`],
             ['Coil Latent (BTU/h)',      '—',                                     '—',                                    '—',                n0(m.coilLatent)],
-            [needRH ? 'Reheat  ★ REQD' : 'Reheat', needRH ? `Room SHR ${n2(cSHR)} < ${tSHR}` : `Room SHR = ${n2(cSHR)}`, '—', '—', needRH ? `${n0(rhBTU)} BTU/h required` : 'Not required'],
+            [needRH ? 'Reheat  * REQD' : 'Reheat', needRH ? `Room SHR ${n2(cSHR)} < ${tSHR}` : `Room SHR = ${n2(cSHR)}`, '—', '—', needRH ? `${n0(rhBTU)} BTU/h required` : 'Not required'],
           ],
           theme: 'grid',
           styles:     { fontSize: 7.5, cellPadding: 1.6, textColor: C.ink },
@@ -2866,7 +2866,7 @@ export const generatePDFReport = (
         ['Outdoor Air',  `${dualTu(winDcRoom.outdoorTemp)} / ${winDcRoom.outdoorHumidity}% RH`, `W = ${wm.humWOutGr.toFixed(1)} gr/lb`],
         ['Indoor Target', `${dualTu(winDcRoom.indoorTemp)} / ${winDcRoom.indoorHumidity}% RH`, `W = ${wm.humWInGr.toFixed(1)} gr/lb`],
         ['Moisture Deficit dW', `${wm.humDeltaWGr.toFixed(1)} gr/lb`, wm.humNeeded ? (humOptional ? 'Only to actively hold the target RH' : 'Humidification needed') : 'Sufficient — no humidifier'],
-        ['RH after heating (no humidifier)', `${wm.humRhAfterHeating}%`, wm.humRhAfterHeating < 30 ? '⚠ Below ASHRAE 55 min (30%)' : '✓ Within comfort range'],
+        ['RH after heating (no humidifier)', `${wm.humRhAfterHeating}%`, wm.humRhAfterHeating < 30 ? '! Below ASHRAE 55 min (30%)' : 'OK - Within comfort range'],
       ];
       if (humOptional) {
         humBody.push(['Design Basis', `No humidifier — space settles at ~${wm.humRhAfterHeating}% RH`, 'Within comfort. Figures below size a humidifier only IF the target RH must be held.']);
@@ -2876,7 +2876,7 @@ export const generatePDFReport = (
           ['Fresh Air CFM (ventilation)', `${Math.round(wm.humFreshCFM)} CFM`, 'Only fresh air needs moisture'],
           [`Humidifier Output${humOptional ? ' (optional)' : ''} — to hold ${winDcRoom.indoorHumidity}% RH (+10% margin)`, `${wm.humRate.toFixed(2)} lbs/hr`, `Base: ${wm.humRateBase.toFixed(2)} lbs/hr.  If an adiabatic / evaporative humidifier (wetted media, spray, ultrasonic) is used, add ${n0(wm.humEnergyBTU)} BTU/h to the DESIGN HEATING LOAD (Space) — the coil must offset the evaporative cooling. Steam / isothermal type: separate electrical load, not added.`],
           [`Energy Penalty${humOptional ? ' (if humidified)' : ''}`, `${n0(wm.humEnergyBTU)} BTU/h`, `${wm.humEnergyKW.toFixed(2)} kW`],
-          ['ASHRAE 62.1-2022 §5.9 Cap', `Indoor W = ${wm.humWInGr.toFixed(1)} gr/lb`, wm.humExceedsCap62 ? '⚠ Exceeds 87 gr/lb cap' : '✓ Within 87 gr/lb limit'],
+          ['ASHRAE 62.1-2022 §5.9 Cap', `Indoor W = ${wm.humWInGr.toFixed(1)} gr/lb`, wm.humExceedsCap62 ? '! Exceeds 87 gr/lb cap' : 'OK - Within 87 gr/lb limit'],
         );
       }
 
@@ -3169,7 +3169,7 @@ const renderEquipmentScheduleBody = (
           const totalTR  = (sel.trCapacity ?? 0) * qty;
           const totalCFM = (sel.cfmRated ?? 0) * qty;
           eqBody.push([{
-            content: `  ↳ Multi-AHU zone — ${qty} × same-spec, each with own dedicated duct. Total: ${n2(totalTR)} TR · ${n0(totalCFM)} CFM`,
+            content: `  -> Multi-AHU zone — ${qty} × same-spec, each with own dedicated duct. Total: ${n2(totalTR)} TR · ${n0(totalCFM)} CFM`,
             colSpan: 8,
             styles: { fontStyle: 'italic' as const, fontSize: 6.5, textColor: C.subInk, fillColor: C.panel as [number,number,number] },
           }]);

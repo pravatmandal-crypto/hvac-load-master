@@ -252,19 +252,20 @@ export default function Methodology({ userRole }: { userRole?: string | null }) 
           <p className="text-gray-600 text-xs leading-relaxed">
             Every state point (outdoor, indoor, supply, ADP) is fully described by dry-bulb temperature and
             relative humidity. All subsequent heat-gain and psychrometric calculations derive from these properties.
-            The Magnus approximation is used for saturation pressure (max error &lt;0.1 % over 0–50 °C).
+            The full ASHRAE 2017 (Hyland–Wexler) saturation-pressure correlation is used — the ln(P_ws)
+            polynomial in absolute temperature — not the simplified Magnus form.
           </p>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-            <FBlock label="Saturation pressure (Magnus approx.)" color="text-blue-600"
-              code={'P_sat(T) = 0.6105 × exp(17.27·T / (T+237.3))  [kPa]\n           where T is in °C'} />
+            <FBlock label="Saturation pressure (ASHRAE 2017 Ch. 1, over water)" color="text-blue-600"
+              code={'ln(P_ws) = C8/T + C9 + C10·T + C11·T² + C12·T³ + C13·ln(T)\n  T = absolute temperature [°R];  Hyland–Wexler (Eq. 6)'} />
             <FBlock label="Partial pressure of water vapour" color="text-blue-600"
               code={'P_v = φ × P_sat(T_db)   [kPa or psia]'} />
             <FBlock label="Humidity ratio W" color="text-blue-600"
               code={'W = 0.622 × P_v / (P_atm − P_v)   [lb_w / lb_da]\nGrains: W_gr = W × 7000         [gr/lb]'} />
             <FBlock label="Specific enthalpy" color="text-blue-600"
               code={'h = 0.240·T_db + W·(1061 + 0.444·T_db)  [BTU/lb]\n(T_db in °F, W in lb/lb)'} />
-            <FBlock label="Dew-point temperature (approx.)" color="text-blue-600"
-              code={'T_dp ≈ 237.3·ln(P_v/0.6105) / (17.27 − ln(P_v/0.6105))  [°C]'} />
+            <FBlock label="Dew-point temperature" color="text-blue-600"
+              code={'Solved from the saturation curve: find T where P_ws(T) = P_v\n(numerical inversion of the ASHRAE curve — not a closed-form Magnus inverse)'} />
             <FBlock label="Atmospheric pressure at altitude" color="text-blue-600"
               code={'P_atm = 14.696 × (1 − 6.8754×10⁻⁶ × alt)^5.2559  [psia]\nalt in feet above sea level'} />
           </div>
@@ -316,16 +317,16 @@ export default function Methodology({ userRole }: { userRole?: string | null }) 
             </div>
           </CollapseSection>
 
-          <CollapseSection title="2b. Glass — Solar Gain (SHGF / SC / CLF Method)">
+          <CollapseSection title="2b. Glass — Solar Gain (SHGF / SC Method)">
             <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
               <FBlock label="Solar heat gain" color="text-orange-600"
-                code={'Q_solar = A × SC × SHGF × CLF  [BTU/h]'} />
+                code={'Q_solar = A × SHGF × SC   [BTU/h]\n  SC = SHGC / 0.87  (rated SHGC → shading coefficient)\n  No CLF applied (CLF = 1.0).'} />
               <FBlock label="Shading Coefficient (SC)" color="text-orange-600"
                 code={'Clear single pane = 1.00\nClear double pane = 0.88\nTinted            = 0.70–0.80\nReflective        = 0.25–0.45\nLow-E double      = 0.25–0.40'} />
               <FBlock label="SHGF — Max Solar Heat Gain Factor (BTU/h·ft²) at 40°N, July" color="text-orange-600"
                 code={'N=26  NE=48  E=68  SE=58  S=42\nSW=58  W=68  NW=48  Horizontal=82'} />
-              <FBlock label="CLF — Cooling Load Factor" color="text-orange-600"
-                code={'Accounts for time-lag (radiant → convective).\nLightweight construction ≈ 1.00\nMedium weight        ≈ 0.85  (default used here)\nHeavyweight concrete ≈ 0.60–0.70'} />
+              <FBlock label="SHGC → SC conversion (engine)" color="text-orange-600"
+                code={'SHGF tables are calibrated to reference DSA glass\n(SC = 1.0, SHGC ≈ 0.87), so the rated SHGC is\nconverted first:  SC = SHGC / 0.87\n\nNo Cooling Load Factor (CLF) is applied (CLF = 1.0) —\nradiant time-lag is not modelled at this stage.'} />
             </div>
             <div className="p-3 bg-orange-50 rounded-lg border border-orange-100 text-[11px] text-orange-800">
               <strong>Engineering Guideline (ASHRAE 90.1):</strong> Fenestration area should ideally be &lt;40% of
@@ -451,11 +452,11 @@ export default function Methodology({ userRole }: { userRole?: string | null }) 
             <FBlock label="Ventilation CFM from ACH" color="text-sky-600"
               code={'CFM_vent = ACH × Volume / 60\n(Volume = L × W × effective height  [ft³])'} />
             <FBlock label="Ventilation sensible load" color="text-sky-600"
-              code={'Q_vs = 1.08 × CFM_vent × (T_outdoor − T_indoor)  [BTU/h]\n1.08 = 60 min/h × 0.018 BTU/lb·°F × density'} />
+              code={'Q_vs = 1.08 × CFM_vent × (T_outdoor − T_indoor)  [BTU/h]\n1.08 = 60 min/h × 0.075 lb/ft³ × 0.24 BTU/lb·°F'} />
             <FBlock label="Ventilation latent load" color="text-sky-600"
-              code={'Q_vl = 0.68 × CFM_vent × (W_out − W_in)  [BTU/h]\nW must be in grains/lb  (W_lb × 7000)\n0.68 = 60 × 0.018 × 1050/7000 × density'} />
+              code={'Q_vl = 0.68 × CFM_vent × (W_out − W_in)  [BTU/h]\nW must be in grains/lb  (W_lb × 7000)\n0.68 = 60 × 0.075 × 1061 / 7000 = 0.682'} />
             <FBlock label="Bypass Factor (BF = 0.15)" color="text-sky-600"
-              code={'BF = fraction of air bypassing coil unchilled\nTypical values:\n  Chilled water coil:  0.05–0.10\n  DX coil (4-row):     0.10–0.15  ← engine default\n  DX coil (2-row):     0.20–0.30'} />
+              code={'BF = fraction of air bypassing coil unchilled\nEngine uses a fixed 0.15 for ALL system types.\nReference ranges:\n  Chilled-water coil:  0.05–0.10\n  DX coil (4-row):     0.10–0.15\n  DX coil (2-row):     0.20–0.30'} />
             <FBlock label="Room-side ventilation" color="text-sky-600"
               code={'Q_vs_room = Q_vs × BF   → counted in ERSH\nQ_vl_room = Q_vl × BF   → counted in ERLH'} />
             <FBlock label="Coil OA contribution" color="text-sky-600"
@@ -838,8 +839,8 @@ Q_vl × BF          ─┘
             <FBlock label="Monsoon outdoor conditions" color="text-teal-600"
               code={'T_out_monsoon = monsoon dry-bulb  [°F]\nRH_monsoon    = monsoon relative humidity  [%]\nΔT_monsoon    = T_out_monsoon − T_indoor\nΔW_monsoon    = W_out_monsoon − W_indoor  [gr/lb]\n\nTypically: lower DB, sharply higher RH vs summer\n→ sensible load falls, latent load rises'} />
             <FBlock label="Winter heating load" color="text-teal-600"
-              code={'T_out_winter = heating design dry-bulb  [°F]\n\nQ_heat,wall  = U × A × (T_indoor − T_out_winter)\nQ_heat,glass = U × A × (T_indoor − T_out_winter)\nNo solar gain assumed in heating mode.\nReported as Q_heat [BTU/h] — NOT added to\ncooling TR (sizes heating coil / heat-pump\nheating mode, not refrigeration circuit).'} />
-            <FBlock label="Three-season plant capacity" color="text-teal-600"
+              code={'Q_heat = transmission + infiltration + slab-edge\n  ΔT = T_indoor − T_out_winter   (no CLTD, no solar)\n  transmission = Σ U · A · ΔT\n  infiltration = 1.08 · CFM_inf · ΔT\n    non-DOAS: CFM_inf = max(FACPH-CFM, 0.5 ACH)\n    DOAS:     CFM_inf = infiltration only (0.5 ACH) —\n              the DOAS tempers the fresh air, so the\n              space unit covers leakage only\n  slab-edge = F · P · ΔT   (ground-floor rooms only)\nReported as Q_heat [BTU/h] — NOT added to cooling TR\n(sizes the heating coil / heat-pump, not the chiller).'} />
+            <FBlock label="Multi-season plant capacity (cooling)" color="text-teal-600"
               code={'plantTR_summer  = loadTR_s\nplantTR_monsoon = loadTR_m\n\nfinalPlantTR = max(plantTR_summer, plantTR_monsoon)\n\nOverall safety applied after:\n  requiredTR = finalPlantTR × (1 + s_o%)\n\nCFM is governed independently:\n  DSCFM = max(DSCFM_summer, DSCFM_monsoon)'} />
             <FBlock label="When monsoon governs (typical triggers)" color="text-teal-600"
               code={'• High OA ACH in humid climates\n  (Kolkata, Mumbai, Chennai, Kochi)\n• High-occupancy rooms\n  (gyms, auditoria, canteens)\n• Low-sensible / high-latent spaces\n\nGSHF_monsoon < 0.65 → humidity control\n  critical → check coil BF, consider TFA/DOAS'} />
@@ -860,7 +861,7 @@ Q_vl × BF          ─┘
                   {[
                     ['Summer only', 'Steps 1–8 at summer OA conditions', 'plantTR_summer', '—'],
                     ['Summer + Monsoon', 'Full pipeline repeated at monsoon OA; latent recalculated from W_out_monsoon', 'max(summer, monsoon)', '—'],
-                    ['Summer + Winter', 'Heating load (U×A×ΔT reverse) computed; no separate cooling run at winter OA', 'plantTR_summer', 'Q_heat [BTU/h]'],
+                    ['Summer + Winter', 'Heating load (transmission + infiltration + slab-edge) computed; no separate cooling run at winter OA', 'plantTR_summer', 'Q_heat [BTU/h]'],
                     ['All three', 'Both alternate-season pipelines computed', 'max(summer, monsoon)', 'Q_heat [BTU/h]'],
                   ].map(([seasons, action, govtr, heat], i) => (
                     <tr key={i} className={i % 2 === 0 ? 'bg-white' : 'bg-teal-50/30'}>
@@ -1048,12 +1049,12 @@ Q_vl × BF          ─┘
                     </tr>
                   ))}
                   <tr className="bg-orange-100 font-bold">
-                    <td className="px-3 py-2" colSpan={7}>Solar gain: 40 ft² × 0.87 (SC) × 68 (SHGF_E) × 0.85 (CLF)</td>
-                    <td className="px-2 py-2 text-right text-orange-800">2 007</td>
+                    <td className="px-3 py-2" colSpan={7}>Solar gain: 40 ft² × 68 (SHGF_E) × 1.00 (SC = SHGC 0.87 / 0.87) — no CLF</td>
+                    <td className="px-2 py-2 text-right text-orange-800">2 720</td>
                   </tr>
                   <tr className="bg-orange-200">
                     <td className="px-3 py-2 font-bold text-orange-900" colSpan={7}>Total Envelope Sensible (Q_env_s)</td>
-                    <td className="px-2 py-2 text-right font-bold text-orange-900 text-[12px]">10 204</td>
+                    <td className="px-2 py-2 text-right font-bold text-orange-900 text-[12px]">10 917</td>
                   </tr>
                 </tbody>
               </table>
@@ -1125,19 +1126,19 @@ Q_vl × BF          ─┘
                   </tr>
                 </thead>
                 <tbody>
-                  <CalcRow label="Envelope sensible (Q_env_s)" formula="(from Step 2)" result="10 204" unit="" />
+                  <CalcRow label="Envelope sensible (Q_env_s)" formula="(from Step 2)" result="10 917" unit="" />
                   <CalcRow label="Internal sensible (Q_int_s)" formula="(from Step 3)" result="7 911" unit="" />
                   <CalcRow label="Room-side vent sensible" formula="2 160 × 0.15" result="324" unit="" />
-                  <CalcRow label="RS_base (pre-parasitic)" formula="10 204 + 7 911 + 324" result="18 439" unit="BTU/h" highlight />
-                  <CalcRow label="Duct gain (2%)" formula="2% × 18 439" result="369" unit="" />
-                  <CalcRow label="Fan gain (3%)" formula="3% × 18 439" result="553" unit="" />
-                  <CalcRow label="ERSH (Eff. Room Sensible Heat)" formula="18 439 + 369 + 553" result="19 361" unit="BTU/h" highlight />
+                  <CalcRow label="RS_base (pre-parasitic)" formula="10 917 + 7 911 + 324" result="19 152" unit="BTU/h" highlight />
+                  <CalcRow label="Duct gain (2%)" formula="2% × 19 152" result="383" unit="" />
+                  <CalcRow label="Fan gain (3%)" formula="3% × 19 152" result="575" unit="" />
+                  <CalcRow label="ERSH (Eff. Room Sensible Heat)" formula="19 152 + 383 + 575" result="20 110" unit="BTU/h" highlight />
                   <CalcRow label="ERLH (Eff. Room Latent Heat)" formula="2 050 + 1 072" result="3 122" unit="BTU/h" highlight />
                   <CalcRow label="OA coil sensible" formula="2 160 × 0.85" result="1 836" unit="" />
                   <CalcRow label="OA coil latent" formula="7 147 × 0.85" result="6 075" unit="" />
-                  <CalcRow label="CSH (Total Coil Sensible)" formula="19 361 + 1 836" result="21 197" unit="BTU/h" highlight />
+                  <CalcRow label="CSH (Total Coil Sensible)" formula="20 110 + 1 836" result="21 946" unit="BTU/h" highlight />
                   <CalcRow label="CLH (Total Coil Latent)" formula="3 122 + 6 075" result="9 197" unit="BTU/h" highlight />
-                  <CalcRow label="GTH (Grand Total Heat)" formula="21 197 + 9 197" result="30 394" unit="BTU/h" highlight />
+                  <CalcRow label="GTH (Grand Total Heat)" formula="21 946 + 9 197" result="31 143" unit="BTU/h" highlight />
                 </tbody>
               </table>
             </div>
@@ -1156,16 +1157,16 @@ Q_vl × BF          ─┘
                   </tr>
                 </thead>
                 <tbody>
-                  <CalcRow label="GSHF" formula="21 197 / 30 394" result="0.697" unit="" highlight />
+                  <CalcRow label="GSHF" formula="21 946 / 31 143" result="0.705" unit="" highlight />
                   <CalcRow label="W_room" formula="(given)" result="71.3" unit="gr/lb" />
                   <CalcRow label="T_ADP trial = 50°F → W_sat(50°F)" formula="P_sat=0.1780 → W_adp" result="53.4" unit="gr/lb" />
                   <CalcRow label="sensibleDiff (no CFM)" formula="1.08×(75−50)" result="27.0" unit="" />
                   <CalcRow label="latentDiff" formula="0.68×(71.3−53.4)" result="12.2" unit="" />
-                  <CalcRow label="ratio at 50°F" formula="27.0/(27.0+12.2)" result="0.689 ≈ 0.697 ✓" unit="" highlight />
+                  <CalcRow label="ratio at 50°F" formula="27.0/(27.0+12.2)" result="0.689 ≈ 0.705 ✓" unit="" highlight />
                   <CalcRow label="T_ADP (converged)" formula="iteration converges" result="50.4°F" unit="" highlight />
                   <CalcRow label="T_supply" formula="50.4 + 0.15×(75−50.4)" result="54.1°F" unit="" highlight />
                   <CalcRow label="W_supply" formula="53.4 + 0.15×(71.3−53.4)" result="56.1" unit="gr/lb" />
-                  <CalcRow label="DSCFM" formula="21 197 / (1.08×(75−54.1))" result="934" unit="CFM" highlight />
+                  <CalcRow label="DSCFM" formula="21 946 / (1.08×(75−54.1))" result="972" unit="CFM" highlight />
                 </tbody>
               </table>
             </div>
@@ -1184,19 +1185,18 @@ Q_vl × BF          ─┘
                   </tr>
                 </thead>
                 <tbody>
-                  <CalcRow label="Load TR" formula="30 394 / 12 000" result="2.53" unit="TR" />
-                  <CalcRow label="CFM TR" formula="21 197 / (12 000 × 0.85)" result="2.08" unit="TR" />
-                  <CalcRow label="Governing TR" formula="max(2.53, 2.08)" result="2.53" unit="TR" highlight />
-                  <CalcRow label="Required TR (+10% safety)" formula="2.53 × 1.10" result="2.78" unit="TR" highlight />
-                  <CalcRow label="Selected unit" formula="Next standard size ≥ 2.78 TR" result="3.0 TR" unit="TR ★" highlight />
+                  <CalcRow label="Load TR (= Governing TR, load-only)" formula="GTH ÷ 12 000 = 31 143 / 12 000" result="2.60" unit="TR" highlight />
+                  <CalcRow label="CFM/TR (cross-check only)" formula="DSCFM ÷ 400 = 972 / 400" result="2.43" unit="TR" />
+                  <CalcRow label="Required TR (+3% overall safety)" formula="2.60 × 1.03" result="2.68" unit="TR" highlight />
+                  <CalcRow label="Selected unit" formula="Next standard size ≥ 2.68 TR" result="3.0 TR" unit="TR ★" highlight />
                   <CalcRow label="Unit CFM (catalog estimate)" formula="3.0 TR × 400" result="1 200" unit="CFM" />
                 </tbody>
               </table>
             </div>
             <div className="p-3 bg-amber-50 rounded-lg border border-amber-100 text-[11px] text-amber-900">
-              ★ <strong>Select a 3 TR (36 000 BTU/h) split unit.</strong> In Kolkata humidity conditions the load TR
-              governs (not CFM TR). However, always verify that the unit's rated CFM (1 200 CFM for 3 TR) ≥ DSCFM
-              (934 CFM). Here 1 200 &gt; 934 — airflow is adequate.
+              ★ <strong>Select a 3 TR (36 000 BTU/h) split unit.</strong> Plant TR is load-only (2.60 TR → 2.68 with
+              3% safety); the CFM/TR cross-check (2.43) sits below it, so airflow is not the binding constraint.
+              Always verify the unit's rated CFM (1 200 CFM for 3 TR) ≥ DSCFM (972 CFM). Here 1 200 &gt; 972 — airflow is adequate.
             </div>
           </CollapseSection>
 
@@ -1213,23 +1213,23 @@ Q_vl × BF          ─┘
                   </tr>
                 </thead>
                 <tbody>
-                  <CalcRow label="Coil SHR (GSHF)" formula="21 197 / 30 394" result="0.697" unit="" highlight />
+                  <CalcRow label="Coil SHR (GSHF)" formula="21 946 / 31 143" result="0.705" unit="" highlight />
                   <CalcRow label="Target SHR" formula="comfort range" result="0.75–0.80" unit="" />
-                  <CalcRow label="Reheat needed?" formula="0.697 < 0.75 → yes (borderline)" result="Investigate" unit="" />
-                  <CalcRow label="Moisture removal (ṁ)" formula="9 197 / 1 050" result="8.76" unit="lbs/hr" highlight />
-                  <CalcRow label="Condensate flow" formula="8.76 / 8.34" result="1.05" unit="US gal/hr" />
-                  <CalcRow label="Condensate (litres/hr)" formula="8.76 × 0.454" result="3.98" unit="L/hr" />
+                  <CalcRow label="Reheat needed?" formula="0.705 < 0.75 → yes (borderline)" result="Investigate" unit="" />
+                  <CalcRow label="Moisture removal (ṁ)" formula="9 197 / 1 061" result="8.67" unit="lbs/hr" highlight />
+                  <CalcRow label="Condensate flow" formula="8.67 / 8.34" result="1.04" unit="US gal/hr" />
+                  <CalcRow label="Condensate (litres/hr)" formula="8.67 × 0.454" result="3.94" unit="L/hr" />
                   <CalcRow label="W_supply vs indoor W_room" formula="56.1 vs 71.3 gr/lb" result="ΔW = 15.2" unit="gr/lb removed" />
                   <CalcRow label="Supply air RH at 54°F, 56.1 gr" formula="P_v/P_sat(54°F)" result="≈ 88%" unit="% — acceptable" />
                 </tbody>
               </table>
             </div>
             <div className="p-3 bg-rose-50 border border-rose-100 rounded-lg text-[11px] text-rose-900 space-y-1">
-              <p><strong>Reheat assessment:</strong> coilSHR = 0.697 is slightly below the 0.75 comfort target.
+              <p><strong>Reheat assessment:</strong> coilSHR = 0.705 is slightly below the 0.75 comfort target.
               In Kolkata's humid climate this is normal — the very high outdoor humidity (W = 176 gr/lb) creates
               a large latent load. Reheat or TFA/DOAS is worth considering for year-round humidity control,
               but for a conference room with intermittent occupancy, the DX unit with 3 TR is adequate.</p>
-              <p><strong>Condensate drain:</strong> 3.98 L/hr — size drain line for ≥ 25 mm bore, slope ≥ 1:80.</p>
+              <p><strong>Condensate drain:</strong> 3.94 L/hr — size drain line for ≥ 25 mm bore, slope ≥ 1:80.</p>
             </div>
           </CollapseSection>
 
@@ -1321,20 +1321,20 @@ Q_vl × BF          ─┘
             </h4>
             <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
               {[
-                { label:'Envelope Sensible', value:'10 204', unit:'BTU/h', color:'text-orange-300' },
+                { label:'Envelope Sensible', value:'10 917', unit:'BTU/h', color:'text-orange-300' },
                 { label:'Internal Sensible', value:'7 911', unit:'BTU/h', color:'text-green-300' },
                 { label:'Vent + BF Sensible', value:'324', unit:'BTU/h', color:'text-sky-300' },
-                { label:'Duct + Fan Gain', value:'922', unit:'BTU/h', color:'text-gray-300' },
-                { label:'ERSH', value:'19 361', unit:'BTU/h', color:'text-violet-300' },
+                { label:'Duct + Fan Gain', value:'958', unit:'BTU/h', color:'text-gray-300' },
+                { label:'ERSH', value:'20 110', unit:'BTU/h', color:'text-violet-300' },
                 { label:'ERLH', value:'3 122', unit:'BTU/h', color:'text-violet-300' },
                 { label:'OA Coil Contribution', value:'7 911', unit:'BTU/h', color:'text-sky-300' },
-                { label:'Grand Total Heat', value:'30 394', unit:'BTU/h', color:'text-yellow-300' },
-                { label:'Load TR', value:'2.53', unit:'TR', color:'text-yellow-300' },
-                { label:'DSCFM', value:'934', unit:'CFM', color:'text-cyan-300' },
-                { label:'Required TR (+10%)', value:'2.78', unit:'TR', color:'text-yellow-300' },
+                { label:'Grand Total Heat', value:'31 143', unit:'BTU/h', color:'text-yellow-300' },
+                { label:'Load TR (load-only)', value:'2.60', unit:'TR', color:'text-yellow-300' },
+                { label:'DSCFM', value:'972', unit:'CFM', color:'text-cyan-300' },
+                { label:'Required TR (+3%)', value:'2.68', unit:'TR', color:'text-yellow-300' },
                 { label:'Selected Unit', value:'3.0 TR', unit:'Split DX', color:'text-emerald-300' },
-                { label:'Moisture Removal', value:'8.76', unit:'lbs/hr', color:'text-rose-300' },
-                { label:'Condensate', value:'3.98', unit:'L/hr', color:'text-rose-300' },
+                { label:'Moisture Removal', value:'8.67', unit:'lbs/hr', color:'text-rose-300' },
+                { label:'Condensate', value:'3.94', unit:'L/hr', color:'text-rose-300' },
                 { label:'ADP', value:'50.4°F', unit:'', color:'text-cyan-300' },
                 { label:'Supply Air', value:'54.1°F / 56 gr', unit:'', color:'text-cyan-300' },
               ].map(({label,value,unit,color})=>(
@@ -1514,12 +1514,12 @@ Q_vl × BF          ─┘
                     </tr>
                   ))}
                   <tr className="bg-orange-100 font-bold">
-                    <td className="px-3 py-2" colSpan={7}>Solar gain: 40 ft² × 0.87 (SC) × 68 (SHGF_E) × 0.85 (CLF)</td>
-                    <td className="px-2 py-2 text-right text-orange-800">2 007</td>
+                    <td className="px-3 py-2" colSpan={7}>Solar gain: 40 ft² × 68 (SHGF_E) × 1.00 (SC = SHGC 0.87 / 0.87) — no CLF</td>
+                    <td className="px-2 py-2 text-right text-orange-800">2 720</td>
                   </tr>
                   <tr className="bg-orange-200">
                     <td className="px-3 py-2 font-bold text-orange-900" colSpan={7}>Total Envelope Sensible (Q_env_s)</td>
-                    <td className="px-2 py-2 text-right font-bold text-orange-900 text-[12px]">5 817</td>
+                    <td className="px-2 py-2 text-right font-bold text-orange-900 text-[12px]">6 530</td>
                   </tr>
                 </tbody>
               </table>
@@ -1588,19 +1588,19 @@ Q_vl × BF          ─┘
                   </tr>
                 </thead>
                 <tbody>
-                  <CalcRow label="Envelope sensible (Q_env_s)" formula="(from Step 2)" result="5 817" unit="" />
+                  <CalcRow label="Envelope sensible (Q_env_s)" formula="(from Step 2)" result="6 530" unit="" />
                   <CalcRow label="Internal sensible (Q_int_s)" formula="(from Step 3)" result="7 911" unit="" />
                   <CalcRow label="Room-side vent sensible" formula="756 × 0.15" result="113" unit="" />
-                  <CalcRow label="RS_base (pre-parasitic)" formula="5 817 + 7 911 + 113" result="13 841" unit="BTU/h" highlight />
-                  <CalcRow label="Duct gain (2%)" formula="2% × 13 841" result="277" unit="" />
-                  <CalcRow label="Fan gain (3%)" formula="3% × 13 841" result="415" unit="" />
-                  <CalcRow label="ERSH (Eff. Room Sensible Heat)" formula="13 841 + 277 + 415" result="14 533" unit="BTU/h" highlight />
+                  <CalcRow label="RS_base (pre-parasitic)" formula="6 530 + 7 911 + 113" result="14 554" unit="BTU/h" highlight />
+                  <CalcRow label="Duct gain (2%)" formula="2% × 14 554" result="291" unit="" />
+                  <CalcRow label="Fan gain (3%)" formula="3% × 14 554" result="437" unit="" />
+                  <CalcRow label="ERSH (Eff. Room Sensible Heat)" formula="14 554 + 291 + 437" result="15 282" unit="BTU/h" highlight />
                   <CalcRow label="ERLH (Eff. Room Latent Heat)" formula="2 050 + 694" result="2 744" unit="BTU/h" highlight />
                   <CalcRow label="OA coil sensible" formula="756 × 0.85" result="643" unit="" />
                   <CalcRow label="OA coil latent" formula="4 624 × 0.85" result="3 930" unit="" />
-                  <CalcRow label="CSH (Total Coil Sensible)" formula="14 533 + 643" result="15 176" unit="BTU/h" highlight />
+                  <CalcRow label="CSH (Total Coil Sensible)" formula="15 282 + 643" result="15 925" unit="BTU/h" highlight />
                   <CalcRow label="CLH (Total Coil Latent)" formula="2 744 + 3 930" result="6 674" unit="BTU/h" highlight />
-                  <CalcRow label="GTH (Grand Total Heat)" formula="15 176 + 6 674" result="21 850" unit="BTU/h" highlight />
+                  <CalcRow label="GTH (Grand Total Heat)" formula="15 925 + 6 674" result="22 599" unit="BTU/h" highlight />
                 </tbody>
               </table>
             </div>
@@ -1618,16 +1618,16 @@ Q_vl × BF          ─┘
                   </tr>
                 </thead>
                 <tbody>
-                  <CalcRow label="GSHF" formula="15 176 / 21 850" result="0.694" unit="" highlight />
+                  <CalcRow label="GSHF" formula="15 925 / 22 599" result="0.705" unit="" highlight />
                   <CalcRow label="W_room" formula="(given)" result="86.7" unit="gr/lb" />
                   <CalcRow label="T_ADP trial = 52F → W_sat(52F)" formula="P_sat=0.194 → W_adp" result="70.7" unit="gr/lb" />
                   <CalcRow label="sensibleDiff (no CFM)" formula="1.08×(75−52)" result="24.8" unit="" />
                   <CalcRow label="latentDiff" formula="0.68×(86.7−70.7)" result="10.9" unit="" />
-                  <CalcRow label="ratio at 52F" formula="24.8/(24.8+10.9)" result="0.695 ≈ 0.694 ✓" unit="" highlight />
+                  <CalcRow label="ratio at 52F" formula="24.8/(24.8+10.9)" result="0.695 ≈ 0.705 ✓" unit="" highlight />
                   <CalcRow label="T_ADP (converged)" formula="iteration converges" result="52.0°F" unit="" highlight />
                   <CalcRow label="T_supply" formula="52.0 + 0.15×(75−52.0)" result="55.5°F" unit="" highlight />
                   <CalcRow label="W_supply" formula="70.7 + 0.15×(86.7−70.7)" result="73.1" unit="gr/lb" />
-                  <CalcRow label="DSCFM" formula="15 176 / (1.08×(75−55.5))" result="721" unit="CFM" highlight />
+                  <CalcRow label="DSCFM" formula="15 925 / (1.08×(75−55.5))" result="756" unit="CFM" highlight />
                 </tbody>
               </table>
             </div>
@@ -1645,18 +1645,17 @@ Q_vl × BF          ─┘
                   </tr>
                 </thead>
                 <tbody>
-                  <CalcRow label="Load TR" formula="21 850 / 12 000" result="1.82" unit="TR" />
-                  <CalcRow label="CFM TR" formula="15 176 / (12 000 × 0.85)" result="1.49" unit="TR" />
-                  <CalcRow label="Governing TR" formula="max(1.82, 1.49)" result="1.82" unit="TR" highlight />
-                  <CalcRow label="Required TR (+10% safety)" formula="1.82 × 1.10" result="2.00" unit="TR" highlight />
-                  <CalcRow label="Selected unit" formula="Next standard size ≥ 2.00 TR" result="2.0 TR" unit="TR ★" highlight />
+                  <CalcRow label="Load TR (= Governing TR, load-only)" formula="GTH ÷ 12 000 = 22 599 / 12 000" result="1.88" unit="TR" highlight />
+                  <CalcRow label="CFM/TR (cross-check only)" formula="DSCFM ÷ 400 = 756 / 400" result="1.89" unit="TR" />
+                  <CalcRow label="Required TR (+3% overall safety)" formula="1.88 × 1.03" result="1.94" unit="TR" highlight />
+                  <CalcRow label="Selected unit" formula="Next standard size ≥ 1.94 TR" result="2.0 TR" unit="TR ★" highlight />
                   <CalcRow label="Unit CFM (catalog estimate)" formula="2.0 TR × 400" result="800" unit="CFM" />
                 </tbody>
               </table>
             </div>
             <div className="p-3 bg-amber-50 rounded-lg border border-amber-100 text-[11px] text-amber-900">
-              ★ <strong>Select a 2 TR (24 000 BTU/h) split unit.</strong> For this Gangtok case, loadTR remains the governing criterion,
-              and catalog airflow (800 CFM) is still above DSCFM (721 CFM), so both sensible and airflow requirements are satisfied.
+              ★ <strong>Select a 2 TR (24 000 BTU/h) split unit.</strong> Plant TR is load-only (1.88 TR → 1.94 with 3% safety);
+              the CFM/TR cross-check (1.89) sits alongside it, and catalog airflow (800 CFM) is above DSCFM (756 CFM), so both the load and airflow requirements are satisfied.
             </div>
           </CollapseSection>
 
@@ -1672,12 +1671,12 @@ Q_vl × BF          ─┘
                   </tr>
                 </thead>
                 <tbody>
-                  <CalcRow label="Coil SHR (GSHF)" formula="15 176 / 21 850" result="0.694" unit="" highlight />
+                  <CalcRow label="Coil SHR (GSHF)" formula="15 925 / 22 599" result="0.705" unit="" highlight />
                   <CalcRow label="Target SHR" formula="comfort range" result="0.75–0.80" unit="" />
-                  <CalcRow label="Reheat needed?" formula="0.694 < 0.75" result="Possible in monsoon shoulder hours" unit="" />
-                  <CalcRow label="Moisture removal (m_dot)" formula="6 674 / 1 050" result="6.36" unit="lbs/hr" highlight />
-                  <CalcRow label="Condensate flow" formula="6.36 / 8.34" result="0.76" unit="US gal/hr" />
-                  <CalcRow label="Condensate (litres/hr)" formula="6.36 × 0.454" result="2.89" unit="L/hr" />
+                  <CalcRow label="Reheat needed?" formula="0.705 < 0.75" result="Possible in monsoon shoulder hours" unit="" />
+                  <CalcRow label="Moisture removal (m_dot)" formula="6 674 / 1 061" result="6.29" unit="lbs/hr" highlight />
+                  <CalcRow label="Condensate flow" formula="6.29 / 8.34" result="0.75" unit="US gal/hr" />
+                  <CalcRow label="Condensate (litres/hr)" formula="6.29 × 0.454" result="2.86" unit="L/hr" />
                   <CalcRow label="W_supply vs indoor W_room" formula="73.1 vs 86.7 gr/lb" result="ΔW = 13.6" unit="gr/lb removed" />
                 </tbody>
               </table>
@@ -1685,7 +1684,7 @@ Q_vl × BF          ─┘
             <div className="p-3 bg-rose-50 border border-rose-100 rounded-lg text-[11px] text-rose-900 space-y-1">
               <p><strong>Reheat assessment:</strong> Even in Gangtok, coilSHR stays below 0.75 due to latent fraction from ventilation.
               However, compared to Kolkata the latent burden is lower, so condensate generation and dehumidification demand are both reduced.</p>
-              <p><strong>Condensate drain:</strong> 2.89 L/hr - 25 mm drain line with proper slope is adequate.</p>
+              <p><strong>Condensate drain:</strong> 2.86 L/hr - 25 mm drain line with proper slope is adequate.</p>
             </div>
           </CollapseSection>
 
@@ -1695,20 +1694,20 @@ Q_vl × BF          ─┘
             </h4>
             <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
               {[
-                { label:'Envelope Sensible', value:'5 817', unit:'BTU/h', color:'text-orange-300' },
+                { label:'Envelope Sensible', value:'6 530', unit:'BTU/h', color:'text-orange-300' },
                 { label:'Internal Sensible', value:'7 911', unit:'BTU/h', color:'text-green-300' },
                 { label:'Vent + BF Sensible', value:'113', unit:'BTU/h', color:'text-sky-300' },
-                { label:'Duct + Fan Gain', value:'692', unit:'BTU/h', color:'text-gray-300' },
-                { label:'ERSH', value:'14 533', unit:'BTU/h', color:'text-violet-300' },
+                { label:'Duct + Fan Gain', value:'728', unit:'BTU/h', color:'text-gray-300' },
+                { label:'ERSH', value:'15 282', unit:'BTU/h', color:'text-violet-300' },
                 { label:'ERLH', value:'2 744', unit:'BTU/h', color:'text-violet-300' },
                 { label:'OA Coil Contribution', value:'4 573', unit:'BTU/h', color:'text-sky-300' },
-                { label:'Grand Total Heat', value:'21 850', unit:'BTU/h', color:'text-yellow-300' },
-                { label:'Load TR', value:'1.82', unit:'TR', color:'text-yellow-300' },
-                { label:'DSCFM', value:'721', unit:'CFM', color:'text-cyan-300' },
-                { label:'Required TR (+10%)', value:'2.00', unit:'TR', color:'text-yellow-300' },
+                { label:'Grand Total Heat', value:'22 599', unit:'BTU/h', color:'text-yellow-300' },
+                { label:'Load TR (load-only)', value:'1.88', unit:'TR', color:'text-yellow-300' },
+                { label:'DSCFM', value:'756', unit:'CFM', color:'text-cyan-300' },
+                { label:'Required TR (+3%)', value:'1.94', unit:'TR', color:'text-yellow-300' },
                 { label:'Selected Unit', value:'2.0 TR', unit:'Split DX', color:'text-emerald-300' },
-                { label:'Moisture Removal', value:'6.36', unit:'lbs/hr', color:'text-rose-300' },
-                { label:'Condensate', value:'2.89', unit:'L/hr', color:'text-rose-300' },
+                { label:'Moisture Removal', value:'6.29', unit:'lbs/hr', color:'text-rose-300' },
+                { label:'Condensate', value:'2.86', unit:'L/hr', color:'text-rose-300' },
                 { label:'ADP', value:'52.0°F', unit:'', color:'text-cyan-300' },
                 { label:'Supply Air', value:'55.5°F / 73 gr', unit:'', color:'text-cyan-300' },
               ].map(({label,value,unit,color})=>(
@@ -1724,9 +1723,9 @@ Q_vl × BF          ─┘
             <p>
               <strong>Expert comparison (Kolkata vs Gangtok, same room and same internal profile):</strong> Gangtok requires substantially lower cooling capacity
               mainly because outdoor dry-bulb is much lower (82°F vs 95°F), which cuts ΔT and thus envelope + ventilation sensible loads. Even with altitude
-              increasing the CLTD multiplier (k_alt ≈ 1.10), the net envelope sensible load still drops from 10,204 to 5,817 BTU/h. Grand Total Heat falls
-              from 30,394 to 21,850 BTU/h, so selected capacity moves from 3.0 TR to 2.0 TR. Latent performance remains important in both cases, but Gangtok
-              shows lower moisture removal demand (6.36 vs 8.76 lb/hr). Practical design takeaway: in Gangtok-like hill climates, prioritize right-sized capacity
+              increasing the CLTD multiplier (k_alt ≈ 1.10), the net envelope sensible load still drops from 10,917 to 6,530 BTU/h. Grand Total Heat falls
+              from 31,143 to 22,599 BTU/h, so selected capacity moves from 3.0 TR to 2.0 TR. Latent performance remains important in both cases, but Gangtok
+              shows lower moisture removal demand (6.29 vs 8.67 lb/hr). Practical design takeaway: in Gangtok-like hill climates, prioritize right-sized capacity
               and airflow stability over oversizing for extreme heat; in Kolkata-like hot-humid climates, latent robustness and reheat/TFA strategy become more critical.
             </p>
           </div>
@@ -1752,23 +1751,23 @@ Q_vl × BF          ─┘
                     { kpi:'Outdoor humidity ratio', kol:'176.4 gr/lb', gan:'154.7 gr/lb', d:'-21.7 gr/lb' },
                     { kpi:'Atmospheric pressure', kol:'14.68 psia', gan:'12.11 psia', d:'-2.57 psia' },
                     { kpi:'Altitude correction factor (k_alt)', kol:'1.0005', gan:'1.102', d:'+0.1015' },
-                    { kpi:'Envelope sensible (Q_env_s)', kol:'10,204 BTU/h', gan:'5,817 BTU/h', d:'-4,387 BTU/h' },
+                    { kpi:'Envelope sensible (Q_env_s)', kol:'10,917 BTU/h', gan:'6,530 BTU/h', d:'-4,387 BTU/h' },
                     { kpi:'Internal sensible (Q_int_s)', kol:'7,911 BTU/h', gan:'7,911 BTU/h', d:'0' },
                     { kpi:'Vent sensible (Q_vs)', kol:'2,160 BTU/h', gan:'756 BTU/h', d:'-1,404 BTU/h' },
                     { kpi:'Vent latent (Q_vl)', kol:'7,147 BTU/h', gan:'4,624 BTU/h', d:'-2,523 BTU/h' },
-                    { kpi:'ERSH', kol:'19,361 BTU/h', gan:'14,533 BTU/h', d:'-4,828 BTU/h' },
+                    { kpi:'ERSH', kol:'20,110 BTU/h', gan:'15,282 BTU/h', d:'-4,828 BTU/h' },
                     { kpi:'ERLH', kol:'3,122 BTU/h', gan:'2,744 BTU/h', d:'-378 BTU/h' },
-                    { kpi:'CSH', kol:'21,197 BTU/h', gan:'15,176 BTU/h', d:'-6,021 BTU/h' },
+                    { kpi:'CSH', kol:'21,946 BTU/h', gan:'15,925 BTU/h', d:'-6,021 BTU/h' },
                     { kpi:'CLH', kol:'9,197 BTU/h', gan:'6,674 BTU/h', d:'-2,523 BTU/h' },
-                    { kpi:'Grand Total Heat (GTH)', kol:'30,394 BTU/h', gan:'21,850 BTU/h', d:'-8,544 BTU/h' },
-                    { kpi:'Load TR', kol:'2.53 TR', gan:'1.82 TR', d:'-0.71 TR' },
-                    { kpi:'Required TR (+10%)', kol:'2.78 TR', gan:'2.00 TR', d:'-0.78 TR' },
+                    { kpi:'Grand Total Heat (GTH)', kol:'31,143 BTU/h', gan:'22,599 BTU/h', d:'-8,544 BTU/h' },
+                    { kpi:'Load TR (load-only)', kol:'2.60 TR', gan:'1.88 TR', d:'-0.72 TR' },
+                    { kpi:'Required TR (+3%)', kol:'2.68 TR', gan:'1.94 TR', d:'-0.74 TR' },
                     { kpi:'Selected unit', kol:'3.0 TR', gan:'2.0 TR', d:'-1.0 TR size step' },
-                    { kpi:'DSCFM', kol:'934 CFM', gan:'721 CFM', d:'-213 CFM' },
+                    { kpi:'DSCFM', kol:'972 CFM', gan:'756 CFM', d:'-216 CFM' },
                     { kpi:'ADP', kol:'50.4°F', gan:'52.0°F', d:'+1.6°F' },
                     { kpi:'Supply air DB', kol:'54.1°F', gan:'55.5°F', d:'+1.4°F' },
-                    { kpi:'Moisture removal', kol:'8.76 lb/hr', gan:'6.36 lb/hr', d:'-2.40 lb/hr' },
-                    { kpi:'Condensate', kol:'3.98 L/hr', gan:'2.89 L/hr', d:'-1.09 L/hr' },
+                    { kpi:'Moisture removal', kol:'8.67 lb/hr', gan:'6.29 lb/hr', d:'-2.38 lb/hr' },
+                    { kpi:'Condensate', kol:'3.94 L/hr', gan:'2.86 L/hr', d:'-1.08 L/hr' },
                   ].map((row, i) => (
                     <tr key={row.kpi} className={i % 2 === 0 ? 'bg-white' : 'bg-slate-50'}>
                       <td className="px-3 py-1.5 font-semibold text-slate-700">{row.kpi}</td>
@@ -1865,7 +1864,7 @@ Users must now select occupancy type per room — default remains 'office' for b
 computed moisture removal from ventilation air only, ignoring people latent and infiltration latent.
 Example: 10 people × 205 BTU/h = 2 050 BTU/h latent from people alone — omitting this gave a
 condensate rate that was 30–50% too low for occupied rooms.
-Fixed: ṁ_water = CLH / 1050 — uses total coil latent, capturing all sources.`,
+Fixed: ṁ_water = CLH / 1061 — uses total coil latent, capturing all sources.`,
               },
               {
                 name: 'Reheat using Room Loads (ERSH/ERLH)',
@@ -1941,19 +1940,19 @@ convective, making CLF < 1.0 even less significant.`,
               </thead>
               <tbody>
                 {[
-                  { p: 'Bypass Factor (BF)',         v: '0.15',                       r: 'Typical chilled-water coil; adjustable for DX' },
+                  { p: 'Bypass Factor (BF)',         v: '0.15',                       r: 'Fixed 0.15 for all system types; reference ranges vary by coil (see Step 4)' },
                   { p: 'Duct gain',                  v: '2% of ERSH',                 r: 'Industry rule; increase for long duct runs' },
                   { p: 'Fan heat gain',               v: '3% of ERSH',                 r: 'Typical supply fan efficiency assumption' },
                   { p: 'Safety factors',              v: 's_s=10% ERSH, s_l=5% ERLH, s_o=3% govTR', r: 'Applied in two stages — room loads then equipment sizing (see Step 5 & 7)' },
                   { p: 'CLTD tables',                v: 'ASHRAE 1997 Ch. 26',          r: '⚠ Pre-RTS method; RTS (2001+) is more accurate for detailed design' },
                   { p: 'SHGF tables',                v: 'ASHRAE 40°N, July',           r: 'Fixed orientation table; latitude not adjusted dynamically' },
-                  { p: 'CLF for glass',              v: '0.85',                        r: 'Conservative; varies by room construction mass' },
+                  { p: 'CLF for glass',              v: 'Not applied (1.0)',           r: 'Engine applies no cooling-load factor; solar = A × SHGF × SC, with SC = SHGC / 0.87' },
                   { p: 'People loads',               v: 'ASHRAE 2017 Ch.18 Table 2',   r: 'At 75°F room temp; values decrease at lower room temps' },
                   { p: 'Latent heat of vaporisation',v: '1061 BTU/lb',                 r: 'ASHRAE standard — consistent with 0.68 latent constant derivation (60×0.075×1061/7000 = 0.682)' },
                   { p: 'CFM/ton rule',               v: '400 CFM/ton',                 r: 'Sanity ratio only — not a sizing input. VRF / TFA systems may differ significantly' },
                   { p: 'Sensible heat factor',       v: '1.08 BTU·min/(h·CFM·°F)',     r: 'Standard at sea level; altitude-corrected via P_atm ratio' },
                   { p: 'Latent heat factor',         v: '0.68 BTU·min/(h·CFM·gr/lb)',  r: 'Standard at sea level' },
-                  { p: 'Psychrometric equation',     v: 'Magnus approximation',        r: 'Max error < 0.1% over 0–50°C range' },
+                  { p: 'Psychrometric equation',     v: 'ASHRAE 2017 (Hyland–Wexler)', r: 'Full ln(P_ws) saturation-pressure correlation, Handbook Ch. 1' },
                 ].map((row, i) => (
                   <tr key={i} className={i % 2 === 0 ? 'bg-white' : 'bg-gray-50'}>
                     <td className="px-3 py-1.5 font-semibold text-gray-700">{row.p}</td>
