@@ -13,22 +13,10 @@
 
 import * as XLSX from 'xlsx';
 import {
-  calculateCoilParameters,
-  calculateEnvelopeGain,
-  calculateHeatingLoad,
-  calculateInternalGains,
-  calculateParasiticGains,
   calculatePsychrometrics,
   calculateRoomArea,
   calculateRoomVolume,
-  calculateVentilationLoad,
-  calculateTFALoad,
-  resolveRoomTfa,
-  getRecommendedAch,
-  getMinAdp,
-  resolveSupplyCfm,
-  resolveRoomSupplyBasis,
-  resolveTotalSupplyACH,
+  computeRoomLoad,
   type DesignConditions,
   type EnvelopeElement,
   buildAirflowSchedule,
@@ -375,87 +363,36 @@ function getDesignConditions(project: any, zos: any, season: 'summer' | 'monsoon
 
 function calcSeason(project: any, zos: any, room: any, elements: EnvelopeElement[], season: 'summer' | 'monsoon', equipSystems: any[] = []): SeasonResult {
   const dc0 = getDesignConditions(project, zos, season);
-  // TFA/DOAS: when the room is DOAS-served the outdoor air is conditioned by the TFA
-  // unit, not the primary coil. Recompute with the cold-DOAS branch so the space coil
-  // load, ADP, dehumidified CFM and Design CFM reflect the reduced (sensible-leaning)
-  // coil — mirrors reportService.computeDetailed / ZoneList.computeZoneTotals.
-  const { doas, mode: tfaMode } = resolveRoomTfa(room, equipSystems);
-  const isTFA = !!doas;
-  const isTfaOnly = tfaMode === 'tfa-only';
-  const dc: any = isTFA
-    ? { ...dc0, ventilationStrategy: 'tfa-cold', tfaSupplyTemp: doas.tfaSupplyTemp, tfaSupplyHumidity: doas.tfaSupplyHumidity, ervSensibleEffectiveness: doas.ervSensibleEffectiveness, ervLatentEffectiveness: doas.ervLatentEffectiveness }
-    : dc0;
-  const rd = {
-    id: room.id, name: room.name ?? '', floor: room.floor ?? 'Ground',
-    length: asNum(room.length), width: asNum(room.width), height: asNum(room.height),
-    hasFalseCeiling: room.hasFalseCeiling ?? false, falseCeilingHeight: asNum(room.falseCeilingHeight),
-    facph: asNum(room.facph), peopleCount: asNum(room.peopleCount),
-    activityType: room.activityType ?? 'office',
-    lightsWattsPerSqft: asNum(room.lightsWattsPerSqft),
-    equipmentKW: asNum(room.equipmentKW), othersKW: asNum(room.othersKW),
-  };
+  // Single shared engine — resolves TFA/DOAS from equipSystems and runs the same
+  // envelope→internal→vent→TFA-credit→coil→resolveSupplyCfm sequence as the report/app.
+  // (Step-2 consolidation 2026-07-08; was a hand-copied duplicate.)
+  const r = computeRoomLoad(room, elements, dc0, { equipSystems, project });
+  const oPct = asNum(room.overallSafetyPercent ?? room.grandTotalSafetyFactor, 3);
+
   const area   = calculateRoomArea(room);
   const volume = calculateRoomVolume(room);
-  const vent   = calculateVentilationLoad(rd, dc);
-  const int    = calculateInternalGains(rd);
-  const env    = calculateEnvelopeGain(elements, dc);
-  const tfa    = isTFA ? calculateTFALoad(rd, dc) : null;
-
-  const dPct = asNum(room.ductGainPct, 2);
-  const fPct = asNum(room.fanGainPct,  3);
-  const sPct = asNum(room.sensibleSafetyPercent ?? room.sensibleSafetyFactor, 10);
-  const lPct = asNum(room.latentSafetyPercent   ?? room.latentSafetyFactor,  5);
-  const oPct = asNum(room.overallSafetyPercent  ?? room.grandTotalSafetyFactor, 3);
-
-  // In TFA mode the bypass-OA terms go to the DOAS unit, not the primary coil.
-  const ventSenBF = isTFA ? 0 : vent.sensible * BF;
-  const ventLatBF = isTFA ? 0 : vent.latent * BF;
-  const erBase = env.sensible + int.sensible + ventSenBF;
-  const para   = calculateParasiticGains(erBase, erBase, dPct, fPct);
-  const ersh   = (erBase + para.ductGain + para.fanGain) * (1 + sPct / 100);
-  const erlh   = (int.latent + env.latent + ventLatBF) * (1 + lPct / 100);
-  const oaSen  = isTFA ? 0 : vent.sensible * (1 - BF);
-  const oaLat  = isTFA ? 0 : vent.latent * (1 - BF);
-  const tfaOffSen = tfa ? tfa.spaceSensibleOffset : 0;
-  const tfaOffLat = tfa ? tfa.spaceLatentOffset : 0;
-  const coilS  = isTfaOnly ? 0 : (isTFA ? Math.max(0, ersh - tfaOffSen) : ersh + oaSen);
-  const coilL  = isTfaOnly ? 0 : (isTFA ? Math.max(0, erlh - tfaOffLat) : erlh + oaLat);
-  const grand  = (coilS + coilL) * (1 + oPct / 100);
-
-  const coil = calculateCoilParameters(coilS, coilL, dc.indoorTemp, dc.indoorHumidity, asNum(project?.altitude), BF, 35, 65, getMinAdp(project?.systemType, project?.adpBasis));
-  const ach  = resolveTotalSupplyACH(getRecommendedAch(room.activityType ?? room.achProfile), asNum(room.facph), asNum(room.recircPct));
-  const totCFM = (volume * ach) / 60;
-  const freshAirCFM = (volume * asNum(room.facph)) / 60;
-  // Either/or supply basis (matches the app + PDF) — TFA-aware: the DOAS delivers the OA,
-  // so the space AHU is sized on the residual (post-credit) load / recirc balance.
-  const supply = resolveSupplyCfm({
-    basis: resolveRoomSupplyBasis(room.supplyCfmBasis, project?.supplyBasis),
-    isTFA, isTfaOnly,
-    dehumidifiedCFM: coil.dehumidifiedCFM,
-    minAdpSensibleCFM: coil.minAdpSensibleCFM,
-    totalSupplyCFM: totCFM, freshAirCFM, tfaCfm: tfa?.cfm ?? 0,
-  });
-  const desCFM = supply.designSupplyCFM;
-  const heating = calculateHeatingLoad(rd, elements, dc);
+  // Excel's grand total / TR carry the overall safety factor (its "Governing TR" =
+  // load ÷ 12,000 × safety = the app's requiredTR). Preserve that presentation.
+  const grand  = r.grandTotal * (1 + oPct / 100);
 
   return {
-    area, volume, ventCfm: vent.cfm, ventSensible: vent.sensible, ventLatent: vent.latent,
-    internalSensible: int.sensible, internalLatent: int.latent,
-    envelopeSensible: env.sensible, envelopeLatent: env.latent,
-    ductGain: para.ductGain, fanGain: para.fanGain,
-    ersh, erlh, coilSensible: coilS, coilLatent: coilL,
+    area, volume, ventCfm: r.vent.cfm, ventSensible: r.vent.sensible, ventLatent: r.vent.latent,
+    internalSensible: r.internal.sensible, internalLatent: r.internal.latent,
+    envelopeSensible: r.envelope.sensible, envelopeLatent: r.envelope.latent,
+    ductGain: r.parasitic.ductGain, fanGain: r.parasitic.fanGain,
+    ersh: r.ersh, erlh: r.erlh, coilSensible: r.coilSensible, coilLatent: r.coilLatent,
     grandTotal: grand, totalTR: grand / 12000,
-    totalSupplyCFM: totCFM, designSupplyCFM: desCFM,
-    selectedAdp: coil.selectedADP,
-    dehumidSensibleCfm: coil.dehumidifiedCFM,
-    latentCfm: coil.latentCFM,
-    latentShortfallCfm: coil.latentShortfallCFM,
-    reheatRequiredBtu: coil.reheatRequiredBTU,
-    heatingLoad: heating.totalHeatingLoad,
+    totalSupplyCFM: r.totalSupplyCfm, designSupplyCFM: r.designCfm,
+    selectedAdp: r.coil.selectedADP,
+    dehumidSensibleCfm: r.coil.dehumidifiedCFM,
+    latentCfm: r.coil.latentCFM,
+    latentShortfallCfm: r.coil.latentShortfallCFM,
+    reheatRequiredBtu: r.coil.reheatRequiredBTU,
+    heatingLoad: r.heating.totalHeatingLoad,
   };
 }
 
-function calcWinter(project: any, zos: any, room: any, elements: EnvelopeElement[]): WinterResult {
+function calcWinter(project: any, zos: any, room: any, elements: EnvelopeElement[], equipSystems: any[] = []): WinterResult {
   const dc: DesignConditions = {
     outdoorTemp:      asNum(project?.winterDesignTemp, 50),
     indoorTemp:       asNum(zos?.winterIndoorTemp  ?? project?.insideWinterTemp,  72),
@@ -467,20 +404,12 @@ function calcWinter(project: any, zos: any, room: any, elements: EnvelopeElement
     winterIndoorHumidity:  asNum(zos?.winterIndoorHumidity ?? project?.insideWinterHumidity, 40),
     altitude: asNum(project?.altitude, 0),
   };
-  const rd = {
-    id: room.id, name: room.name ?? '', floor: room.floor ?? 'Ground',
-    length: asNum(room.length), width: asNum(room.width), height: asNum(room.height),
-    hasFalseCeiling: room.hasFalseCeiling ?? false, falseCeilingHeight: asNum(room.falseCeilingHeight),
-    facph: asNum(room.facph), peopleCount: asNum(room.peopleCount),
-    activityType: room.activityType ?? 'office',
-    lightsWattsPerSqft: asNum(room.lightsWattsPerSqft),
-    equipmentKW: asNum(room.equipmentKW), othersKW: asNum(room.othersKW),
-  };
-  const env  = calculateEnvelopeGain(elements, dc);
-  const int  = calculateInternalGains(rd);
-  const vent = calculateVentilationLoad(rd, dc);
-  const heat = calculateHeatingLoad(rd, elements, dc);
-  return { total: heat.totalHeatingLoad, envelope: env.sensible, internal: int.sensible, vent: vent.sensible };
+  // Shared engine so winter heating is TFA-aware: a DOAS-served room heats only genuine
+  // infiltration (winterInfiltrationACH), not the full FACPH the DOAS coil already tempers
+  // — same correctness fix as the report (R85 #6). Previously this used the raw DC and
+  // double-counted the fresh-air heating for DOAS rooms.
+  const r = computeRoomLoad(room, elements, dc, { equipSystems, project });
+  return { total: r.heating.totalHeatingLoad, envelope: r.envelope.sensible, internal: r.internal.sensible, vent: r.vent.sensible };
 }
 
 // ─── Sheet-name deduplication ─────────────────────────────────────────────────
@@ -524,7 +453,7 @@ function toRoomRecords(
       const els = elements?.[room.id] ?? [];
       const sum = calcSeason(project, zos, room, els, 'summer', equipSystems);
       const mon = project?.includeMonsoon ? calcSeason(project, zos, room, els, 'monsoon', equipSystems) : undefined;
-      const win = calcWinter(project, zos, room, els);
+      const win = calcWinter(project, zos, room, els, equipSystems);
 
       // Plant TR is load-only — CFM/TR is a sanity ratio, not a sizing input.
       // (Engine decision: 2026-05-20.)
