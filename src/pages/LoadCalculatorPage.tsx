@@ -17,6 +17,7 @@ import { toast } from 'sonner';
 import {
   Plus, Search, Pencil, Trash2, ChevronRight,
   MapPin, Thermometer, Droplets, ArrowLeft, Loader2, FileText,
+  UserPlus, Users, Check,
 } from 'lucide-react';
 import LoadCalculator, { type LoadCalculatorHandle } from '../components/hvac/LoadCalculator';
 import { resolveDesignMode, type DesignMode } from '../lib/hvac/supplyCfm';
@@ -52,6 +53,8 @@ interface Project {
   name: string;
   location: string;
   userId?: string;
+  /** Team members (uids) this project is SHARED with — owner keeps access; assignees also see/edit it. */
+  assignedUserIds?: string[];
   longitude?: number;
   latitude?: number;
   altitude?: number;
@@ -174,6 +177,58 @@ interface Props {
   onProjectChange?: (project: any) => void;
 }
 
+// Map a Firestore project doc → Project view model. Shared by the owner query and the
+// "shared with me" (assignedUserIds) query so both produce identical shapes.
+function mapProjectDoc(d: any): Project {
+  const p: any = d.data();
+  const data = p.data || {};
+  return {
+    id: d.id,
+    name: p.name || '',
+    location: p.location || '',
+    userId: p.userId,
+    assignedUserIds: Array.isArray(p.assignedUserIds) ? p.assignedUserIds : [],
+    longitude: data.longitude,
+    latitude: data.latitude,
+    altitude: data.altitude,
+    systemType: p.systemType || 'CAC',
+    designMode: p.designMode ?? data.designMode,
+    adpBasis: p.adpBasis ?? data.adpBasis,
+    supplyBasis: p.supplyBasis ?? data.supplyBasis,
+    reportId: p.reportId ?? data.reportId,
+    reportRev: p.reportRev ?? data.reportRev,
+    reportDate: p.reportDate ?? data.reportDate,
+    includeMonsoon: p.includeMonsoon ?? false,
+    includeWinter: p.includeWinter ?? true,
+    summerDesignTemp: data.summerDesignTemp ?? 95,
+    summerDesignHumidity: data.summerDesignHumidity ?? 50,
+    monsoonDesignTemp: data.monsoonDesignTemp ?? 85,
+    monsoonDesignHumidity: data.monsoonDesignHumidity ?? 85,
+    winterDesignTemp: data.winterDesignTemp ?? 40,
+    winterDesignHumidity: data.winterDesignHumidity ?? 30,
+    insideSummerTemp: data.insideSummerTemp ?? 75,
+    insideSummerHumidity: data.insideSummerHumidity ?? 50,
+    insideMonsoonTemp: data.insideMonsoonTemp ?? data.insideSummerTemp ?? 75,
+    insideMonsoonHumidity: data.insideMonsoonHumidity ?? 55,
+    insideWinterTemp: data.insideWinterTemp ?? 70,
+    insideWinterHumidity: data.insideWinterHumidity ?? 30,
+    summerEnthalpy: data.summerEnthalpy,
+    summerHumidityRatio: data.summerHumidityRatio,
+    monsoonEnthalpy: data.monsoonEnthalpy,
+    monsoonHumidityRatio: data.monsoonHumidityRatio,
+    winterEnthalpy: data.winterEnthalpy,
+    winterHumidityRatio: data.winterHumidityRatio,
+    insideSummerEnthalpy: data.insideSummerEnthalpy,
+    insideSummerHumidityRatio: data.insideSummerHumidityRatio,
+    insideMonsoonEnthalpy: data.insideMonsoonEnthalpy,
+    insideMonsoonHumidityRatio: data.insideMonsoonHumidityRatio,
+    createdAt: p.createdAt?.toDate?.() ?? new Date(),
+    updatedAt: p.updatedAt?.toDate?.() ?? new Date(),
+    zonesLastSyncedAt: p.zonesLastSyncedAt ?? null,
+    data,
+  } as Project;
+}
+
 export default function LoadCalculatorPage({ currentUser, initialProjectId, userRole = null, pendingPageChange, onPageChangeResolved, onProjectChange }: Props) {
   const [projects, setProjects] = useState<Project[]>([]);
   const [activeProject, setActiveProject] = useState<Project | null>(null);
@@ -187,6 +242,12 @@ export default function LoadCalculatorPage({ currentUser, initialProjectId, user
   const [searchText, setSearchText] = useState('');
   const [systemFilter, setSystemFilter] = useState<'all' | string>('all');
   const [reloadKey, setReloadKey] = useState(0);
+  // Assign / share (Super only): Design-Team members a project can be shared with, and the
+  // open assign-dialog state.
+  const [teamMembers, setTeamMembers] = useState<{ uid: string; email: string; role: string }[]>([]);
+  const [assignTarget, setAssignTarget] = useState<Project | null>(null);
+  const [assignSel, setAssignSel] = useState<string[]>([]);
+  const [assignSaving, setAssignSaving] = useState(false);
 
   // Stable reference — prevents the data-loading effect in LoadCalculator
   // from re-triggering when LoadCalculatorPage re-renders.
@@ -236,67 +297,41 @@ export default function LoadCalculatorPage({ currentUser, initialProjectId, user
 
   // ── Load projects from Firestore ──────────────────────────────────────────
   useEffect(() => {
-    const q = userRole === 'Super'
-      ? query(collection(db, 'projects'), orderBy('updatedAt', 'desc'))
-      : query(
-          collection(db, 'projects'),
-          where('userId', '==', currentUser.uid),
-          orderBy('updatedAt', 'desc'),
-        );
-    const unsub = onSnapshot(q, (snap) => {
-      setProjects(snap.docs.map((d) => {
-        const p: any = d.data();
-        const data = p.data || {};
-        return {
-          id: d.id,
-          name: p.name || '',
-          location: p.location || '',
-          userId: p.userId,
-          longitude: data.longitude,
-          latitude: data.latitude,
-          altitude: data.altitude,
-          systemType: p.systemType || 'CAC',
-          designMode: p.designMode ?? data.designMode,
-          adpBasis: p.adpBasis ?? data.adpBasis,
-          supplyBasis: p.supplyBasis ?? data.supplyBasis,
-          reportId: p.reportId ?? data.reportId,
-          reportRev: p.reportRev ?? data.reportRev,
-          reportDate: p.reportDate ?? data.reportDate,
-          includeMonsoon: p.includeMonsoon ?? false,
-          includeWinter: p.includeWinter ?? true,
-          summerDesignTemp: data.summerDesignTemp ?? 95,
-          summerDesignHumidity: data.summerDesignHumidity ?? 50,
-          monsoonDesignTemp: data.monsoonDesignTemp ?? 85,
-          monsoonDesignHumidity: data.monsoonDesignHumidity ?? 85,
-          winterDesignTemp: data.winterDesignTemp ?? 40,
-          winterDesignHumidity: data.winterDesignHumidity ?? 30,
-          insideSummerTemp: data.insideSummerTemp ?? 75,
-          insideSummerHumidity: data.insideSummerHumidity ?? 50,
-          insideMonsoonTemp: data.insideMonsoonTemp ?? data.insideSummerTemp ?? 75,
-          insideMonsoonHumidity: data.insideMonsoonHumidity ?? 55,
-          insideWinterTemp: data.insideWinterTemp ?? 70,
-          insideWinterHumidity: data.insideWinterHumidity ?? 30,
-          summerEnthalpy: data.summerEnthalpy,
-          summerHumidityRatio: data.summerHumidityRatio,
-          monsoonEnthalpy: data.monsoonEnthalpy,
-          monsoonHumidityRatio: data.monsoonHumidityRatio,
-          winterEnthalpy: data.winterEnthalpy,
-          winterHumidityRatio: data.winterHumidityRatio,
-          insideSummerEnthalpy: data.insideSummerEnthalpy,
-          insideSummerHumidityRatio: data.insideSummerHumidityRatio,
-          insideMonsoonEnthalpy: data.insideMonsoonEnthalpy,
-          insideMonsoonHumidityRatio: data.insideMonsoonHumidityRatio,
-          createdAt: p.createdAt?.toDate?.() ?? new Date(),
-          updatedAt: p.updatedAt?.toDate?.() ?? new Date(),
-          zonesLastSyncedAt: p.zonesLastSyncedAt ?? null,
-          data,
-        } as Project;
-      }));
-    }, (err) => {
-      console.error('[LoadCalculatorPage]', err);
-      toast.error('Failed to load projects');
-    });
-    return () => unsub();
+    const uid = currentUser.uid;
+    const onErr = (err: any) => { console.error('[LoadCalculatorPage]', err); toast.error('Failed to load projects'); };
+    const sortByUpdated = (list: Project[]) =>
+      [...list].sort((a, b) => (b.updatedAt?.getTime?.() ?? 0) - (a.updatedAt?.getTime?.() ?? 0));
+
+    // Super sees every project.
+    if (userRole === 'Super') {
+      const unsub = onSnapshot(
+        query(collection(db, 'projects'), orderBy('updatedAt', 'desc')),
+        (snap) => setProjects(snap.docs.map(mapProjectDoc)),
+        onErr,
+      );
+      return () => unsub();
+    }
+
+    // Everyone else sees their OWN projects + any SHARED with them (assignedUserIds contains
+    // their uid). Two listeners merged & de-duped; sorted in memory so the shared query needs
+    // no array-contains+updatedAt composite index.
+    let own: Project[] = [], shared: Project[] = [];
+    const merge = () => {
+      const byId = new Map<string, Project>();
+      [...own, ...shared].forEach((p) => byId.set(p.id, p));
+      setProjects(sortByUpdated([...byId.values()]));
+    };
+    const unsubOwn = onSnapshot(
+      query(collection(db, 'projects'), where('userId', '==', uid), orderBy('updatedAt', 'desc')),
+      (snap) => { own = snap.docs.map(mapProjectDoc); merge(); },
+      onErr,
+    );
+    const unsubShared = onSnapshot(
+      query(collection(db, 'projects'), where('assignedUserIds', 'array-contains', uid)),
+      (snap) => { shared = snap.docs.map(mapProjectDoc); merge(); },
+      onErr,
+    );
+    return () => { unsubOwn(); unsubShared(); };
   }, [currentUser.uid, userRole]);
 
   useEffect(() => {
@@ -307,15 +342,46 @@ export default function LoadCalculatorPage({ currentUser, initialProjectId, user
 
     const unsub = onSnapshot(collection(db, 'users'), (snap) => {
       const next: Record<string, string> = {};
+      const members: { uid: string; email: string; role: string }[] = [];
       snap.docs.forEach((d) => {
         const data: any = d.data();
         if (data?.email) next[d.id] = data.email;
+        // Assignable = a real login user (uid-keyed doc, not an email invite) on the Design Team —
+        // the rules already let Design Team edit any project, so sharing just makes it visible.
+        if (data?.email && !d.id.includes('@') && data.role === 'Design Team') {
+          members.push({ uid: d.id, email: data.email, role: data.role });
+        }
       });
       setOwnerEmails(next);
+      setTeamMembers(members.sort((a, b) => a.email.localeCompare(b.email)));
     });
 
     return () => unsub();
   }, [userRole]);
+
+  // ── Assign / share a project with team members (Super only) ───────────────
+  const openAssign = (project: Project) => {
+    setAssignTarget(project);
+    setAssignSel(project.assignedUserIds ?? []);
+  };
+  const toggleAssignee = (uid: string) =>
+    setAssignSel((prev) => (prev.includes(uid) ? prev.filter((u) => u !== uid) : [...prev, uid]));
+  const saveAssignment = async () => {
+    if (!assignTarget) return;
+    setAssignSaving(true);
+    try {
+      await updateDoc(doc(db, 'projects', assignTarget.id), { assignedUserIds: assignSel });
+      toast.success(assignSel.length
+        ? `Shared with ${assignSel.length} team member${assignSel.length === 1 ? '' : 's'}`
+        : 'Sharing removed');
+      setAssignTarget(null);
+    } catch (e) {
+      console.error('[assign]', e);
+      toast.error('Failed to update sharing');
+    } finally {
+      setAssignSaving(false);
+    }
+  };
 
   // ── Sync activeProject when projects list updates ─────────────────────────
   useEffect(() => {
@@ -784,6 +850,9 @@ export default function LoadCalculatorPage({ currentUser, initialProjectId, user
               key={project.id}
               project={project}
               ownerLabel={userRole === 'Super' && project.userId ? (ownerEmails[project.userId] || project.userId) : undefined}
+              canAssign={userRole === 'Super'}
+              onAssign={() => openAssign(project)}
+              sharedWithMe={userRole !== 'Super' && !!project.userId && project.userId !== currentUser.uid}
               onOpen={() => guardedNavigate(() => { setActiveProject(project); onProjectChange?.(project); })}
               onEdit={() => openEditDialog(project)}
               onDelete={() => deleteProject(project.id)}
@@ -803,6 +872,53 @@ export default function LoadCalculatorPage({ currentUser, initialProjectId, user
         geocoding={geocoding}
         editing={!!editingProject}
       />
+
+      {/* Assign / share dialog (Super only) */}
+      <Dialog open={!!assignTarget} onOpenChange={(o) => { if (!o) setAssignTarget(null); }}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Users className="h-4 w-4 text-teal-600" /> Share “{assignTarget?.name}”
+            </DialogTitle>
+          </DialogHeader>
+          <p className="text-xs text-slate-500 dark:text-slate-400">
+            Pick the Design-Team members who should see and work on this project. You (the owner) keep full access.
+          </p>
+          <div className="max-h-72 space-y-1 overflow-y-auto py-1">
+            {teamMembers.filter((m) => m.uid !== assignTarget?.userId).length === 0 ? (
+              <p className="px-1 py-6 text-center text-sm text-slate-400">No other Design-Team members found.</p>
+            ) : (
+              teamMembers
+                .filter((m) => m.uid !== assignTarget?.userId)
+                .map((m) => {
+                  const on = assignSel.includes(m.uid);
+                  return (
+                    <button
+                      key={m.uid}
+                      type="button"
+                      onClick={() => toggleAssignee(m.uid)}
+                      className={`flex w-full items-center justify-between gap-2 rounded-md border px-3 py-2 text-left text-sm transition-colors ${
+                        on
+                          ? 'border-teal-300 bg-teal-50 text-teal-800 dark:border-teal-700 dark:bg-teal-950/30 dark:text-teal-200'
+                          : 'border-slate-200 hover:bg-slate-50 dark:border-slate-700 dark:hover:bg-slate-800'
+                      }`}
+                    >
+                      <span className="truncate">{m.email}</span>
+                      {on && <Check className="h-4 w-4 shrink-0 text-teal-600" />}
+                    </button>
+                  );
+                })
+            )}
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setAssignTarget(null)} disabled={assignSaving}>Cancel</Button>
+            <Button onClick={saveAssignment} disabled={assignSaving} className="gap-1 bg-teal-600 hover:bg-teal-700 text-white">
+              {assignSaving ? <Loader2 className="h-4 w-4 animate-spin" /> : <UserPlus className="h-4 w-4" />}
+              Save sharing
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
@@ -810,14 +926,18 @@ export default function LoadCalculatorPage({ currentUser, initialProjectId, user
 // ─── Project Card ─────────────────────────────────────────────────────────────
 
 function ProjectCard({
-  project, ownerLabel, onOpen, onEdit, onDelete,
+  project, ownerLabel, canAssign, sharedWithMe, onAssign, onOpen, onEdit, onDelete,
 }: {
   project: Project;
   ownerLabel?: string;
+  canAssign?: boolean;
+  sharedWithMe?: boolean;
+  onAssign?: () => void;
   onOpen: () => void;
   onEdit: () => void;
   onDelete: () => void;
 }) {
+  const assignedCount = project.assignedUserIds?.length ?? 0;
   return (
     <Card className="group transition-all hover:shadow-lg">
       <CardHeader className="pb-3">
@@ -904,19 +1024,34 @@ function ProjectCard({
           Updated {new Date(project.updatedAt).toLocaleDateString()}
         </p>
 
-        {ownerLabel && (
-          <div>
+        <div className="flex flex-wrap gap-1.5">
+          {ownerLabel && (
             <span className="inline-flex items-center rounded-md border border-amber-200 bg-amber-50 px-2 py-1 text-[11px] font-medium text-amber-800 dark:border-amber-700 dark:bg-amber-950/20 dark:text-amber-300">
               Owned by: {ownerLabel}
             </span>
-          </div>
-        )}
+          )}
+          {sharedWithMe && (
+            <span className="inline-flex items-center gap-1 rounded-md border border-teal-200 bg-teal-50 px-2 py-1 text-[11px] font-medium text-teal-800 dark:border-teal-700 dark:bg-teal-950/20 dark:text-teal-300">
+              <Users className="h-3 w-3" /> Shared with you
+            </span>
+          )}
+          {canAssign && assignedCount > 0 && (
+            <span className="inline-flex items-center gap-1 rounded-md border border-teal-200 bg-teal-50 px-2 py-1 text-[11px] font-medium text-teal-800 dark:border-teal-700 dark:bg-teal-950/20 dark:text-teal-300">
+              <Users className="h-3 w-3" /> Shared with {assignedCount}
+            </span>
+          )}
+        </div>
 
         {/* Actions */}
         <div className="flex gap-2 pt-1">
           <Button onClick={onOpen} size="sm" className="flex-1 gap-1 bg-teal-600 hover:bg-teal-700 text-white">
             Open <ChevronRight className="h-3 w-3" />
           </Button>
+          {canAssign && (
+            <Button onClick={onAssign} variant="outline" size="sm" title="Assign to team members">
+              <UserPlus className="h-4 w-4" />
+            </Button>
+          )}
           <Button onClick={onEdit} variant="outline" size="sm">
             <Pencil className="h-4 w-4" />
           </Button>
