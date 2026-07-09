@@ -3845,7 +3845,9 @@ export default function EquipmentSelection({
 
   // A room is "assigned" if its systemId matches any equipment system (new) or zoneId matches (legacy)
   const allAssignedIds = new Set(rooms.filter((r: any) => equipSystems.some(s => s.id === r.systemId || s.id === r.zoneId)).map((r: any) => r.id));
-  const unassignedRooms = rooms.filter(r => !allAssignedIds.has(r.id));
+  // TFA-only rooms are DOAS-fed with no space AHU, so they legitimately have no space-system
+  // assignment — the "unassigned" banner is about SPACE equipment coverage, so don't flag them.
+  const unassignedRooms = rooms.filter((r: any) => !allAssignedIds.has(r.id) && r?.tfaMode !== 'tfa-only' && !r?._calcTfaOnly);
 
   const selectedSystem = equipSystems.find(s => s.id === selectedSystemId) ?? null;
 
@@ -4570,13 +4572,72 @@ export default function EquipmentSelection({
   }, [equipSystems, rooms]);
 
   // ── Project-wide system summary (Phase 7) ─────────────────────────────────
+  // Per-system chiller PLANT required TR — mirrors the on-screen System-Design number
+  // (chillerPlantRequiredTR): diversified indoor (connected AHU/IDU less on-unit OA) + OA
+  // (non-diverse) + chiller-fed TFA coil. The Summary previously summed only room space-TR,
+  // which omitted the chiller-fed TFA coil entirely (understating a chiller-fed plant by >½).
+  const chillerPlantRequiredForSystem = (sys: any, rids: string[]): number => {
+    const sumLoad = (field: string) => rids.reduce((s, rid) => {
+      const r = rooms.find((x: any) => x.id === rid) as any; return s + (Number(r?.[field]) || 0);
+    }, 0);
+    const monGoverns = includeMonsoon && sumLoad('_calcMonsoonLoadTR') > sumLoad('_calcLoadTR');
+    const season = monGoverns ? 'monsoon' : 'summer';
+    const oa = rids.reduce((s, rid) => {
+      const r = rooms.find((x: any) => x.id === rid) as any; if (!r) return s;
+      const loadTR = Number(season === 'monsoon' ? r._calcMonsoonLoadTR : r._calcLoadTR) || 0;
+      let oaTR = Number(season === 'monsoon' ? r._calcMonsoonOaTR : r._calcOaTR);
+      if (!Number.isFinite(oaTR)) {
+        const sLoad = Number(r._calcLoadTR) || 0;
+        const sIndoor = ((Number(r._calcSensibleBTUH) || 0) + (Number(r._calcLatentBTUH) || 0)) / 12000;
+        const sOa = Math.max(0, sLoad - sIndoor);
+        oaTR = season === 'monsoon' ? (sLoad > 0 ? loadTR * (sOa / sLoad) : 0) : sOa;
+      }
+      return s + Math.min(Math.max(0, oaTR), loadTR);
+    }, 0);
+    const iduTR = Object.values(sys.iduSelections ?? {}).reduce((s: number, x: any) => s + normalizeIDUList(x).reduce((ss: number, u: any) => ss + u.trCapacity * (u.quantity ?? 1), 0), 0) as number;
+    const ahuTR = ((sys.zones ?? sys.ahuGroups ?? []) as EquipmentZone[]).reduce((s: number, z: any) => s + (z.selection ? z.selection.trCapacity * (z.selection.quantity ?? 1) : 0), 0);
+    const connectedIdu = iduTR + ahuTR;
+    const coilDuty = rids.reduce((s, rid) => {
+      const r = rooms.find((x: any) => x.id === rid) as any;
+      const stored = Number(r?._calcOverallRequiredTR);
+      const live = Number((getRoomReqs(rid) as any)?.overallRequiredTR);
+      return s + (Number.isFinite(stored) && stored > 0 ? stored : (Number.isFinite(live) && live > 0 ? live : 0));
+    }, 0);
+    const connected = connectedIdu > 0 ? connectedIdu : coilDuty;
+    const indoorDiverse = Math.max(0, connected - oa) * (sys.diversityFactor ?? 0.75);
+    const tfa = rids.reduce((s, rid) => {
+      const r = rooms.find((x: any) => x.id === rid) as any;
+      const doas = r ? findDoasForRoom(r) : null;
+      if (!doas || (doas as any).tfaCoolingSource !== 'chiller-plant') return s;
+      const reqs: any = getRoomReqs(rid);
+      return s + Math.max(Number(reqs?.tfaCoilTR) || 0, Number(reqs?.monsoonTfaCoilTR) || 0);
+    }, 0);
+    return indoorDiverse + oa + tfa;
+  };
+
   const systemSummaries = useMemo(() => {
+    const effUnitTR = (u: any) => (u.actualTR != null && u.actualTR > 0 ? u.actualTR : (u.trCapacity ?? 0));
     return equipSystems.map(sys => {
       const sysRooms = (rooms as any[]).filter(r => r.zoneId === sys.id || r.systemId === sys.id);
       const roomCount = sysRooms.length;
 
-      const requiredTR = sysRooms.reduce((sum: number, r: any) =>
-        sum + Number(r._calcOverallRequiredTR ?? r._calcRequiredTR ?? 0), 0);
+      // Chiller-fed plants must carry the TFA coil too, so use the full plant requirement
+      // (matches System Design); other system types use the summed room duty.
+      const requiredTR = sys.type === 'Chiller'
+        ? chillerPlantRequiredForSystem(sys, sysRooms.map((r: any) => r.id))
+        : sysRooms.reduce((sum: number, r: any) => sum + Number(r._calcOverallRequiredTR ?? r._calcRequiredTR ?? 0), 0);
+
+      // Working vs standby: standby units are N+1 redundancy and DON'T count toward coverage.
+      let workingTR = 0, standbyTR = 0;
+      if (sys.type === 'Chiller') {
+        const units: any[] = (sys as any).chillerUnits?.length
+          ? (sys as any).chillerUnits
+          : (sys.unitSelection ? [{ ...sys.unitSelection, quantity: sys.unitSelection.quantity ?? 1 }] : []);
+        for (const u of units) {
+          const tr = effUnitTR(u) * (u.quantity ?? 1);
+          if (u.role === 'standby') standbyTR += tr; else workingTR += tr;
+        }
+      }
 
       let installedTR = 0;
       if (sys.type === 'VRF') {
@@ -4590,8 +4651,8 @@ export default function EquipmentSelection({
           installedTR = Object.values(sys.iduSelections as any).reduce((s: number, x: any) => s + normalizeIDUList(x).reduce((ss: number, u: any) => ss + u.trCapacity * (u.quantity ?? 1), 0), 0) as number;
         }
       } else if (sys.type === 'Chiller') {
-        const units: any[] = (sys as any).chillerUnits ?? [];
-        installedTR = units.reduce((s: number, u: any) => s + u.trCapacity * ((u.quantity ?? 1) as number), 0);
+        // Coverage is against WORKING capacity — standby (N+1) is redundancy, not duty.
+        installedTR = workingTR;
       } else if (sys.type === 'Split') {
         const roomSel: Record<string, IDUSelection[]> = (sys as any).roomSelections ?? {};
         installedTR = Object.values(roomSel).reduce((s, units) => s + units.reduce((ss, u) => ss + u.trCapacity, 0), 0);
@@ -4605,7 +4666,7 @@ export default function EquipmentSelection({
       else if (requiredTR > 0 && installedTR < requiredTR * 0.97) status = 'undersized';
       else status = 'ok';
 
-      return { id: sys.id, name: sys.name, type: sys.type as SystemType, roomCount, requiredTR, installedTR, status };
+      return { id: sys.id, name: sys.name, type: sys.type as SystemType, roomCount, requiredTR, installedTR, workingTR, standbyTR, status };
     });
   }, [equipSystems, rooms]);
 
@@ -7643,6 +7704,9 @@ export default function EquipmentSelection({
                           </TableCell>
                           <TableCell className="text-right font-mono font-bold">
                             {s.installedTR > 0 ? s.installedTR.toFixed(2) : <span className="text-slate-300 dark:text-slate-600">—</span>}
+                            {s.standbyTR > 0 && (
+                              <span className="ml-1 text-[10px] font-normal text-slate-400 dark:text-slate-500">+{s.standbyTR.toFixed(0)} SB</span>
+                            )}
                           </TableCell>
                           <TableCell className="text-right">
                             {coverage > 0 ? (
