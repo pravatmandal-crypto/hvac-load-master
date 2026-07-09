@@ -201,6 +201,12 @@ export default function App() {
                 setAndPersistProject(project);
                 setCurrentPage('calculator');
               }}
+              // "All Projects" / "Open Load Calculator" go to the LC project LIST, not the
+              // last-opened project — clear the pending id so LoadCalculatorPage doesn't auto-open it.
+              onOpenProjectList={() => {
+                setPendingProjectId(undefined);
+                setCurrentPage('calculator');
+              }}
               onPageChange={handlePageChange}
             />
           )}

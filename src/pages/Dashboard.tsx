@@ -28,6 +28,8 @@ interface DashboardProps {
   currentUser: User;
   onProjectOpen: (project: Project) => void;
   onPageChange?: (page: string) => void;
+  /** Go to the Load Calculator PROJECT LIST (not the last-opened project). */
+  onOpenProjectList?: () => void;
   userRole: string | null;
 }
 
@@ -42,7 +44,10 @@ const TOOLS = [
   { icon: BookOpen,   label: 'Methodology',         page: 'methodology',color: 'bg-indigo-50 text-indigo-700 border-indigo-200 dark:bg-indigo-900/20 dark:text-indigo-300 dark:border-indigo-800', desc: 'ASHRAE calculation references' },
 ];
 
-export default function Dashboard({ currentUser, onProjectOpen, onPageChange, userRole }: DashboardProps) {
+export default function Dashboard({ currentUser, onProjectOpen, onPageChange, onOpenProjectList, userRole }: DashboardProps) {
+  // Navigate to the Load Calculator project LIST. Falls back to plain page change if the
+  // dedicated handler isn't wired.
+  const openProjectList = () => (onOpenProjectList ? onOpenProjectList() : onPageChange?.('calculator'));
   const [projects, setProjects] = useState<Project[]>([]);
   const [ownerEmails, setOwnerEmails] = useState<Record<string, string>>({});
   const [duplicatingId, setDuplicatingId] = useState<string | null>(null);
@@ -190,7 +195,7 @@ export default function Dashboard({ currentUser, onProjectOpen, onPageChange, us
               </p>
             </div>
             <Button
-              onClick={() => onPageChange?.('calculator')}
+              onClick={openProjectList}
               className="bg-teal-500 hover:bg-teal-400 text-white font-semibold shadow-lg w-fit flex-shrink-0 border border-teal-400/50"
             >
               <Calculator className="mr-2 h-4 w-4" />
@@ -223,7 +228,7 @@ export default function Dashboard({ currentUser, onProjectOpen, onPageChange, us
             Recent Projects
           </h2>
           <button
-            onClick={() => onPageChange?.('calculator')}
+            onClick={openProjectList}
             className="text-xs text-teal-600 dark:text-teal-400 hover:text-teal-700 dark:hover:text-teal-300 flex items-center gap-1 font-medium"
           >
             All projects <ArrowRight className="h-3 w-3" />
@@ -237,7 +242,7 @@ export default function Dashboard({ currentUser, onProjectOpen, onPageChange, us
             <p className="text-sm text-slate-400 dark:text-slate-500 mt-1 mb-4">
               Create your first project in the Load Calculator
             </p>
-            <Button size="sm" onClick={() => onPageChange?.('calculator')}>
+            <Button size="sm" onClick={openProjectList}>
               <Calculator className="mr-2 h-4 w-4" /> Go to Load Calculator
             </Button>
           </div>
@@ -322,7 +327,7 @@ export default function Dashboard({ currentUser, onProjectOpen, onPageChange, us
             <button
               key={tool.page}
               type="button"
-              onClick={() => onPageChange?.(tool.page)}
+              onClick={() => (tool.page === 'calculator' ? openProjectList() : onPageChange?.(tool.page))}
               className={`rounded-xl border p-4 text-left hover:shadow-md hover:-translate-y-0.5 transition-all group focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal-500 focus-visible:ring-offset-2 ${tool.color}`}
             >
               <tool.icon className="h-5 w-5 mb-2.5 opacity-80" />
