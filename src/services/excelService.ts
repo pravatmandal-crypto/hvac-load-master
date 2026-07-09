@@ -34,10 +34,14 @@ type SeasonResult = {
   ersh: number; erlh: number;
   coilSensible: number; coilLatent: number;
   grandTotal: number; totalTR: number;
-  totalSupplyCFM: number; designSupplyCFM: number; minAdpSensibleCFM: number; isTfaOnly: boolean;
+  totalSupplyCFM: number; designSupplyCFM: number; minAdpSensibleCFM: number; isTfaOnly: boolean; isTFA: boolean;
   selectedAdp: number; dehumidSensibleCfm: number; latentCfm: number;
   latentShortfallCfm: number; reheatRequiredBtu: number;
   heatingLoad: number;
+  // TFA-only float: the ACTUAL maintained indoor DB/RH when a fresh-air-only room
+  // can't hold design (null when it holds design). Reported so the client can decide.
+  indoorTemp: number; indoorHumidity: number;
+  floatIndoorTemp: number | null; floatIndoorRH: number | null;
 };
 
 type WinterResult = { total: number; envelope: number; internal: number; vent: number };
@@ -98,6 +102,7 @@ const CLR = {
 
 const asNum = (v: any, fb = 0): number => { const n = Number(v); return isFinite(n) ? n : fb; };
 const r2 = (v: number) => Math.round(v * 100) / 100;
+const r1 = (v: number) => Math.round(v * 10) / 10;
 const r0 = (v: number) => Math.round(v);
 
 // Per-zone dehumidification strategy (set in Equipment Selection) — lets the room sheet show a
@@ -383,13 +388,15 @@ function calcSeason(project: any, zos: any, room: any, elements: EnvelopeElement
     ersh: r.ersh, erlh: r.erlh, coilSensible: r.coilSensible, coilLatent: r.coilLatent,
     grandTotal: grand, totalTR: grand / 12000,
     totalSupplyCFM: r.totalSupplyCfm, designSupplyCFM: r.designCfm,
-    minAdpSensibleCFM: r.coil.minAdpSensibleCFM, isTfaOnly: r.isTfaOnly,
+    minAdpSensibleCFM: r.coil.minAdpSensibleCFM, isTfaOnly: r.isTfaOnly, isTFA: r.isTFA,
     selectedAdp: r.coil.selectedADP,
     dehumidSensibleCfm: r.coil.dehumidifiedCFM,
     latentCfm: r.coil.latentCFM,
     latentShortfallCfm: r.coil.latentShortfallCFM,
     reheatRequiredBtu: r.coil.reheatRequiredBTU,
     heatingLoad: r.heating.totalHeatingLoad,
+    indoorTemp: dc0.indoorTemp, indoorHumidity: dc0.indoorHumidity,
+    floatIndoorTemp: r.floatIndoorTemp, floatIndoorRH: r.floatIndoorRH,
   };
 }
 
@@ -1398,8 +1405,11 @@ function buildRoomSheet(
   // Sizing rows
   const sumTR  = r2(record.summer.totalTR);
   const monTR  = record.monsoon ? r2(record.monsoon.totalTR) : null;
-  const sumCFM = r0(record.summer.designSupplyCFM);
-  const monCFM = record.monsoon ? r0(record.monsoon.designSupplyCFM) : null;
+  // TFA-only rooms have no space coil — their air is the DOAS fresh air (shown in the TFA Design
+  // Airflow row below), so the space "Design Supply CFM" is 0 (matches the airflow-schedule and
+  // Equipment-Fit rollups, which exclude TFA-only rooms from the space airflow total).
+  const sumCFM = record.summer.isTfaOnly ? 0 : r0(record.summer.designSupplyCFM);
+  const monCFM = record.monsoon ? (record.monsoon.isTfaOnly ? 0 : r0(record.monsoon.designSupplyCFM)) : null;
 
   const sumTRcell  = rc(row, 2);
   const sumCFMcell = rc(row + 1, 2);
@@ -1425,7 +1435,10 @@ function buildRoomSheet(
   // it false-alarms when the ACH / DSCFM floor already bumps supply above the latent need.
   const sLatShort = (record.summer.latentCfm - record.summer.designSupplyCFM) > 1;
   const mLatShort = !!record.monsoon && ((record.monsoon.latentCfm - record.monsoon.designSupplyCFM) > 1);
-  if (sLatShort || mLatShort) {
+  // Suppress for DOAS-served rooms (tfa-served/tfa-only): the DOAS strips the OA moisture, so this
+  // sensible-based "latent need" metric false-alarms and "add a DOAS" is wrong when the room is
+  // already on one. Non-TFA rooms keep the check.
+  if ((sLatShort || mLatShort) && !record.summer.isTFA) {
     const src = sLatShort ? record.summer : record.monsoon!;
     const dh = resolveRoomDehumid(record.room, equipSystems);
     putV(ws, row, 2, r0(src.latentCfm), S.calc); putV(ws, row, 3, 'CFM latent need', S.calc);
@@ -1491,6 +1504,18 @@ function buildRoomSheet(
     putV(ws, row, 2, r0(roomTfaCFM), S.total);
     putV(ws, row, 3, 'CFM', S.total);
     row++;
+    // TFA-only float: a fresh-air-only room can't hold design DB/RH — report the ACTUAL
+    // maintained condition so the client can decide whether it is acceptable (per Pravat).
+    const floatT  = record.summer.floatIndoorTemp ?? record.monsoon?.floatIndoorTemp ?? null;
+    const floatRH = record.summer.floatIndoorRH   ?? record.monsoon?.floatIndoorRH   ?? null;
+    if (record.room?._calcTfaOnly && floatT != null) {
+      putV(ws, row, 1, 'Maintained Indoor Condition  [actual, not design]', S.label);
+      putV(ws, row, 2, `${r1(floatT)} °F / ${r0(floatRH ?? 0)} % RH`, S.total);
+      putV(ws, row, 3, 'DB/RH', S.total);
+      addMerge(ws, row, 4, row, COLS);
+      putV(ws, row, 4, `This TFA-only room is served by fresh air alone (no space cooling coil), so it floats above the ${r0(record.summer.indoorTemp)} °F / ${r0(record.summer.indoorHumidity)} % RH design to the equilibrium the fresh air can hold. The values above are the ACTUAL maintained space condition — client to confirm acceptable or add space cooling.`, S.note);
+      row++;
+    }
     // Total air the room receives = space (recirc) coil + DOAS treated fresh. The coil above
     // sizes on the space airflow only. Skip tfa-only rooms (no own coil — supply is the DOAS).
     if (!record.room?._calcTfaOnly) {

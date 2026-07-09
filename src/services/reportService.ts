@@ -146,6 +146,9 @@ type DetailedMetrics = {
   // TFA / DOAS (outdoor-air coil handled by the DOAS unit; zero when not DOAS-served)
   isTFA: boolean;
   isTfaOnly: boolean;
+  /** TFA-only float — the ACTUAL maintained indoor DB/RH (null when the room holds design). */
+  floatIndoorTemp: number | null;
+  floatIndoorRH: number | null;
   tfaCoilSensible: number;
   tfaCoilLatent: number;
   tfaCoilTr: number;
@@ -865,6 +868,7 @@ const computeDetailed = (room: any, elements: any[], dc: DC, project: any): Deta
   const r = computeRoomLoad(room, elements, dc, { equipSystems: reportEquipSystems, project });
   const {
     isTFA, isTfaOnly,
+    floatIndoorTemp, floatIndoorRH,
     envelope, internal, vent, heating, tfa,
     area, freshAirCFM: faCfm,
     erSensibleRaw, erLatentRaw, parasitic,
@@ -937,7 +941,7 @@ const computeDetailed = (room: any, elements: any[], dc: DC, project: any): Deta
     ersh, erlh, erh, oaSensible, oaLatent,
     coilSensible, coilLatent, grandTotal, loadTr, cfmTr, governingTr, requiredTr,
     // TFA / DOAS — zero when the room isn't DOAS-served.
-    isTFA, isTfaOnly,
+    isTFA, isTfaOnly, floatIndoorTemp, floatIndoorRH,
     tfaCoilSensible, tfaCoilLatent, tfaCoilTr, tfaCfm,
     tfaReheat, tfaCoilADP,
     tfaSupplyOffsetSen: tfaOffSen, tfaSupplyOffsetLat: tfaOffLat,
@@ -2030,7 +2034,11 @@ export const generatePDFReport = (
       // Gov TR carries the overall safety factor (matches Equipment Selection's coil duty);
       // sumTR/monTR above stay as the raw per-season governing load for their columns.
       const govTR  = Math.max(num(room._calcOverallRequiredTR) ?? 0, sm.requiredTr, mm?.requiredTr ?? 0);
-      const cfm    = Math.max(num(room._calcOverallDesignCFM)   ?? 0, sm.designCfm, mm?.designCfm ?? 0);
+      // TFA-only rooms have no space coil — their air is the DOAS fresh air (shown in the TFA CFM
+      // column). The space "Design CFM" is therefore 0, matching the Zone Summary (p.3) and the
+      // Airflow Schedule, both of which exclude TFA-only rooms from the space airflow rollup.
+      const isTfaOnlyRoom = sm.isTfaOnly || mm?.isTfaOnly || !!room._calcTfaOnly;
+      const cfm    = isTfaOnlyRoom ? 0 : Math.max(num(room._calcOverallDesignCFM) ?? 0, sm.designCfm, mm?.designCfm ?? 0);
       // TFA coil duty — governing (summer/monsoon) persisted value, falling back to
       // the live recompute when the room object doesn't carry the persisted _calc
       // fields, so the schedule matches the per-room cooling breakdown.
@@ -2175,8 +2183,12 @@ export const generatePDFReport = (
             ['Floor Area',                 `${n0(m.area)} ft²`,  'Room Volume', `${n0(calculateRoomVolume(room))} ft³`],
             ['People / Activity',          `${n0(asNum(room.peopleCount, 0))} persons  /  ${String(room.activityType || '—')}`, 'FACPH / FA CFM', `${n1(asNum(room.facph, 0))} ACH  /  ${n0(m.faCfm)} CFM`],
             ['Lighting / Equip / Others',  `${asNum(room.lightsWattsPerSqft, 0)} W/ft²  /  ${asNum(room.equipmentKW, 0)} kW  /  ${asNum(room.othersKW, 0)} kW`,
-              resolveRoomSupplyBasis(room.supplyCfmBasis, project?.supplyBasis) === 'ach' ? 'ACH / Total Supply CFM' : 'Supply Basis / Design CFM',
-              resolveRoomSupplyBasis(room.supplyCfmBasis, project?.supplyBasis) === 'ach'
+              // TFA-only rooms are fed only by the DOAS fresh air (no recirc AHU), so the "6 ACH
+              // total supply" is fictitious for them — show the actual DOAS fresh-air supply instead.
+              m.isTfaOnly ? 'Fresh air (DOAS) / Supply CFM'
+                : resolveRoomSupplyBasis(room.supplyCfmBasis, project?.supplyBasis) === 'ach' ? 'ACH / Total Supply CFM' : 'Supply Basis / Design CFM',
+              m.isTfaOnly ? `Fresh-air only  /  ${n0(m.tfaCfm || m.faCfm)} CFM`
+                : resolveRoomSupplyBasis(room.supplyCfmBasis, project?.supplyBasis) === 'ach'
                 ? `${n1(m.totalAch)} ACH  /  ${n0(m.totalSupplyCfm)} CFM`
                 : `Dehumidified (DSCFM)  /  ${n0(m.designCfm)} CFM`],
             // Latent shortfall row — only when the actual design supply air can't carry the latent
@@ -2184,7 +2196,7 @@ export const generatePDFReport = (
             // the ACH/DSCFM floor bumps supply above the latent need). When the engineer has chosen
             // a dehumidification strategy for this zone (reheat or desiccant), show it as RESOLVED
             // with the reheat duty — not an open failure.
-            ...((m.latentCfm - m.designCfm) > 1
+            ...(!m.isTFA && (m.latentCfm - m.designCfm) > 1
               ? (() => {
                   const dh = resolveRoomDehumid(room, activeEquipSystems);
                   if (dh && isReheatMethod(dh.method)) {
@@ -2384,8 +2396,17 @@ export const generatePDFReport = (
           ['Indicated ADP', m.adpUnreachable ? `${n1(m.indicatedAdp)} °F (below ${n0(m.selectedAdp)} °F coil floor — clamped)` : `${n1(m.indicatedAdp)} °F`],
           ['Selected ADP',  `${n0(m.selectedAdp)} °F`],
           ['RSHF',          n2(panelRSHF)],
-          ['Design CFM',    `${n0(m.designCfm)} CFM`],
+          // TFA-only rooms carry no space coil, so a space "Design CFM" would print the unused
+          // ACH airflow — misleading next to "0.00 TR". The actual DOAS supply is the TFA Airflow
+          // row below, so drop this row for them.
+          ...(m.isTfaOnly ? [] : [['Design CFM', `${n0(m.designCfm)} CFM`]]),
           ['Governing TR',  `${n2(m.requiredTr)} TR`],
+          // TFA-only rooms are fed only FACFM, so they float off design — show the ACTUAL
+          // maintained condition (per Pravat: accepted for a corridor, but reported honestly
+          // so the client can decide whether to accept it or add space cooling).
+          ...(m.isTfaOnly && m.floatIndoorTemp != null
+            ? [['Maintained Indoor', `${n1(m.floatIndoorTemp)} °F / ${n0(m.floatIndoorRH ?? 0)} % RH  —  actual, not design (${n0(dc.indoorTemp)} °F / ${n0(dc.indoorHumidity)} % RH). Fresh-air-only room; floats to what the FA can hold — client to confirm.`]]
+            : []),
           ...(includeWinter ? [['Winter Load', `${n0(m.designHeatingLoad)} BTU/h`]] : []),
           ...(includeWinter && Number((room as any)?._calcTfaWinterHeatingBTUH) > 0
             ? [['TFA Heat Coil', `${n0(Number((room as any)._calcTfaWinterHeatingBTUH))} BTU/h`]]

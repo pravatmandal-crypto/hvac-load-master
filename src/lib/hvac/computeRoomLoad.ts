@@ -33,6 +33,15 @@ const asNum = (v: any, fb: number) => { const n = Number(v); return Number.isFin
 /** Bypass factor used across the whole engine (Carrier coil BF). */
 export const ROOM_LOAD_BF = 0.15;
 
+/** Relative humidity (%) from dry-bulb + humidity ratio — inverse of calculatePsychrometrics. */
+const rhFromHumidityRatio = (tempF: number, W: number, altitude: number): number => {
+  const P = 14.696 * Math.pow(1 - 6.8754e-6 * altitude, 5.2559);
+  const Pw = (W * P) / (0.62198 + W);
+  const Pws = calculatePsychrometrics(tempF, 50, altitude).saturationPressure; // Pws is RH-independent
+  if (!(Pws > 0)) return 0;
+  return Math.max(0, Math.min(100, (Pw / Pws) * 100));
+};
+
 export interface RoomLoadOptions {
   /** Equipment systems (DOAS/Chiller/VRF…) for this project — drives TFA resolution. */
   equipSystems?: any[] | null;
@@ -48,6 +57,15 @@ export interface RoomLoadResult {
   isTfaOnly: boolean;
   /** The effective design conditions actually fed to the calc (TFA-adjusted when DOAS-served). */
   dcEff: DesignConditions;
+  /**
+   * TFA-only float: a DOAS-only room (no space coil) is fed only its FACFM at the DOAS
+   * supply condition, which can't hold the design DB/RH, so it floats to the equilibrium
+   * where the fresh air balances the space load. These are the ACTUAL maintained indoor
+   * DB/RH (null when the room holds design — non-TFA-only, or FACFM over-delivers).
+   * When set, the reported envelope/room load below is recomputed at this floated condition.
+   */
+  floatIndoorTemp: number | null;
+  floatIndoorRH: number | null;
 
   // ── Raw sub-results ──
   envelope: EnvelopeBreakdown;
@@ -143,7 +161,7 @@ export const computeRoomLoad = (
     ? { ...dc, ventilationStrategy: 'tfa-cold', tfaSupplyTemp: doas.tfaSupplyTemp, tfaSupplyHumidity: doas.tfaSupplyHumidity, ervSensibleEffectiveness: doas.ervSensibleEffectiveness, ervLatentEffectiveness: doas.ervLatentEffectiveness }
     : dc;
 
-  const envelope  = calculateEnvelopeGain(elements, dcEff);
+  let envelope    = calculateEnvelopeGain(elements, dcEff);
   const internal  = calculateInternalGains(room);
   const vent      = calculateVentilationLoad(room, dcEff);
   // Winter heating must use the TFA-aware DC: for DOAS-served rooms the mechanical fresh air
@@ -155,6 +173,51 @@ export const computeRoomLoad = (
   const area = asNum(room?.length, 0) * asNum(room?.width, 0);
   const faCfm = (calculateRoomVolume(room) * asNum(room?.facph, 0)) / 60;
 
+  // ── TFA-only indoor float correction ──
+  // A tfa-only room has no space coil — it is fed ONLY its FACFM at the DOAS supply
+  // condition. That ventilation quantity can't hold the design DB/RH, so the room floats
+  // to the equilibrium where the fresh air balances the space load:
+  //   T_room = T_supply + ERSH(T_room) / (1.08 · FACFM)   (iterated: conduction ∝ T_room)
+  // Only a WARM float is a correction (FACFM under-delivers). When FACFM over-delivers the
+  // room holds design and we keep the design condition. The reported envelope/room load is
+  // then recomputed at the floated indoor temp (conduction drops as the room warms).
+  let floatIndoorTemp: number | null = null;
+  let floatIndoorRH: number | null = null;
+  if (isTfaOnly && tfa && tfa.cfm > 0) {
+    const SENS = 1.08;
+    const facfm = tfa.cfm;
+    // Space sensible carried by the room at indoor temp `t` (envelope conduction shrinks
+    // as the room warms toward outdoor; internal + parasitic + safety are temp-independent).
+    const ershAt = (t: number): number => {
+      const env = calculateEnvelopeGain(elements, { ...dcEff, indoorTemp: t });
+      const senRaw = env.sensible + internal.sensible; // erVentSenBF = 0 for TFA
+      const par = calculateParasiticGains(senRaw, senRaw, ductPct, fanPct);
+      return (senRaw + par.ductGain + par.fanGain) * (1 + sSafetyPct / 100);
+    };
+    // Sensible balance residual: what the fresh air removes minus what the room produces.
+    //   g(t) = ERSH(t) − 1.08·FACFM·(t − Tsupply)
+    // ERSH decreases with t and the carried term increases with t, so g is STRICTLY
+    // decreasing → a unique root. Solve by bisection (robust for any FACFM); the old
+    // fixed-point iteration oscillated/diverged when FACFM was small vs the envelope
+    // conductance (|dERSH/dt| > 1.08·FACFM), under-delivering the float by several °F.
+    const g = (t: number): number => ershAt(t) - SENS * facfm * (t - tfa.supplyTemp);
+    const tDesign = dcEff.indoorTemp;
+    // Root above design only when the room can't hold design (FACFM under-delivers).
+    if (g(tDesign) > 0) {
+      let lo = tDesign, hi = tDesign + 200; // 200°F headroom brackets any physical float
+      for (let i = 0; i < 60; i++) {
+        const mid = (lo + hi) / 2;
+        if (g(mid) > 0) lo = mid; else hi = mid;
+      }
+      const tRoom = (lo + hi) / 2;
+      if (tRoom > tDesign + 0.1) {
+        floatIndoorTemp = tRoom;
+        // Recompute the reported envelope at the float so the corridor's load is honest.
+        envelope = calculateEnvelopeGain(elements, { ...dcEff, indoorTemp: tRoom });
+      }
+    }
+  }
+
   // In TFA mode the bypass-OA terms go to the DOAS unit, not the primary coil.
   const erVentSenBF   = isTFA ? 0 : vent.sensible * BF;
   const erVentLatBF   = isTFA ? 0 : vent.latent   * BF;
@@ -164,6 +227,13 @@ export const computeRoomLoad = (
   const ersh          = (erSensibleRaw + parasitic.ductGain + parasitic.fanGain) * (1 + sSafetyPct / 100);
   const erlh          = erLatentRaw * (1 + lSafetyPct / 100);
   const erh           = ersh + erlh;
+  // TFA-only latent float: internal (people) latent is temp-independent and the DOAS
+  // handles the OA latent, so ERLH is fixed — the room's humidity floats to where the
+  // FACFM balances it: W_room = W_supply + ERLH / (0.68 · FACFM · 7000 grains).
+  if (floatIndoorTemp !== null && tfa && tfa.cfm > 0) {
+    const floatW = tfa.supplyHumidityRatio + erlh / (0.68 * tfa.cfm * 7000);
+    floatIndoorRH = rhFromHumidityRatio(floatIndoorTemp, floatW, asNum(dcEff.altitude, 0));
+  }
   const oaSensible    = isTFA ? 0 : vent.sensible * (1 - BF);
   const oaLatent      = isTFA ? 0 : vent.latent   * (1 - BF);
   // Cold-DOAS supply offsets a portion of the space coil load (engineering credit).
@@ -206,6 +276,7 @@ export const computeRoomLoad = (
 
   return {
     isTFA, isTfaOnly, dcEff,
+    floatIndoorTemp, floatIndoorRH,
     envelope, internal, vent, heating, tfa,
     area, freshAirCFM: faCfm,
     erVentSenBF, erVentLatBF, erSensibleRaw, erLatentRaw, parasitic,

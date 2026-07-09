@@ -4053,7 +4053,9 @@ export default function EquipmentSelection({
   // Package / DuctableSplit totals — use overall (max of summer + monsoon) governing values
   const assignedRoomReqs = systemRoomIds.map(rid => getRoomReqs(rid));
   const totalRequiredTR        = assignedRoomReqs.reduce((s, r) => s + r.overallRequiredTR, 0);
-  const totalDesignCFM         = assignedRoomReqs.reduce((s, r) => s + r.overallDesignCFM, 0);
+  // TFA-only rooms have no space coil — fed by the DOAS — so exclude their air-change CFM
+  // from the space AHU/plant design airflow (matches LC/PDF/Excel). TR is 0 either way.
+  const totalDesignCFM         = assignedRoomReqs.reduce((s, r) => s + (r.isTfaOnly ? 0 : r.overallDesignCFM), 0);
   const totalSummerRequiredTR  = assignedRoomReqs.reduce((s, r) => s + r.requiredTR, 0);
   const totalMonsoonRequiredTR = assignedRoomReqs.reduce((s, r) => s + r.monsoonRequiredTR, 0);
   const totalSummerThermalTR   = systemRoomIds.reduce((s, rid) => {
@@ -4061,8 +4063,8 @@ export default function EquipmentSelection({
     return s + (Number(room?._calcLoadTR) || 0);
   }, 0);
   const totalMonsoonThermalTR  = assignedRoomReqs.reduce((s, r) => s + r.monsoonLoadTR, 0);
-  const totalSummerDesignCFM   = assignedRoomReqs.reduce((s, r) => s + r.designCFM, 0);
-  const totalMonsoonDesignCFM  = assignedRoomReqs.reduce((s, r) => s + r.monsoonDesignCFM, 0);
+  const totalSummerDesignCFM   = assignedRoomReqs.reduce((s, r) => s + (r.isTfaOnly ? 0 : r.designCFM), 0);
+  const totalMonsoonDesignCFM  = assignedRoomReqs.reduce((s, r) => s + (r.isTfaOnly ? 0 : r.monsoonDesignCFM), 0);
   const includeMonsoon         = !!(project?.includeMonsoon ?? (project as any)?.data?.includeMonsoon);
   const governingSeason        = includeMonsoon && totalMonsoonRequiredTR > totalSummerRequiredTR ? 'Monsoon' : 'Summer';
 
@@ -4097,7 +4099,7 @@ export default function EquipmentSelection({
       z.roomIds.push(roomId);
       const reqs = getRoomReqs(roomId);
       z.totalTR += reqs.overallRequiredTR;
-      z.totalCFM += reqs.overallDesignCFM;
+      z.totalCFM += reqs.isTfaOnly ? 0 : reqs.overallDesignCFM; // TFA-only air is DOAS-side
     }
     return Array.from(zoneMap.values());
   }, [selectedSystem, systemRoomIds, rooms]);
@@ -4133,7 +4135,7 @@ export default function EquipmentSelection({
       // buildAHU's 10% landed on top → ~1.6× double-safety stacking, inflating
       // Zone 1 to 128 TR vs actual monsoon governing 72.78 TR (TEZPUR case).
       z.requiredTR += reqs.overallGoverningTR;
-      z.designCFM += reqs.overallDesignCFM;
+      z.designCFM += reqs.isTfaOnly ? 0 : reqs.overallDesignCFM; // TFA-only air is DOAS-side
       const vol = calculateRoomVolume(room);
       z.oaCFM += vol * (Number(room.facph) || 0) / 60;
     }
@@ -5808,7 +5810,7 @@ export default function EquipmentSelection({
                           // ACH / occupancy edit until the user re-persisted from LC.
                           const zoneRoomReqs = zoneRooms.map((r: any) => ({ r, reqs: getRoomReqs(r.id) }));
                           const zoneTR  = zoneRoomReqs.reduce((s, { reqs }) => s + (reqs.overallRequiredTR || 0), 0);
-                          const zoneCFM = zoneRoomReqs.reduce((s, { reqs }) => s + (reqs.overallDesignCFM  || 0), 0);
+                          const zoneCFM = zoneRoomReqs.reduce((s, { reqs }) => s + (reqs.isTfaOnly ? 0 : (reqs.overallDesignCFM  || 0)), 0);
                           // Coil Duty = the Load Calculator's "REQUIRED EQUIPMENT CAPACITY":
                           // the max-season grand-total load WITH the room's overall safety factor
                           // (e.g. monsoon 69.41 TR × 1.03 = 71.49 TR), no cfmTR floor. AHU coils
@@ -7307,7 +7309,7 @@ export default function EquipmentSelection({
                             // the equipment must actually satisfy. Using the summer-only _calc*
                             // here under-sized monsoon-governing zones (picker + fit badge).
                             const totalTR = zoneRooms.reduce((s: number, r: any) => s + (Number(r._calcOverallRequiredTR ?? r._calcRequiredTR) || 0), 0);
-                            const totalCFM = zoneRooms.reduce((s: number, r: any) => s + (Number(r._calcOverallDesignCFM ?? r._calcDesignCFM) || 0), 0);
+                            const totalCFM = zoneRooms.reduce((s: number, r: any) => s + (r._calcTfaOnly ? 0 : (Number(r._calcOverallDesignCFM ?? r._calcDesignCFM) || 0)), 0);
                             return (
                               <React.Fragment key={zone.id}>
                                 <TableRow className="bg-teal-50/60 border-t-2 border-teal-200">

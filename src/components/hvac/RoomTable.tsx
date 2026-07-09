@@ -1232,6 +1232,19 @@ function RoomDetail({
           <span className="text-gray-400">Governing →</span>
           <span className="font-bold text-slate-800 dark:text-slate-100 font-mono">{Math.round(calc.designCFM).toLocaleString()} CFM{calc.isTFA && !calc.isTfaOnly && calc.tfaCfm > 1 ? ' (space coil)' : ''}</span>
         </div>
+        {calc.isTfaOnly && (() => {
+          // TFA-only: fed only fresh air, so the room floats off the design DB/RH. Show the
+          // persisted maintained condition (computed by the shared engine on save).
+          const ft = Number((room as any)?._calcFloatIndoorTemp);
+          const frh = Number((room as any)?._calcFloatIndoorRH);
+          return Number.isFinite(ft) && ft > 0 ? (
+            <div className="mt-1 text-[10px] text-amber-700 dark:text-amber-400">
+              TFA-only — fed only fresh air, floats to <strong>{ft.toFixed(1)}°F / {Number.isFinite(frh) ? `${frh.toFixed(0)}%` : '—'}</strong> (off design).
+            </div>
+          ) : (
+            <div className="mt-1 text-[10px] text-slate-400">TFA-only — floats off design; Recompute &amp; save to compute the maintained condition.</div>
+          );
+        })()}
         {calc.isTFA && !calc.isTfaOnly && calc.tfaCfm > 1 && (() => {
           // TFA: the room gets TWO streams — the space (recirc) coil + the DOAS treated fresh air.
           // designCFM above is the space coil only (it sizes the coil & CFM/TR). This line surfaces

@@ -734,6 +734,10 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
       _calcTfaOnly: !!isTfaOnly,
       _calcTfaCarryingBTUH: parseFloat((tfaCarryingBTUH || 0).toFixed(0)),
       _calcTfaCarryingDeficit: parseFloat((tfaCarryingDeficit || 0).toFixed(0)),
+      // TFA-only indoor float — the ACTUAL maintained DB/RH (FACFM-only can't hold design).
+      // null when the room holds design (non-tfa-only or FACFM over-delivers).
+      _calcFloatIndoorTemp: s.floatIndoorTemp != null ? parseFloat(s.floatIndoorTemp.toFixed(1)) : null,
+      _calcFloatIndoorRH: s.floatIndoorRH != null ? parseFloat(s.floatIndoorRH.toFixed(1)) : null,
       // Winter heating BTU/h — flat field so ES, LC row badges, and PDF can read it
       // without parsing the nested analysis.heating object. Always written (even when winter
       // isn't enabled in project settings) so toggling the season doesn't require a re-save.
@@ -864,6 +868,11 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
     let tfaOnlyRoomLoadBTUH = 0;  // Σ room sensible+latent on tfa-only rooms (for reference)
     let tfaCarryingDeficitTotal = 0;
     const tfaUndersizedRoomIds: string[] = [];
+    // TFA-only rooms are fed only FACFM, so they FLOAT off the design DB/RH. Acceptable
+    // for a corridor within a band; flag rooms that float beyond it. (per Pravat.)
+    const FLOAT_DB_LIMIT_F = 5;    // °F above design dry-bulb
+    const FLOAT_RH_LIMIT_PTS = 10; // RH points above design
+    const tfaFloatRooms: Array<{ id: string; name: string; temp: number; rh: number; beyond: boolean }> = [];
 
     // TFA branch resolution uses the shared resolver (room.tfaMode primary, legacy
     // link fallback) so the Project-Level Summary matches persist + SD + reports.
@@ -911,6 +920,9 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
         isTfaOnly: snap.isTfaOnly,
         tfaCarryingBTUH,
         tfaCarryingDeficit: snap.isTfaOnly ? Math.max(0, snap.ersh - tfaCarryingBTUH) : 0,
+        // TFA-only rooms float off design (FACFM-only can't hold DB/RH) — the actual condition.
+        floatIndoorTemp: snap.floatIndoorTemp,
+        floatIndoorRH: snap.floatIndoorRH,
         // tfa-only rooms remove their full envelope+internal load via TFA carrying;
         // the caller uses this to size the TFA aggregate vs the chiller plant.
         tfaOnlyRoomLoad: snap.isTfaOnly ? (snap.ersh + snap.erlh) : 0,
@@ -969,7 +981,16 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
             tfaOnlyRoomCount += 1;
             tfaOnlyRoomLoadBTUH += summerSnapshot.tfaOnlyRoomLoad;
             tfaCarryingDeficitTotal += summerSnapshot.tfaCarryingDeficit;
-            if (summerSnapshot.tfaCarryingDeficit > 0) tfaUndersizedRoomIds.push(room.id);
+            // Float condition: the room settles above design because FACFM alone can't
+            // hold it. Record the actual DB/RH and flag if it floats beyond the band.
+            const ft = summerSnapshot.floatIndoorTemp;
+            if (ft != null) {
+              const frh = summerSnapshot.floatIndoorRH ?? zoneSummerDc.indoorHumidity;
+              const beyond = ft > zoneSummerDc.indoorTemp + FLOAT_DB_LIMIT_F
+                || frh > zoneSummerDc.indoorHumidity + FLOAT_RH_LIMIT_PTS;
+              tfaFloatRooms.push({ id: room.id, name: room.name ?? 'Unnamed', temp: ft, rh: frh, beyond });
+              if (beyond) tfaUndersizedRoomIds.push(room.id);
+            }
           } else {
             tfaServedRoomCount += 1;
           }
@@ -1099,6 +1120,7 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
         onlyRoomLoadBTUH: tfaOnlyRoomLoadBTUH,
         carryingDeficitTotal: tfaCarryingDeficitTotal,
         undersizedRoomIds: tfaUndersizedRoomIds,
+        floatRooms: tfaFloatRooms,
       },
     };
   }, [
@@ -3176,21 +3198,21 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
           </div>
         )}
 
-        {/* ── TFA-only carrying-capacity warning (Phase D) ──────────────────
-            Shown when one or more tfa-only rooms have a sensible load that
-            exceeds the TFA supply's carrying capacity at the designed CFM and
-            supply temperature. Engineering action: bump CFM, lower supply temp,
-            or accept the deficit (add a small DX). Engine does not auto-correct. */}
-        {projectTotals.tfa.undersizedRoomIds.length > 0 && (
+        {/* ── TFA-only indoor-float warning ─────────────────────────────────
+            A tfa-only room is fed only its FACFM at the DOAS supply condition, so it
+            FLOATS off the design DB/RH to the equilibrium where the fresh air balances
+            the space load (that condition is shown on each room). Acceptable within a
+            band (±5°F / +10% RH) for a corridor; flagged only when it drifts beyond. */}
+        {projectTotals.tfa.floatRooms.some((r) => r.beyond) && (
           <div className="rounded-xl border border-rose-300 dark:border-rose-700 bg-rose-50 dark:bg-rose-950/30 px-4 py-3 flex items-start justify-between gap-3">
             <div className="flex items-start gap-2.5">
               <AlertTriangle className="w-4 h-4 text-rose-600 dark:text-rose-400 shrink-0 mt-0.5" />
               <div>
                 <p className="text-sm font-semibold text-rose-800 dark:text-rose-300">
-                  TFA undersized — {projectTotals.tfa.undersizedRoomIds.length} TFA-only room{projectTotals.tfa.undersizedRoomIds.length === 1 ? '' : 's'} exceed{projectTotals.tfa.undersizedRoomIds.length === 1 ? 's' : ''} carrying capacity
+                  TFA-only float beyond band — {projectTotals.tfa.floatRooms.filter((r) => r.beyond).length} room{projectTotals.tfa.floatRooms.filter((r) => r.beyond).length === 1 ? '' : 's'} drift{projectTotals.tfa.floatRooms.filter((r) => r.beyond).length === 1 ? 's' : ''} off design
                 </p>
                 <p className="text-xs text-rose-700 dark:text-rose-400 mt-0.5">
-                  Deficit total: <strong>{Math.round(projectTotals.tfa.carryingDeficitTotal).toLocaleString()} BTU/h</strong>. TFA supply can't absorb the room sensible at the designed CFM and supply temp. Increase CFM (raise <code>facph</code>), lower TFA supply temp, or add a small DX assist.
+                  {projectTotals.tfa.floatRooms.filter((r) => r.beyond).map((r) => `${r.name}: ${r.temp.toFixed(1)}°F / ${r.rh.toFixed(0)}%`).join(' · ')}. Fed only fresh air (FACFM), the space floats above the design DB/RH. Raise <code>FACFM</code>, lower the TFA supply temp, or add a small DX assist to tighten it.
                 </p>
               </div>
             </div>
