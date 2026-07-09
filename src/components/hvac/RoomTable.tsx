@@ -6,6 +6,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '.
 import { Input } from '../ui/input';
 import { Select, SelectContent, SelectGroup, SelectItem, SelectLabel, SelectTrigger, SelectValue } from '../ui/select';
 import { ChevronDown, ChevronRight, Trash2, Plus, Grip, Loader2 } from 'lucide-react';
+import { VentilationHelp } from './VentilationHelp';
 import { toast } from 'sonner';
 import {
   calculateEnvelopeGain,
@@ -539,10 +540,13 @@ function getMonsoonDesignConditions(project?: any, base?: DesignConditions): Des
 // ─── Field label wrapper ───────────────────────────────────────────────────────
 // Must be defined at module level — NOT inside RoomDetail — to prevent remount on re-render
 
-function Field({ label, children }: { label: string; children: React.ReactNode }) {
+function Field({ label, labelSuffix, children }: { label: string; labelSuffix?: React.ReactNode; children: React.ReactNode }) {
   return (
     <div>
-      <p className="text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wide mb-1">{label}</p>
+      <p className="text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wide mb-1 flex items-center gap-1">
+        {label}
+        {labelSuffix}
+      </p>
       {children}
     </div>
   );
@@ -1690,31 +1694,39 @@ function RoomDetail({
               )}
             </div>
           </Field>
-          <Field label="Recirculation %">
+          <Field label="Recirculation %" labelSuffix={roomDraft.supplyCfmBasis === 'ach' ? <VentilationHelp /> : undefined}>
             <div>
-              <BufferedNumberInput committersRef={draftCommittersRef} draftKey={`${id}-recirc`} value={roomDraft.recircPct} onDraftChange={(draft, parsed) => handleNumericDraftChange('recircPct', draft, parsed)} onCommit={next => patchRoomDraft({ recircPct: next })} className="h-8 text-sm" />
-              {roomDraft.recircPct > 0 && roomDraft.recircPct < 100 ? (
-                (() => {
-                  const vol = calculateRoomVolume(c.rd);
-                  const govCfm = governingDesignAirflow;
-                  const govAch = vol > 0 ? (govCfm * 60) / vol : 0;
-                  const coolingGoverns = govCfm > c.totalSupplyCFM + 1;
-                  const actualRecirc = govCfm > 0 ? (1 - freshAirCfmFromInput / govCfm) * 100 : roomDraft.recircPct;
-                  return (
-                    <p className="mt-1 text-[10px] font-semibold text-emerald-700">
-                      Air-change floor = Fresh ÷ (1 − {roomDraft.recircPct}%) = {c.totalSupplyACH.toFixed(1)} ACH ({Math.round(c.totalSupplyCFM).toLocaleString()} CFM). Overrides the ACH preset.
-                      {coolingGoverns ? (
-                        <span className="block font-normal text-amber-700">
-                          Cooling load governs → design supply {Math.round(govCfm).toLocaleString()} CFM ({govAch.toFixed(1)} ACH); recirc floats up to ≈{actualRecirc.toFixed(0)}% (fresh stays fixed).
-                        </span>
-                      ) : (
-                        <span className="block font-normal text-emerald-700">This floor governs the design supply.</span>
-                      )}
-                    </p>
-                  );
-                })()
+              {roomDraft.supplyCfmBasis === 'ach' ? (
+                <>
+                  <BufferedNumberInput committersRef={draftCommittersRef} draftKey={`${id}-recirc`} value={roomDraft.recircPct} onDraftChange={(draft, parsed) => handleNumericDraftChange('recircPct', draft, parsed)} onCommit={next => patchRoomDraft({ recircPct: next })} className="h-8 text-sm" />
+                  {roomDraft.recircPct > 0 && roomDraft.recircPct < 100 ? (
+                    (() => {
+                      const vol = calculateRoomVolume(c.rd);
+                      const govCfm = governingDesignAirflow;
+                      const govAch = vol > 0 ? (govCfm * 60) / vol : 0;
+                      const coolingGoverns = govCfm > c.totalSupplyCFM + 1;
+                      const actualRecirc = govCfm > 0 ? (1 - freshAirCfmFromInput / govCfm) * 100 : roomDraft.recircPct;
+                      return (
+                        <p className="mt-1 text-[10px] font-semibold text-emerald-700">
+                          Air-change floor = Fresh ÷ (1 − {roomDraft.recircPct}%) = {c.totalSupplyACH.toFixed(1)} ACH ({Math.round(c.totalSupplyCFM).toLocaleString()} CFM). Overrides the ACH preset.
+                          {coolingGoverns ? (
+                            <span className="block font-normal text-amber-700">
+                              Cooling load governs → design supply {Math.round(govCfm).toLocaleString()} CFM ({govAch.toFixed(1)} ACH); recirc floats up to ≈{actualRecirc.toFixed(0)}% (fresh stays fixed).
+                            </span>
+                          ) : (
+                            <span className="block font-normal text-emerald-700">This floor governs the design supply.</span>
+                          )}
+                        </p>
+                      );
+                    })()
+                  ) : (
+                    <p className="mt-1 text-[10px] text-slate-500">0 = use the space-type ACH preset. Set e.g. 75 for "2 ACH fresh + 75% recirculation".</p>
+                  )}
+                </>
               ) : (
-                <p className="mt-1 text-[10px] text-slate-500">0 = use the space-type ACH preset. Set e.g. 75 for "2 ACH fresh + 75% recirculation".</p>
+                <p className="text-[10px] text-slate-500 leading-relaxed">
+                  Not used on the <b>Dehumidified (DSCFM)</b> basis — supply air is sized on the dehumidified airflow, so recirculation has no effect. Switch this room to the <b>Air-change (ACH)</b> basis (Supply Basis, in Global defaults) to design on a fresh-air + recirculation requirement.
+                </p>
               )}
             </div>
           </Field>

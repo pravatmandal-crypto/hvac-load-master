@@ -1461,7 +1461,10 @@ export const generatePDFReport = (
         const m = computeDetailed(room, envelopeElements[room.id] || [], dc, project);
         cooling  += m.grandTotal;     // space (primary) coil — TFA-reduced (raw load)
         reqTr    += m.requiredTr;      // with overall safety — the equipment-sizing basis
-        cfm      += m.designCfm;
+        // TFA-only rooms have no space coil — their air is the DOAS branch (counted in
+        // projectTfaFreshCFM). Exclude them from the space design CFM so the "space + TFA
+        // = total" submission basis doesn't double-count, and so it matches the 3A schedule.
+        if (!m.isTfaOnly) cfm += m.designCfm;
         heating  += m.designHeatingLoad;
         tfaCoil  += m.tfaCoilSensible + m.tfaCoilLatent; // TFA/DOAS coil duty
       });
@@ -1721,10 +1724,10 @@ export const generatePDFReport = (
     let sumBTUH = 0, sumReqTR = 0, sumCfm = 0, monBTUH = 0, monReqTR = 0, monCfm = 0, winHeat = 0;
     entity.rooms.forEach((room) => {
       const sm = computeDetailed(room, envelopeElements[room.id] || [], sumDc, effProject);
-      sumBTUH += sm.grandTotal; sumReqTR += sm.requiredTr; sumCfm += sm.designCfm;
+      sumBTUH += sm.grandTotal; sumReqTR += sm.requiredTr; if (!sm.isTfaOnly) sumCfm += sm.designCfm;
       if (monDc) {
         const mm = computeDetailed(room, envelopeElements[room.id] || [], monDc, effProject);
-        monBTUH += mm.grandTotal; monReqTR += mm.requiredTr; monCfm += mm.designCfm;
+        monBTUH += mm.grandTotal; monReqTR += mm.requiredTr; if (!mm.isTfaOnly) monCfm += mm.designCfm;
       }
       if (winDc) winHeat += computeDetailed(room, envelopeElements[room.id] || [], winDc, effProject).designHeatingLoad;
     });
@@ -1838,8 +1841,8 @@ export const generatePDFReport = (
       let sReqTR = 0, sCFM = 0, mReqTR = 0, mCFM = 0;
       entity.rooms.forEach((rm) => {
         const sm = computeDetailed(rm, envelopeElements[rm.id] || [], eDc, project);
-        sReqTR += sm.requiredTr; sCFM += sm.designCfm;
-        if (eMon) { const mm = computeDetailed(rm, envelopeElements[rm.id] || [], eMon, project); mReqTR += mm.requiredTr; mCFM += mm.designCfm; }
+        sReqTR += sm.requiredTr; if (!sm.isTfaOnly) sCFM += sm.designCfm;
+        if (eMon) { const mm = computeDetailed(rm, envelopeElements[rm.id] || [], eMon, project); mReqTR += mm.requiredTr; if (!mm.isTfaOnly) mCFM += mm.designCfm; }
       });
       // Fit basis carries the overall safety factor (matches Equipment Selection's coil duty).
       const govTR  = includeMonsoon ? Math.max(sReqTR, mReqTR) : sReqTR;

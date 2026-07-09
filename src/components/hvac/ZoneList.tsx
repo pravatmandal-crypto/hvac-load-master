@@ -64,6 +64,7 @@ function computeZoneTotals(
   let totalOaCfm = 0;
   let totalSupplyCfm = 0;
   let totalDesignCfm = 0;
+  let totalMinAdpCfm = 0; // Σ minAdpSensibleCFM (fixed-ADP) — for the 350–450 sanity ratio
   let totalArea = 0;
   // Reheat rollup for this season — Σ per-room reheat duty (BTU/h) + count of rooms needing it.
   // Mirrors the room-detail "Reheat Requirement" box (calculateReheat on room SHF), so the
@@ -199,7 +200,10 @@ function computeZoneTotals(
       if (isFinite(coil.dehumidifiedCFM)) totalDehumCfm += coil.dehumidifiedCFM;
       if (isFinite(vent.cfm)) totalOaCfm += vent.cfm;
       if (isFinite(totalSupplyCFM)) totalSupplyCfm += totalSupplyCFM;
-      if (isFinite(designCFM)) totalDesignCfm += designCFM;
+      // Space design airflow + the sanity ratio EXCLUDE TFA-only rooms: no space coil
+      // (0 TR), fed entirely by the DOAS — their air-change CFM isn't space-AHU airflow.
+      if (!isTfaOnly && isFinite(designCFM)) totalDesignCfm += designCFM;
+      if (!isTfaOnly && isFinite(coil.minAdpSensibleCFM)) totalMinAdpCfm += coil.minAdpSensibleCFM;
       if (isFinite(roomRequiredTR)) totalRequiredTR += roomRequiredTR;
       totalArea += rd.length * rd.width;
     } catch {
@@ -218,6 +222,7 @@ function computeZoneTotals(
     totalOaCfm,
     totalSupplyCfm,
     totalDesignCfm,
+    totalMinAdpCfm,
     totalArea,
     totalReheatBTU,
     reheatRoomCount,
@@ -349,6 +354,11 @@ function ZoneSummaryBar({
   const governingDesignCfm = includeMonsoon && monsoonTotals
     ? Math.max(summerTotals.totalDesignCfm, monsoonTotals.totalDesignCfm)
     : summerTotals.totalDesignCfm;
+  // Sanity-ratio CFM at the FIXED coil ADP (minAdpSensibleCFM) — the 350–450 badge uses
+  // this, NOT the DSCFM design airflow, which inflates for sensible-leaning DOAS rooms.
+  const governingMinAdpCfm = includeMonsoon && monsoonTotals
+    ? Math.max(summerTotals.totalMinAdpCfm, monsoonTotals.totalMinAdpCfm)
+    : summerTotals.totalMinAdpCfm;
   // Equipment-sizing required TR: sum of per-room required TR (load TR × safety; load-only),
   // governed by the higher of summer / monsoon. Matches EquipmentSelection.computeRoomReqs.
   const requiredTR = includeMonsoon && monsoonTotals
@@ -416,7 +426,7 @@ function ZoneSummaryBar({
             <div className="flex flex-wrap items-center gap-2">
               <span className="rounded-full border border-orange-200 dark:border-orange-800 bg-white dark:bg-slate-800 px-2 py-0.5 text-xs font-semibold text-orange-700 dark:text-orange-400">{zoneRooms.length} room{zoneRooms.length !== 1 ? 's' : ''}</span>
               <span className="rounded-full border border-slate-200 dark:border-slate-600 bg-slate-100 dark:bg-slate-700 px-2 py-0.5 text-[10px] font-semibold text-slate-700 dark:text-slate-300">Peak season: {peakSeason}</span>
-              <span className="rounded-full border border-indigo-200 dark:border-indigo-800 bg-indigo-50 dark:bg-indigo-950/30 px-2 py-0.5 text-[10px] font-semibold text-indigo-700 dark:text-indigo-400" title="Sanity ratio — typical 350–450 CFM/TR">{governingTR > 0 ? Math.round(governingDesignCfm / governingTR) : 0} CFM/TR</span>
+              <span className="rounded-full border border-indigo-200 dark:border-indigo-800 bg-indigo-50 dark:bg-indigo-950/30 px-2 py-0.5 text-[10px] font-semibold text-indigo-700 dark:text-indigo-400" title="Sanity ratio (typical 350–450 CFM/TR) measured at the fixed coil ADP — DSCFM design airflow runs higher by design">{governingTR > 0 ? Math.round(governingMinAdpCfm / governingTR) : 0} CFM/TR</span>
               {governingRoomInfo && zoneRooms.length > 1 && (
                 <span className="rounded-full border border-amber-200 dark:border-amber-800 bg-amber-50 dark:bg-amber-950/30 px-2 py-0.5 text-[10px] font-semibold text-amber-700 dark:text-amber-400" title={`Highest load room: ${governingRoomInfo.loadTR.toFixed(2)} TR`}>
                   Peak: {governingRoomInfo.name}

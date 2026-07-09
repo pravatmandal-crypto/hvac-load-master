@@ -34,7 +34,7 @@ type SeasonResult = {
   ersh: number; erlh: number;
   coilSensible: number; coilLatent: number;
   grandTotal: number; totalTR: number;
-  totalSupplyCFM: number; designSupplyCFM: number;
+  totalSupplyCFM: number; designSupplyCFM: number; minAdpSensibleCFM: number; isTfaOnly: boolean;
   selectedAdp: number; dehumidSensibleCfm: number; latentCfm: number;
   latentShortfallCfm: number; reheatRequiredBtu: number;
   heatingLoad: number;
@@ -383,6 +383,7 @@ function calcSeason(project: any, zos: any, room: any, elements: EnvelopeElement
     ersh: r.ersh, erlh: r.erlh, coilSensible: r.coilSensible, coilLatent: r.coilLatent,
     grandTotal: grand, totalTR: grand / 12000,
     totalSupplyCFM: r.totalSupplyCfm, designSupplyCFM: r.designCfm,
+    minAdpSensibleCFM: r.coil.minAdpSensibleCFM, isTfaOnly: r.isTfaOnly,
     selectedAdp: r.coil.selectedADP,
     dehumidSensibleCfm: r.coil.dehumidifiedCFM,
     latentCfm: r.coil.latentCFM,
@@ -566,11 +567,16 @@ function buildCoverSheet(project: any, records: RoomRecord[], equipSystems: any[
   const loadStart = row;
 
   let totSumBTUH = 0, totSumCFM = 0, totMonBTUH = 0, totMonCFM = 0, totWin = 0, totArea = 0, totTfaWinHeat = 0;
+  // Sanity-ratio CFM at the fixed coil ADP (minAdpSensibleCFM) — the DSCFM design airflow
+  // inflates the ratio for sensible-leaning DOAS rooms (CLAUDE.md invariant).
+  let totSumMinAdp = 0, totMonMinAdp = 0;
   for (const rec of records) {
     totSumBTUH += rec.summer.grandTotal;
-    totSumCFM  += rec.summer.designSupplyCFM;
     totMonBTUH += rec.monsoon?.grandTotal ?? 0;
-    totMonCFM  += rec.monsoon?.designSupplyCFM ?? 0;
+    // TFA-only rooms have no space coil — fed entirely by the DOAS — so exclude their
+    // (fictitious) air-change CFM from the space design airflow + sanity ratio.
+    if (!rec.summer.isTfaOnly) { totSumCFM += rec.summer.designSupplyCFM; totSumMinAdp += rec.summer.minAdpSensibleCFM; }
+    if (rec.monsoon && !rec.monsoon.isTfaOnly) { totMonCFM += rec.monsoon.designSupplyCFM; totMonMinAdp += rec.monsoon.minAdpSensibleCFM; }
     totWin     += rec.winter.total;
     totTfaWinHeat += Number(rec.room?._calcTfaWinterHeatingBTUH) || 0;
     totArea    += rec.summer.area;
@@ -579,7 +585,8 @@ function buildCoverSheet(project: any, records: RoomRecord[], equipSystems: any[
   const monGovTR = project?.includeMonsoon ? totMonBTUH / 12000 : 0;
   const govTR    = Math.max(sumGovTR, monGovTR);
   const govCFM   = Math.max(totSumCFM, totMonCFM);
-  const cfmPerTR = govTR > 0 ? govCFM / govTR : 0;
+  const govMinAdpCFM = Math.max(totSumMinAdp, totMonMinAdp);
+  const cfmPerTR = govTR > 0 ? govMinAdpCFM / govTR : 0;
 
   const loadRows: [string, any, string, string][] = [
     ['Total Conditioned Area',     r0(totArea),              'Sq.Ft',  ''],
@@ -588,7 +595,7 @@ function buildCoverSheet(project: any, records: RoomRecord[], equipSystems: any[
     ['Summer Design Airflow',       r0(totSumCFM),            'CFM',   ''],
     ...(project?.includeMonsoon ? [['Monsoon Cooling Load', r0(totMonBTUH / 12000), 'TR', ''] as [string, any, string, string]] : []),
     ['Plant Cooling Capacity',      r2(govTR),                'TR',    'Coil load basis — MAX(Summer, Monsoon)'],
-    ['Design Airflow (Plant)',      r0(govCFM),               'CFM',   `Sanity: ${r0(cfmPerTR)} CFM/TR (typical 350–450)`],
+    ['Design Airflow (Plant)',      r0(govCFM),               'CFM',   `Sanity: ${r0(cfmPerTR)} CFM/TR at fixed coil ADP (typical 350–450)`],
     ['Total Winter Heating Load',   r0(totWin),               'BTU/h', 'Space heating (envelope + infiltration)'],
     ...(totTfaWinHeat > 0 ? [['Total TFA Fresh-Air Heating Coil', r0(totTfaWinHeat), 'BTU/h', 'DOAS winter OA-temper duty'] as [string, any, string, string]] : []),
   ];
@@ -841,9 +848,11 @@ function buildZoneSummarySheet(project: any, records: RoomRecord[], equipSystems
     agg.rooms++;
     agg.area    += rec.summer.area;
     agg.sumBTUH += rec.summer.grandTotal;
-    agg.sumCFM  += rec.summer.designSupplyCFM;
     agg.monBTUH += rec.monsoon?.grandTotal ?? 0;
-    agg.monCFM  += rec.monsoon?.designSupplyCFM ?? 0;
+    // TFA-only rooms carry no space coil — exclude their air-change CFM from the zone's
+    // space design airflow (their air is the DOAS branch, reported separately).
+    if (!rec.summer.isTfaOnly) agg.sumCFM += rec.summer.designSupplyCFM;
+    if (rec.monsoon && !rec.monsoon.isTfaOnly) agg.monCFM += rec.monsoon.designSupplyCFM;
     agg.winHeat += rec.winter.total;
   }
 
@@ -865,8 +874,9 @@ function buildZoneSummarySheet(project: any, records: RoomRecord[], equipSystems
 
     const sumTR  = z.sumBTUH / 12000;
     const monTR  = z.monBTUH / 12000;
-    const govTR  = incMon ? Math.max(Math.max(sumTR, z.sumCFM / 400), Math.max(monTR, z.monCFM / 400))
-                           : Math.max(sumTR, z.sumCFM / 400);
+    // Plant/equipment TR is LOAD-ONLY (locked policy 2026-05-20) — never max(load, CFM/400).
+    // CFM/TR is a sanity ratio, not a governor; the DSCFM airflow would otherwise inflate TR.
+    const govTR  = incMon ? Math.max(sumTR, monTR) : sumTR;
     const govCFM = Math.max(z.sumCFM, z.monCFM);
 
     // Installed TR for zone
@@ -917,9 +927,9 @@ function buildZoneSummarySheet(project: any, records: RoomRecord[], equipSystems
 
   addBorders(ws, dataStart, 1, row - 1, COLS);
 
-  // Totals row
-  const totSumTR  = Math.max(totSumBTUH / 12000, totSumCFM / 400);
-  const totMonTR  = incMon ? Math.max(totMonBTUH / 12000, totMonCFM / 400) : 0;
+  // Totals row — Plant TR is LOAD-ONLY (locked policy 2026-05-20), never max(load, CFM/400).
+  const totSumTR  = totSumBTUH / 12000;
+  const totMonTR  = incMon ? totMonBTUH / 12000 : 0;
   const totGovTR  = Math.max(totSumTR, totMonTR);
   const totGovCFM = Math.max(totSumCFM, totMonCFM);
 
@@ -1451,7 +1461,7 @@ function buildRoomSheet(
   putV(ws, row, 2, r2(record.governingTR), S.total);
   putV(ws, row, 3, 'TR', S.total);
   addMerge(ws, row, 4, row, COLS);
-  putV(ws, row, 4, `Plant TR is load-only (coil grand total ÷ 12,000 × safety). CFM/TR is a sanity ratio: Summer ${sumCFM > 0 ? r0(sumCFM / Math.max(sumTR, 0.0001)) : 0} CFM/TR (typical 350–450).`, S.note);
+  putV(ws, row, 4, `Plant TR is load-only (coil grand total ÷ 12,000 × safety). CFM/TR is a sanity ratio at the fixed coil ADP: Summer ${record.summer.totalTR > 0 ? r0(record.summer.minAdpSensibleCFM / record.summer.totalTR) : 0} CFM/TR (typical 350–450).`, S.note);
   row++;
 
   // ── TFA / DOAS coil split ───────────────────────────────────────────────────

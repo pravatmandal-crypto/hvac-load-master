@@ -842,10 +842,10 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
     let totalArea = 0;
     let summerCooling = 0;
     let summerDesignCfm = 0;
-    let summerCoilDehumCfm = 0;
+    let summerSanityCfm = 0;   // Σ minAdpSensibleCFM (fixed-ADP) for the 350–450 sanity ratio
     let monsoonCooling = 0;
     let monsoonDesignCfm = 0;
-    let monsoonCoilDehumCfm = 0;
+    let monsoonSanityCfm = 0;
     // Seasonal diversity: Σ per-zone peak (each zone at its OWN worst season) vs the
     // plant's coincident peak (max of season sums). When zones peak in different seasons
     // the sum-of-zone-peaks exceeds the plant block load — that difference is real
@@ -900,7 +900,7 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
       return {
         grandTotal: snap.grandTotal,
         designSupplyCFM: snap.designCfm,
-        coilDehumCFM: snap.designCfm,
+        minAdpSensibleCFM: snap.coil.minAdpSensibleCFM,
         freshAirCFM: snap.freshAirCFM,
         isTFA: snap.isTFA,
         heating: snap.heating,
@@ -949,8 +949,13 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
 
         zoneSummerCooling += summerSnapshot.grandTotal;
         summerCooling += summerSnapshot.grandTotal;
-        summerDesignCfm += summerSnapshot.designSupplyCFM;
-        summerCoilDehumCfm += summerSnapshot.coilDehumCFM;
+        // Space design airflow + the 350–450 sanity ratio EXCLUDE TFA-only rooms: they
+        // have no space coil (0 TR) and are fed entirely by the DOAS, so their air-change
+        // CFM isn't space-AHU airflow (it's already counted on the TFA side).
+        if (!summerSnapshot.isTfaOnly) {
+          summerDesignCfm += summerSnapshot.designSupplyCFM;
+          summerSanityCfm += summerSnapshot.minAdpSensibleCFM;
+        }
         {
           const heatingSF = Number(room.overallSafetyPercent ?? room.grandTotalSafetyFactor ?? 3);
           totalHeating += heatingSnapshot.heating.totalHeatingLoad * (1 + heatingSF / 100);
@@ -976,8 +981,10 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
           monsoonDesignForRoom = monsoonSnapshot.designSupplyCFM;
           zoneMonsoonCooling += monsoonSnapshot.grandTotal;
           monsoonCooling += monsoonSnapshot.grandTotal;
-          monsoonDesignCfm += monsoonSnapshot.designSupplyCFM;
-          monsoonCoilDehumCfm += monsoonSnapshot.coilDehumCFM;
+          if (!monsoonSnapshot.isTfaOnly) {
+            monsoonDesignCfm += monsoonSnapshot.designSupplyCFM;
+            monsoonSanityCfm += monsoonSnapshot.minAdpSensibleCFM;
+          }
           if (doas) tfaMonsoonCoilBTUH += monsoonSnapshot.tfaCoilBTUH;
         }
 
@@ -1020,27 +1027,33 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
     const roomCount = Object.values(liveRooms).reduce((sum, r) => sum + (r as any[]).length, 0);
     const monsoonTR = monsoonCooling / 12000;
     const summerTR = summerCooling / 12000;
-    // cfmTR is a SANITY RATIO only — kept for display/warning. It does NOT
-    // govern plant sizing. (Engine decision: 2026-05-20.)
-    const summerCfmTR = summerCoilDehumCfm > 0 ? summerCoilDehumCfm / 400 : 0;
-    const monsoonCfmTR = monsoonCoilDehumCfm > 0 ? monsoonCoilDehumCfm / 400 : 0;
+    // cfmTR is a SANITY RATIO only — kept for display/warning. It does NOT govern plant
+    // sizing (Engine decision: 2026-05-20). It is measured at the FIXED coil ADP
+    // (minAdpSensibleCFM), NOT the DSCFM design airflow: the floating design ADP inflates
+    // it for sensible-leaning (DOAS-served) rooms (CLAUDE.md invariant). Duct/AHU sizing
+    // still uses the true DSCFM design airflow (totalDesignCfm).
+    const summerCfmTR = summerTR > 0 ? summerSanityCfm / summerTR : 0;
+    const monsoonCfmTR = monsoonTR > 0 ? monsoonSanityCfm / monsoonTR : 0;
     const summerGoverningTR = summerTR;
     const monsoonGoverningTR = monsoonTR;
     const governingLoadSeason = includeMonsoon && monsoonTR > summerTR ? 'Monsoon' : 'Summer';
-    const governingAirflowSeason = includeMonsoon && monsoonCfmTR > summerCfmTR ? 'Monsoon' : 'Summer';
+    // Peak airflow season tracks the DESIGN (DSCFM) airflow that sizes the ducts/AHUs.
+    const governingAirflowSeason = includeMonsoon && monsoonDesignCfm > summerDesignCfm ? 'Monsoon' : 'Summer';
     const governingLoadTR = includeMonsoon ? Math.max(summerTR, monsoonTR) : summerTR;
     const governingCfmTR = includeMonsoon ? Math.max(summerCfmTR, monsoonCfmTR) : summerCfmTR;
     const totalTR = governingLoadTR;
     const peakSeason = governingLoadSeason;
     const totalCooling = governingLoadSeason === 'Monsoon' ? monsoonCooling : summerCooling;
     const totalDesignCfm = includeMonsoon ? Math.max(summerDesignCfm, monsoonDesignCfm) : summerDesignCfm;
+    // Sanity-ratio CFM (fixed-ADP), governing season — drives the 350–450 warning only.
+    const totalSanityCfm = includeMonsoon ? Math.max(summerSanityCfm, monsoonSanityCfm) : summerSanityCfm;
     // Seasonal diversity = Σ zone-peaks − plant coincident peak. > 0 means zones peak in
     // different seasons, so the shared plant (block load) is smaller than adding each
     // zone's own worst-season strip. Both are correct; the plant number is the one to size on.
     const sumOfZonePeaksTR = sumOfZonePeaksCooling / 12000;
     const seasonalDiversityTR = Math.max(0, sumOfZonePeaksTR - governingLoadTR);
-    // CFM/TR ratio for sanity warning (typical 350-450 CFM/TR for comfort cooling).
-    const cfmPerTRRatio = totalTR > 0 ? totalDesignCfm / totalTR : 0;
+    // CFM/TR sanity ratio (typical 350-450) measured at the fixed coil ADP (see above).
+    const cfmPerTRRatio = totalTR > 0 ? totalSanityCfm / totalTR : 0;
     const cfmRatioOutOfRange = cfmPerTRRatio > 0 && (cfmPerTRRatio < 350 || cfmPerTRRatio > 450);
 
     return {
@@ -1918,6 +1931,8 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
     lightsWattsPerSqft: 1.2,
     applyFacph:        false,
     facph:             0.5,
+    applyRecirc:       false,
+    recircPct:         0,
   });
 
   const totalRoomCount = useMemo(
@@ -1952,6 +1967,7 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
       }
       fields.facph = Math.max(0, Number(g.facph) || 0);
     }
+    if (g.applyRecirc) fields.recircPct = Math.max(0, Math.min(100, Number(g.recircPct) || 0));
 
     if (Object.keys(fields).length === 0) {
       toast.error('Tick at least one field to apply');
@@ -3272,7 +3288,7 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
                   </div>
                   <span className="rounded-full bg-white/80 dark:bg-slate-800/80 px-2 py-0.5 text-[10px] font-semibold text-orange-700 dark:text-orange-400">{Math.round(projectTotals.summer.totalCooling).toLocaleString()} BTU/h</span>
                 </div>
-                <p className="mt-2 text-xs text-orange-600 dark:text-orange-400">Coil load · airflow ratio {projectTotals.summer.totalTR > 0 ? Math.round(projectTotals.summer.totalDesignCfm / projectTotals.summer.totalTR) : 0} CFM/TR</p>
+                <p className="mt-2 text-xs text-orange-600 dark:text-orange-400" title="Sanity ratio measured at the fixed coil ADP — the DSCFM design airflow runs higher by design for DOAS-decoupled sensible coils">Coil load · airflow ratio {Math.round(projectTotals.summer.cfmTR)} CFM/TR</p>
               </div>
               {/* Monsoon — only when enabled */}
               {includeMonsoon && (
@@ -3284,7 +3300,7 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
                     </div>
                     <span className="rounded-full bg-white/80 dark:bg-slate-800/80 px-2 py-0.5 text-[10px] font-semibold text-teal-700 dark:text-teal-400">{Math.round(projectTotals.monsoon.totalCooling).toLocaleString()} BTU/h</span>
                   </div>
-                  <p className="mt-2 text-xs text-teal-600 dark:text-teal-400">Coil load · airflow ratio {projectTotals.monsoon.totalTR > 0 ? Math.round(projectTotals.monsoon.totalDesignCfm / projectTotals.monsoon.totalTR) : 0} CFM/TR</p>
+                  <p className="mt-2 text-xs text-teal-600 dark:text-teal-400" title="Sanity ratio measured at the fixed coil ADP — the DSCFM design airflow runs higher by design for DOAS-decoupled sensible coils">Coil load · airflow ratio {Math.round(projectTotals.monsoon.cfmTR)} CFM/TR</p>
                 </div>
               )}
               {/* Heating — only when winter is enabled */}
@@ -3374,7 +3390,7 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
                   )}
                   {projectTotals.cfmRatioOutOfRange && (
                     <p className="mt-2 text-[11px] text-amber-700 dark:text-amber-400">
-                      ⚠ Project CFM/TR ratio is {Math.round(projectTotals.cfmPerTRRatio)} — outside typical 350–450 band. Verify duct/fan sizing; AHU/IDU selection should satisfy CFM independently of plant TR.
+                      ⚠ Sanity CFM/TR ratio is {Math.round(projectTotals.cfmPerTRRatio)} (at the fixed coil ADP) — outside typical 350–450 band. Verify duct/fan sizing; AHU/IDU selection should satisfy CFM independently of plant TR.
                     </p>
                   )}
                   {projectTotals.seasonalDiversityTR > 0.05 && (
@@ -3720,6 +3736,27 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
                     <option value="dscfm">Dehumidified (DSCFM) — recommended</option>
                     <option value="ach">Air changes (ACH preset)</option>
                   </select>
+                </label>
+
+                {/* Recirculation % — applies on the Air-change (ACH) basis */}
+                <label className="flex items-center gap-2">
+                  <input
+                    type="checkbox"
+                    checked={globalDefaults.applyRecirc}
+                    onChange={e => setGlobalDefaults(g => ({ ...g, applyRecirc: e.target.checked }))}
+                    className="accent-orange-600"
+                  />
+                  <span className="font-medium text-slate-700 dark:text-slate-300 w-24">Recirculation %</span>
+                  <input
+                    type="number"
+                    min={0}
+                    max={100}
+                    value={globalDefaults.recircPct}
+                    disabled={!globalDefaults.applyRecirc}
+                    onChange={e => setGlobalDefaults(g => ({ ...g, recircPct: Number(e.target.value) }))}
+                    className="h-7 text-xs rounded border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 px-1.5 disabled:opacity-50 flex-1 min-w-0"
+                    title="Recirculation % of total supply. Total supply ACH = Fresh ÷ (1 − recirc%). e.g. '1 FACPH + 5 ACH recirc' → 83.33%; '2 FACPH + 75%' → 75. Only affects sizing on the Air-change (ACH) supply basis."
+                  />
                 </label>
 
                 {/* Lights */}
