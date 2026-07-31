@@ -154,7 +154,14 @@ export function resolveSupplyCfm(i: SupplyCfmInputs): SupplyCfmResult {
   // Air-change (ventilation/distribution) airflow — governs only when the ACH basis is selected.
   const airChangeFloor = i.totalSupplyCFM - (subtractTfaCfm ? i.tfaCfm : 0);
 
-  const achBasisCFM = Math.max(i.minAdpSensibleCFM, airChangeFloor);
+  // Floor the air-change preset at the THERMAL requirement — the dehumidified air
+  // quantity at the SELECTED ADP. This used to floor on `minAdpSensibleCFM`, which is
+  // the airflow at the system's *minimum* ADP (44 °F chiller): a reference quantity for
+  // the 400 CFM/TR sanity ratio, never a design airflow. Because the selected ADP is
+  // almost always well above the floor ADP, that under-sized every room whose ACH preset
+  // did not already govern — Tezpur Zone B printed 4,541 CFM (266 CFM/TR) against a real
+  // 7,444 (436 CFM/TR). (Fixed 2026-07-31.)
+  const achBasisCFM = Math.max(i.dehumidifiedCFM, airChangeFloor);
 
   // DSCFM = dehumidified-air (sensible) THERMAL requirement, floored ONLY at the fresh-air (OA) the
   // room introduces so supply ≥ outdoor air. Either/or with the ACH basis (decision 2026-06-10, per

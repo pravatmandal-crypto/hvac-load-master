@@ -11,6 +11,7 @@ import {
   calculateTFALoad,
   resolveRoomTfa,
   calculateCoilParameters,
+  effectiveRoomLoadsForAdp,
   calculateParasiticGains,
   calculateHeatingLoad,
   calculateReheat,
@@ -156,9 +157,11 @@ function computeZoneTotals(
       // 44/42 split for chiller vs VRF; non-chiller types now use the canonical
       // 42°F per getMinAdp (matches old isChiller=false behavior).
       const minAdp = getMinAdp(isChiller ? 'chiller' : 'vrf', adpBasis);
+      // ADP from effective ROOM loads, not the coil totals (see effectiveRoomLoadsForAdp).
+      const adpLoads = effectiveRoomLoadsForAdp(ersh, erlh, { isTFA, isTfaOnly, tfaOffSen, tfaOffLat });
       const coil = calculateCoilParameters(
-        coilSensible,
-        coilLatent,
+        adpLoads.adpSensible,
+        adpLoads.adpLatent,
         dc.indoorTemp,
         dc.indoorHumidity,
         dc.altitude || 0,

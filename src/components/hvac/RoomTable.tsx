@@ -17,6 +17,7 @@ import {
   calculateHeatingLoad,
   calculatePsychrometrics,
   calculateCoilParameters,
+  effectiveRoomLoadsForAdp,
   calculateReheat,
   getCLTD,
   getSHGF,
@@ -289,9 +290,12 @@ function computeRoomCalc(room: any, elements: any[], designConditions: DesignCon
     // rooms because it included all OA latent in the ratio.
     const reheat = calculateReheat(ersh, erlh);
 
+    // ADP rides the ESHF line from the ROOM state — effective room loads, never the coil
+    // totals (fixed 2026-07-31; see psychrometrics.effectiveRoomLoadsForAdp).
+    const adpLoads = effectiveRoomLoadsForAdp(ersh, erlh, { isTFA, isTfaOnly, tfaOffSen, tfaOffLat });
     const coil = calculateCoilParameters(
-      coilSensible,
-      coilLatent,
+      adpLoads.adpSensible,
+      adpLoads.adpLatent,
       designConditions.indoorTemp,
       designConditions.indoorHumidity,
       altFt,
@@ -2652,9 +2656,11 @@ function calculateRoomStripMetrics(room: any, elements: any[], dc: DesignConditi
     const coilSensible = isTfaOnly ? 0 : (isTFA ? Math.max(0, ersh - tfaOffSen) : ersh + vent.sensible * (1 - BF));
     const coilLatent = isTfaOnly ? 0 : (isTFA ? Math.max(0, erlh - tfaOffLat) : erlh + vent.latent * (1 - BF));
     const grandTotal = coilSensible + coilLatent;
+    // ADP from effective ROOM loads, not the coil totals (see effectiveRoomLoadsForAdp).
+    const adpLoads2 = effectiveRoomLoadsForAdp(ersh, erlh, { isTFA, isTfaOnly, tfaOffSen, tfaOffLat });
     const coil = calculateCoilParameters(
-      coilSensible,
-      coilLatent,
+      adpLoads2.adpSensible,
+      adpLoads2.adpLatent,
       dcEff.indoorTemp,
       dcEff.indoorHumidity,
       dcEff.altitude || 0,

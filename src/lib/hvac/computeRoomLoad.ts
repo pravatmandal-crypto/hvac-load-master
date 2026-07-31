@@ -23,7 +23,7 @@ import { calculateRoomVolume } from './geometry';
 import { calculateInternalGains, type InternalGains } from './internalGains';
 import { calculateEnvelopeGain } from './envelope';
 import { calculateVentilationLoad, calculateHeatingLoad, calculateTFALoad } from './ventilation';
-import { calculatePsychrometrics, calculateCoilParameters } from './psychrometrics';
+import { calculatePsychrometrics, calculateCoilParameters, effectiveRoomLoadsForAdp } from './psychrometrics';
 import { calculateParasiticGains } from './parasitic';
 import { resolveRoomTfa } from './tfa';
 import { resolveSupplyCfm, resolveRoomSupplyBasis, resolveTotalSupplyACH, type SupplyCfmBasis } from './supplyCfm';
@@ -98,6 +98,13 @@ export interface RoomLoadResult {
 
   // ── Coil / psychrometrics ──
   coil: CoilParameters;
+  /**
+   * Grand sensible heat factor = coilSensible / (coilSensible + coilLatent).
+   * Display + reheat-reporting only. `coil.rshf` is the ROOM factor (ESHF) that
+   * locates the ADP — the two are different numbers and must not be interchanged
+   * (Tezpur CO Room: RSHF 0.87 vs GSHF 0.73).
+   */
+  gshf: number;
 
   // ── Airflow ──
   totalAch: number;
@@ -244,8 +251,17 @@ export const computeRoomLoad = (
   const grandTotal    = coilSensible + coilLatent;
   const loadTr        = grandTotal / 12000;
 
-  // Coil recomputed from the (TFA-reduced) loads — drives ADP / RSHF / supply air.
-  const coil = calculateCoilParameters(coilSensible, coilLatent, dcEff.indoorTemp, dcEff.indoorHumidity, dcEff.altitude, BF, 35, 65, getMinAdp(project?.systemType, project?.adpBasis));
+  // ADP + dehumidified air quantity ride the ESHF line from the ROOM state, so this
+  // takes the EFFECTIVE ROOM loads (ersh/erlh), NOT the coil totals. Passing coil
+  // loads here anchored the GSHF slope at the room point and drove the ADP several °F
+  // too cold — the airflow then closed on sensible but over-delivered latent by >150%.
+  // (Fixed 2026-07-31; see the contract note in psychrometrics.calculateCoilParameters.)
+  // TFA-served rooms: ersh is already net of the cold-DOAS credit, which is correct —
+  // the space coil only has to carry the residual.
+  const { adpSensible, adpLatent } = effectiveRoomLoadsForAdp(ersh, erlh, { isTFA, isTfaOnly, tfaOffSen, tfaOffLat });
+  const coil = calculateCoilParameters(adpSensible, adpLatent, dcEff.indoorTemp, dcEff.indoorHumidity, dcEff.altitude, BF, 35, 65, getMinAdp(project?.systemType, project?.adpBasis));
+  // Grand SHF — display + reheat reporting only, never the ADP (see RoomLoadResult.gshf).
+  const gshf = grandTotal > 0 ? coilSensible / grandTotal : 1;
 
   const totalAch     = resolveTotalSupplyACH(getRecommendedAch(room?.achProfile ?? room?.activityType), asNum(room?.facph, 0), asNum(room?.recircPct, 0));
   const totalSupplyCfm = (calculateRoomVolume(room) * totalAch) / 60;
@@ -282,7 +298,7 @@ export const computeRoomLoad = (
     erVentSenBF, erVentLatBF, erSensibleRaw, erLatentRaw, parasitic,
     ersh, erlh, erh, oaSensible, oaLatent, tfaOffSen, tfaOffLat,
     coilSensible, coilLatent, grandTotal, loadTr,
-    coil,
+    coil, gshf,
     totalAch, totalSupplyCfm, designCfm, cfmTr,
     supplyCfmBasis, dscfmBasisCFM: supply.dscfmBasisCFM, achBasisCFM: supply.achBasisCFM,
     governingTr, requiredTr,

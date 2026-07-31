@@ -58,7 +58,7 @@ export { calculateSolarGain } from './solar';
 export { calculateVentilationLoad, calculateHeatingLoad, calculateTFALoad } from './ventilation';
 
 // Psychrometric properties and coil parameters
-export { calculatePsychrometrics, calculateCoilParameters, dewPointFromHumidityRatio } from './psychrometrics';
+export { calculatePsychrometrics, calculateCoilParameters, dewPointFromHumidityRatio, effectiveRoomLoadsForAdp } from './psychrometrics';
 
 // Duct and pipe sizing
 export {

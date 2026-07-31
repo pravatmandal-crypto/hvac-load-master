@@ -947,7 +947,10 @@ const computeDetailed = (room: any, elements: any[], dc: DC, project: any): Deta
     tfaSupplyOffsetSen: tfaOffSen, tfaSupplyOffsetLat: tfaOffLat,
     indicatedAdp: coil.indicatedADP,
     selectedAdp:  coil.selectedADP,
-    rshf:         coil.rshf,
+    // NOTE: this field is displayed as GSHF (coil-level) — see the psychro table below.
+    // Since 2026-07-31 `coil.rshf` carries the ROOM factor (ESHF) that locates the ADP, so
+    // the grand factor must come from the separately-computed `gshf`. Do not swap these.
+    rshf:         r.gshf,
     adpUnreachable: coil.adpUnreachable,
     // Latent / reheat diagnostics (2026-06-10) — the dehumidified-air sized on sensible vs the
     // airflow the latent would need, and the implied reheat duty if the coil can't dry the room.

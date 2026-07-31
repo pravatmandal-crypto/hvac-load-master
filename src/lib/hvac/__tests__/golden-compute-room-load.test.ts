@@ -11,6 +11,29 @@
  * for the single-AHU and DOAS/TFA rooms (the VRF room's persisted `dehumidifiedCFM` is from
  * an older snapshot, so we pin the sizing-governing `minAdpSensibleCFM` instead, which does
  * match). These are real-data oracles, not program-output tautologies.
+ *
+ * ── ADP/CFM expectations re-derived by hand 2026-07-31 ──────────────────────────────
+ * The ESHF fix (ADP + dehumidified air quantity now ride the EFFECTIVE ROOM loads, not the
+ * coil totals — see psychrometrics.calculateCoilParameters) moved three values. They were
+ * re-derived from the ASHRAE constants, NOT re-baselined to program output:
+ *
+ *   UWO Office — 20×18×10.5 = 3780 ft³, facph 1.5 → 94.5 CFM OA, ΔT = 94−72 = 22 °F, BF 0.15
+ *     OA sensible (unbypassed) = 1.08 · 94.5 · 22 · 0.85              = 1908.52
+ *     ERSH  = coilSensible 18016.474 − 1908.52                        = 16107.95
+ *     minAdpSensibleCFM = 16107.95 / (1.08 · 18 · 0.85)               =  974.8216  [was 1090.32]
+ *     (the 18 °F = 72 − 54 independently confirms comfort ADP 54 and BF 0.15)
+ *
+ *   Bar Area — 18×12×17 = 3672 ft³, 91.8 CFM OA, ΔT = 86−75 = 11 °F, P = 13.395 psia @ 2543 ft
+ *     ERSH = 9445.32 − (1.08 · 91.8 · 11 · 0.85)    = 9445.32 − 927.0   = 8518.32
+ *     ERLH = 4373.64 − (0.68 · 91.8 · 57.16 · 0.85) = 4373.64 − 3033.0  = 1340.6
+ *     ESHF = 8518.32 / 9858.92                                          = 0.864
+ *     ESHF line from (75 °F, W 0.011184) meets saturation at 56.06 °F → selectedADP 56 [was 51]
+ *     minAdpSensibleCFM = 8518.32 / (1.08 · 33 · 0.85)                  = 281.1885  [was 311.79]
+ *     Cross-check: the OLD GSHF 0.684 reproduces 51.36 → 51, confirming the construction.
+ *
+ *   COO ORD (DOAS/TFA) is unchanged at ADP 51 — on a TFA room the space-coil load already
+ *   EQUALS the effective room load (OA is on the DOAS), so the fix is a mathematical no-op
+ *   there. That it did NOT move is itself a check on the fix.
  */
 import { describe, it, expect } from 'vitest';
 import { computeRoomLoad } from '@/lib/hvac';

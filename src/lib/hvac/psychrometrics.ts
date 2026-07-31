@@ -95,6 +95,32 @@ export const dewPointFromHumidityRatio = (
 };
 
 /**
+ * The EFFECTIVE ROOM loads to hand `calculateCoilParameters` for the ADP / dehumidified
+ * air quantity. Single source of the rule so the duplicated calc glue (RoomTable, ZoneList,
+ * computeRoomLoad) cannot drift apart again — divergence here is what shipped the R0 ADP bug.
+ *
+ *  • tfa-only  — no space coil to size.
+ *  • TFA/DOAS  — the DOAS carries the OA, so the space coil sees the room load net of the
+ *                cold-supply credit. (Numerically equal to the space-coil load here.)
+ *  • otherwise — plain ERSH/ERLH. The unbypassed OA is a COIL duty, not a room load, and
+ *                must be left out: including it tilts the ESHF line and drags the ADP cold.
+ */
+export const effectiveRoomLoadsForAdp = (
+  ersh: number,
+  erlh: number,
+  opts: { isTFA?: boolean; isTfaOnly?: boolean; tfaOffSen?: number; tfaOffLat?: number } = {},
+): { adpSensible: number; adpLatent: number } => {
+  if (opts.isTfaOnly) return { adpSensible: 0, adpLatent: 0 };
+  if (opts.isTFA) {
+    return {
+      adpSensible: Math.max(0, ersh - (opts.tfaOffSen ?? 0)),
+      adpLatent: Math.max(0, erlh - (opts.tfaOffLat ?? 0)),
+    };
+  }
+  return { adpSensible: ersh, adpLatent: erlh };
+};
+
+/**
  * Calculate Apparatus Dew Point (ADP) and Dehumidified CFM
  * Based on Room Sensible Heat Factor (RSHF)
  * ASHRAE Fundamentals Chapter 6
@@ -118,10 +144,18 @@ export const calculateCoilParameters = (
   maxAdpF: number = 65,
   selectedAdpMinF: number = 54
 ): CoilParameters => {
-  // Sensible Heat Factor for the load passed in. Note: callers typically pass
-  // COIL-level sensible/latent (room load + OA + parasitic), so this is GSHF
-  // not RSHF. The variable is named `rshf` for backward compatibility with
-  // existing callers, but mathematically it's the GSHF used to find ADP.
+  // Sensible Heat Factor for the load passed in.
+  //
+  // CONTRACT (corrected 2026-07-31): callers MUST pass the EFFECTIVE ROOM loads
+  // (ERSH / ERLH — room gains + parasitic + the BYPASSED share of OA), never the
+  // coil totals. Everything this function returns — the ADP and the dehumidified
+  // air quantity — lives on the ESHF line drawn from the ROOM state, so feeding it
+  // coil-level loads (GSHF) anchors the wrong slope at the room point and yields an
+  // ADP that is several °F too cold. The air then closes on sensible but massively
+  // over-delivers latent (Tezpur CO Room: ADP 55.9 °F vs 58.8 °F correct, latent
+  // +157 %). GSHF belongs on the MIXED-AIR point, which is not what is solved here.
+  //
+  // Compute GSHF separately for display/reheat reporting; do not route it in here.
   const totalLoad = roomSensible + roomLatent;
   // Guard divide-by-zero — if no load, return neutral all-sensible result.
   const rshf = totalLoad > 0 ? roomSensible / totalLoad : 1;
@@ -140,8 +174,10 @@ export const calculateCoilParameters = (
   // This is intentional — CFM cancels in the RSHF ratio:
   //   RSHF = (1.08 × CFM × ΔT) / (1.08 × CFM × ΔT + 0.68 × CFM × ΔW_gr)
   //        = (1.08 × ΔT) / (1.08 × ΔT + 0.68 × ΔW_gr)     [CFM divides out]
-  // This is equivalent to finding where the GSHF line intersects the saturation
-  // curve on the psychrometric chart — the standard ASHRAE/Carrier ADP method.
+  // This finds where the ESHF line drawn FROM THE ROOM STATE intersects the
+  // saturation curve — the standard Carrier ADP construction. The anchor point
+  // matters as much as the slope: the line must start at the room condition and
+  // carry the EFFECTIVE ROOM heat factor (see the contract note above).
   for (let t = searchMin; t <= searchMax; t += 0.1) {
     const adpPsychro = calculatePsychrometrics(t, 100, altitude);
 

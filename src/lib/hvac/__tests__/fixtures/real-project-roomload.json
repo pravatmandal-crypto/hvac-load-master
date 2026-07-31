@@ -115,7 +115,7 @@
       "coilLatent": 6386.983337184552,
       "grandTotalTR": 2.0336214431963797,
       "selectedADP": 54,
-      "minAdpSensibleCFM": 1090.3215916952317,
+      "minAdpSensibleCFM": 974.8216,
       "tfa": null
     }
   },
@@ -347,8 +347,8 @@
       "coilSensible": 9445.319598,
       "coilLatent": 4373.638588135914,
       "grandTotalTR": 1.1515798488446596,
-      "selectedADP": 51,
-      "minAdpSensibleCFM": 311.7884596949891,
+      "selectedADP": 56,
+      "minAdpSensibleCFM": 281.1885,
       "tfa": null
     }
   }
