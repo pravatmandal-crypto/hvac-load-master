@@ -248,6 +248,16 @@ export const computeRoomLoad = (
   const tfaOffLat     = tfa ? tfa.spaceLatentOffset   : 0;
   const coilSensible  = isTfaOnly ? 0 : (isTFA ? Math.max(0, ersh - tfaOffSen) : ersh + oaSensible);
   const coilLatent    = isTfaOnly ? 0 : (isTFA ? Math.max(0, erlh - tfaOffLat) : erlh + oaLatent);
+  // TFA-served room whose space coil carries NO latent — the cold DOAS supply already removes
+  // more moisture than the room generates (coilLatent floored at 0). The room then CANNOT hold
+  // the design humidity: it settles where the DOAS airflow balances the room latent gain,
+  // W_room = W_doas + ERLH / (0.68 · TFACFM · 7000). Temperature is still held by the space
+  // coil, so only RH floats. Previously only tfa-only rooms floated, so these rooms reported
+  // the design RH — a value they physically cannot reach. (2026-08-01)
+  if (floatIndoorRH === null && isTFA && !isTfaOnly && tfa && tfa.cfm > 0 && coilLatent <= 0) {
+    const floatW = tfa.supplyHumidityRatio + erlh / (0.68 * tfa.cfm * 7000);
+    floatIndoorRH = rhFromHumidityRatio(asNum(dcEff.indoorTemp, 75), floatW, asNum(dcEff.altitude, 0));
+  }
   const grandTotal    = coilSensible + coilLatent;
   const loadTr        = grandTotal / 12000;
 

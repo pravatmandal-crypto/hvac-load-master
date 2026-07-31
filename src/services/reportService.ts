@@ -473,7 +473,14 @@ const getInstalledTrCfm = (entityId: string, eqSystems: any[], fallbackRoomIds?:
 };
 
 // Per-room installed TR/CFM: checks iduSelections first, then the zone-group that contains the room
-const getRoomInstalledTrCfm = (roomId: string, eqSystems: any[]): { tr: number; cfm: number } => {
+/**
+ * Installed IDU/FCU serving a room. `scope` distinguishes a unit selected FOR THIS ROOM
+ * from one selected for the whole zone — a zone AHU is not the room's installed capacity,
+ * and printing it on every room row reads as though each room has its own 18 TR machine
+ * (report HLM-TEZ-2LAL R0 did exactly that). Callers should suppress zone-scoped values in
+ * per-room columns; the ZONE TOTAL row already carries them. (2026-08-01)
+ */
+const getRoomInstalledTrCfm = (roomId: string, eqSystems: any[]): { tr: number; cfm: number; scope: 'room' | 'zone' | 'none' } => {
   for (const sys of eqSystems) {
     if (sys.iduSelections) {
       const val = (sys.iduSelections as Record<string, any>)[roomId];
@@ -481,19 +488,19 @@ const getRoomInstalledTrCfm = (roomId: string, eqSystems: any[]): { tr: number; 
         const units: any[] = Array.isArray(val) ? val : [val];
         const tr  = units.reduce((s: number, u: any) => s + (u.trCapacity ?? 0) * (u.quantity ?? 1), 0);
         const cfm = units.reduce((s: number, u: any) => s + (u.cfmRated  ?? 0) * (u.quantity ?? 1), 0);
-        if (tr > 0) return { tr, cfm };
+        if (tr > 0) return { tr, cfm, scope: 'room' };
       }
     }
     for (const z of (sys.zones ?? []) as any[]) {
       if (!(z.roomIds as string[] ?? []).includes(roomId)) continue;
       if (z.selection) {
         const sel = z.selection;
-        return { tr: (sel.trCapacity ?? 0) * (sel.quantity ?? 1), cfm: (sel.cfmRated ?? 0) * (sel.quantity ?? 1) };
+        return { tr: (sel.trCapacity ?? 0) * (sel.quantity ?? 1), cfm: (sel.cfmRated ?? 0) * (sel.quantity ?? 1), scope: 'zone' };
       }
       if (z.unitSelections?.length) {
         const tr  = (z.unitSelections as any[]).reduce((s: number, u: any) => s + (u.trCapacity ?? 0) * (u.quantity ?? 1), 0);
         const cfm = (z.unitSelections as any[]).reduce((s: number, u: any) => s + (u.cfmRated  ?? 0) * (u.quantity ?? 1), 0);
-        return { tr, cfm };
+        return { tr, cfm, scope: 'zone' };
       }
     }
     if (sys.type === 'Split' && sys.roomSelections) {
@@ -502,11 +509,11 @@ const getRoomInstalledTrCfm = (roomId: string, eqSystems: any[]): { tr: number; 
         const units: any[] = Array.isArray(val) ? val : [val];
         const tr  = units.reduce((s: number, u: any) => s + (u.trCapacity ?? 0) * (u.quantity ?? 1), 0);
         const cfm = units.reduce((s: number, u: any) => s + (u.cfmRated  ?? 0) * (u.quantity ?? 1), 0);
-        if (tr > 0) return { tr, cfm };
+        if (tr > 0) return { tr, cfm, scope: 'room' };
       }
     }
   }
-  return { tr: 0, cfm: 0 };
+  return { tr: 0, cfm: 0, scope: 'none' };
 };
 
 // Sum of IDU/FCU TR and CFM across all equipment systems (for Executive Summary).
@@ -754,7 +761,16 @@ const formatPlantDiversityCheck = (
     const plantStr = tfaOnPlant > 0.005
       ? `Plant ${n2(plantSpace)} TR (${n2(plantTR)} - ${n2(tfaOnPlant)} TFA)`
       : `Plant ${n2(plantSpace)} TR`;
-    parts.push(`${name}: Installed IDU ${n2(iduTR)} TR / ${plantStr} = Diversity ${diversityPct.toFixed(0)}%`);
+    // State the DIRECTION explicitly. This ratio is connected ÷ plant, so it reads above 100%
+    // when diversity is being relied on and below 100% when the plant has spare capacity —
+    // opposite meanings from the same label. R0 issued 107% on one project and 69% on another
+    // with nothing to say they were not the same kind of number. (2026-08-01)
+    parts.push(
+      `${name}: Connected IDU ${n2(iduTR)} TR ÷ ${plantStr} = ${diversityPct.toFixed(0)}%`
+      + ` — ${diversityPct > 100
+          ? 'connected exceeds plant, diversity relied upon'
+          : 'plant exceeds connected, spare capacity'}`,
+    );
   }
   return parts.length > 0 ? parts.join('  |  ') : '—';
 };
@@ -2071,10 +2087,14 @@ export const generatePDFReport = (
       if (entityHasTfa) row.push(tfaTR > 0 ? n2(tfaTR) : '—', tfaCfm > 0 ? n0(tfaCfm) : '—');
       if (includeWinter) row.push(n0(wm?.designHeatingLoad ?? 0));
       if (includeWinter && entityHasTfa) row.push((Number(room._calcTfaWinterHeatingBTUH) || 0) > 0 ? n0(Number(room._calcTfaWinterHeatingBTUH)) : '—');
+      // Only a unit selected FOR THIS ROOM is the room's installed capacity. A zone AHU
+      // belongs on the ZONE TOTAL row below — repeating it against every room made R0 read
+      // as though each room had its own 18 TR / 4,600 CFM machine. (2026-08-01)
+      const roomScoped = rInst.scope === 'room';
       row.push(
         n2(govTR),
-        rInst.tr  > 0 ? n2(rInst.tr)  : '—',
-        rInst.cfm > 0 ? n0(rInst.cfm) : '—',
+        roomScoped && rInst.tr  > 0 ? n2(rInst.tr)  : (rInst.scope === 'zone' ? '— zone' : '—'),
+        roomScoped && rInst.cfm > 0 ? n0(rInst.cfm) : (rInst.scope === 'zone' ? '— zone' : '—'),
       );
       return row;
     });
@@ -2184,15 +2204,23 @@ export const generatePDFReport = (
           body: [
             ['Length × Width × Height',    dims,             'False Ceiling Height', fcNote],
             ['Floor Area',                 `${n0(m.area)} ft²`,  'Room Volume', `${n0(calculateRoomVolume(room))} ft³`],
-            ['People / Activity',          `${n0(asNum(room.peopleCount, 0))} persons  /  ${String(room.activityType || '—')}`, 'FACPH / FA CFM', `${n1(asNum(room.facph, 0))} ACH  /  ${n0(m.faCfm)} CFM`],
+            // FA CFM to 1 dp: the engine carries it unrounded, so printing a whole number
+            // means 1.08 × FACFM × dT recomputed by hand from the sheet does not tie back
+            // to the ventilation rows (117 vs 116.5 is ~9 BTU/h on a small room). (2026-08-01)
+            ['People / Activity',          `${n0(asNum(room.peopleCount, 0))} persons  /  ${String(room.activityType || '—')}`, 'FACPH / FA CFM', `${n1(asNum(room.facph, 0))} ACH  /  ${n1(m.faCfm)} CFM`],
             ['Lighting / Equip / Others',  `${asNum(room.lightsWattsPerSqft, 0)} W/ft²  /  ${asNum(room.equipmentKW, 0)} kW  /  ${asNum(room.othersKW, 0)} kW`,
               // TFA-only rooms are fed only by the DOAS fresh air (no recirc AHU), so the "6 ACH
               // total supply" is fictitious for them — show the actual DOAS fresh-air supply instead.
               m.isTfaOnly ? 'Fresh air (DOAS) / Supply CFM'
-                : resolveRoomSupplyBasis(room.supplyCfmBasis, project?.supplyBasis) === 'ach' ? 'ACH / Total Supply CFM' : 'Supply Basis / Design CFM',
+                : resolveRoomSupplyBasis(room.supplyCfmBasis, project?.supplyBasis) === 'ach' ? 'Air-change floor / Design CFM' : 'Supply Basis / Design CFM',
+              // The air-change preset is a FLOOR, not the design airflow — the thermal
+              // requirement overrides it in most rooms. R0 printed only the preset next to a
+              // much larger Design CFM elsewhere in the sheet, which reads as a contradiction.
+              // Show both, and say which one governs. (2026-08-01)
               m.isTfaOnly ? `Fresh-air only  /  ${n0(m.tfaCfm || m.faCfm)} CFM`
                 : resolveRoomSupplyBasis(room.supplyCfmBasis, project?.supplyBasis) === 'ach'
-                ? `${n1(m.totalAch)} ACH  /  ${n0(m.totalSupplyCfm)} CFM`
+                ? `${n1(m.totalAch)} ACH = ${n0(m.totalSupplyCfm)} CFM floor  ·  design ${n0(m.designCfm)} CFM`
+                  + ` (${m.designCfm > m.totalSupplyCfm + 1 ? 'thermal governs' : 'air-change governs'})`
                 : `Dehumidified (DSCFM)  /  ${n0(m.designCfm)} CFM`],
             // Latent shortfall row — only when the actual design supply air can't carry the latent
             // load at the selected ADP (latentShortfallCFM is sensible-based and false-alarms once
@@ -2202,6 +2230,20 @@ export const generatePDFReport = (
             ...(!m.isTFA && (m.latentCfm - m.designCfm) > 1
               ? (() => {
                   const dh = resolveRoomDehumid(room, activeEquipSystems);
+                  // ADP ACHIEVABILITY — checked before any SHR heuristic and independent of
+                  // whether a dehumidification method is configured. When the selected ADP sits
+                  // ABOVE the indicated ADP, the apparatus dew point the room actually needs was
+                  // below the system floor and got clamped: the coil physically cannot reach it,
+                  // so the latent load will not be met no matter how high the room SHR is. The
+                  // SHR >= 0.75 test cannot see this — R0 printed "Not required" against a room
+                  // needing 35.1 degF while the coil was pinned at 44 degF. (2026-08-01)
+                  const adpShort = m.selectedAdp - m.indicatedAdp;
+                  if (adpShort > 1.0) {
+                    return [['Dehumidification — ADP NOT ACHIEVABLE',
+                      `This room requires an apparatus dew point of ${n1(m.indicatedAdp)}°F, but the coil is clamped to the ${n0(m.selectedAdp)}°F system minimum — short by ${n1(adpShort)}°F. The latent load cannot be met at this ADP. Lower the chilled-water supply temperature, add a reheat coil, or decouple the latent load (DOAS / desiccant).`,
+                      'Required reheat duty',
+                      `ADP short by ${n1(adpShort)}°F`]];
+                  }
                   if (dh && isReheatMethod(dh.method)) {
                     // Use the SAME RSHF-based required-reheat the psychro "Reheat ★ REQD" row shows
                     // below — NOT the zone's stored dehumidReheatKW (which can be stale/undersized and
@@ -2306,10 +2348,6 @@ export const generatePDFReport = (
         }
 
         // ── Load breakdown table ──
-        y = ensureSpace(doc, y, 120, project);
-        y = subBanner(doc, `Cooling Load Breakdown  (${seasonLabel})`, y, C);
-        y += 1;
-
         const loadRows: any[] = [
           // Envelope
           [{ content: 'ENVELOPE GAINS', colSpan: 3, styles: { fontStyle: 'bold', fillColor: C.accentBg, textColor: C.ink } }],
@@ -2329,7 +2367,12 @@ export const generatePDFReport = (
           [{ content: '  Total Internal', styles: { fontStyle: 'bold' } }, { content: n0(m.internalSensible), styles: { fontStyle: 'bold' } }, { content: n0(m.internalLatent), styles: { fontStyle: 'bold' } }],
           // Vent + Parasitic
           [{ content: 'VENTILATION & PARASITIC', colSpan: 3, styles: { fontStyle: 'bold', fillColor: C.accentBg, textColor: C.ink } }],
-          [`  Ventilation (BF=${0.15} room portion)`, n0(m.ventSensibleBF), n0(m.ventLatentBF)],
+          // On a TFA/DOAS room the outdoor air never reaches the space coil, so the
+          // bypassed-OA figure contributes to nothing — it is excluded from ERSH below.
+          // Printing a zero-contribution row invites a reviewer to add it in, so hide it.
+          ...(m.isTFA
+            ? []
+            : [[`  Ventilation (bypassed to room, BF=${n2(0.15)})`, n0(m.ventSensibleBF), n0(m.ventLatentBF)]]),
           ['  Duct Gain',          n0(m.ductGain),          '—'],
           ['  Fan Heat Gain',      n0(m.fanGain),           '—'],
           // Effective room
@@ -2358,6 +2401,18 @@ export const generatePDFReport = (
                 [{ content: 'OUTDOOR AIR (unbypassed coil load)', colSpan: 3, styles: { fontStyle: 'bold', fillColor: C.accentBg, textColor: C.ink } }],
                 ['  OA Sensible',        n0(m.oaSensible), '—'],
                 ['  OA Latent',          '—',              n0(m.oaLatent)],
+                // Reconciliation. The fresh-air load is SPLIT per Carrier — the bypassed
+                // share is a room load (carried in ERSH/ERLH above), the contacted share is
+                // a coil duty (the two rows above). They sum to the full quantity. Stating
+                // it explicitly stops a reviewer adding the full OA on top of an ERSH that
+                // already contains the bypassed part, which double-counts it. (2026-08-01)
+                [{
+                  content: `  Total fresh air = bypassed (in ERSH/ERLH) + unbypassed  ·  ${n0(m.faCfm)} CFM`
+                    + `  →  sensible ${n0(m.ventSensibleBF)} + ${n0(m.oaSensible)} = ${n0(m.ventSensibleBF + m.oaSensible)}`
+                    + `  ·  latent ${n0(m.ventLatentBF)} + ${n0(m.oaLatent)} = ${n0(m.ventLatentBF + m.oaLatent)} BTU/h`,
+                  colSpan: 3,
+                  styles: { fontStyle: 'italic', fontSize: 6.6, fillColor: C.accentBg, textColor: C.ink },
+                }],
                 [{ content: 'COIL LOADS', colSpan: 3, styles: { fontStyle: 'bold', fillColor: C.accentBg, textColor: C.ink } }],
               ]),
           ['  Coil Sensible',      n0(m.coilSensible),  '—'],
@@ -2365,11 +2420,21 @@ export const generatePDFReport = (
           [{ content: `  ${m.isTFA ? 'SPACE COIL TOTAL' : 'GRAND TOTAL'}   =   ${n0(m.grandTotal)} BTU/h   (${n2(m.loadTr)} TR)`, colSpan: 3, styles: { fontStyle: 'bold', fillColor: C.grandBg, textColor: C.grandFg, fontSize: 8.5 } }],
         ];
 
+        // Reserve the WHOLE breakdown, computed from the actual row count, so it never
+        // splits across a page boundary. R0 broke mid-table, which put the bypassed-OA
+        // row on the previous page and left a reviewer checking the OA line unable to
+        // see it — the direct cause of the "fresh air is understated" query. (2026-08-01)
+        const BREAKDOWN_ROW_H = 5.4;   // fontSize 7.5 + cellPadding 1.6, in mm
+        y = ensureSpace(doc, y, (loadRows.length + 1) * BREAKDOWN_ROW_H + 12, project);
+        y = subBanner(doc, `Cooling Load Breakdown  (${seasonLabel})`, y, C);
+        y += 1;
+
         autoTable(doc, {
           startY: y,
           head: [['Load Component', 'Sensible BTU/h', 'Latent BTU/h']],
           body: loadRows,
           theme: 'grid',
+          rowPageBreak: 'avoid',
           styles:     { fontSize: 7.5, cellPadding: 1.6, textColor: C.ink },
           headStyles: { fillColor: C.panelDark, textColor: C.ink, fontStyle: 'bold' },
           columnStyles: {
@@ -2403,12 +2468,33 @@ export const generatePDFReport = (
           // ACH airflow — misleading next to "0.00 TR". The actual DOAS supply is the TFA Airflow
           // row below, so drop this row for them.
           ...(m.isTfaOnly ? [] : [['Design CFM', `${n0(m.designCfm)} CFM`]]),
+          // CFM/TR sanity ratio — carried into the PDF because it is the check that catches a
+          // mis-sized airflow at a glance (R0 shipped at 266 CFM/TR, well below the band, and
+          // nothing in the document said so). Meaningful only on a mixed-air coil: a DOAS-served
+          // room runs near-sensible (RSHF ~0.99) where the band does not apply. (2026-08-01)
+          ...(!m.isTfaOnly && m.requiredTr > 0
+            ? [(() => {
+                const ratio = m.designCfm / m.requiredTr;
+                const verdict = m.isTFA
+                  ? 'DOAS-served — 350–450 band does not apply'
+                  : ratio < 350 ? 'below typical 350–450 — check supply air temperature'
+                  : ratio > 450 ? 'above typical 350–450 — check supply air temperature'
+                  : 'within typical 350–450';
+                return ['CFM / TR', `${n0(ratio)} CFM/TR  (${verdict})`];
+              })()]
+            : []),
           ['Governing TR',  `${n2(m.requiredTr)} TR`],
           // TFA-only rooms are fed only FACFM, so they float off design — show the ACTUAL
           // maintained condition (per Pravat: accepted for a corridor, but reported honestly
           // so the client can decide whether to accept it or add space cooling).
           ...(m.isTfaOnly && m.floatIndoorTemp != null
             ? [['Maintained Indoor', `${n1(m.floatIndoorTemp)} °F / ${n0(m.floatIndoorRH ?? 0)} % RH  —  actual, not design (${n0(dc.indoorTemp)} °F / ${n0(dc.indoorHumidity)} % RH). Fresh-air-only room; floats to what the FA can hold — client to confirm.`]]
+            : []),
+          // TFA-served room whose space coil carries no latent: temperature is held, humidity
+          // is not. Report the condition the room actually reaches rather than the design value
+          // it cannot. Matters where a low-RH limit applies (ESD, ordnance). (2026-08-01)
+          ...(!m.isTfaOnly && m.floatIndoorRH != null
+            ? [['Maintained Indoor RH', `${n0(m.floatIndoorRH)} % RH at ${n0(dc.indoorTemp)} °F  —  actual, not design (${n0(dc.indoorHumidity)} % RH). The DOAS delivers more dry air than this room's latent gain, so the space coil carries zero latent and the room settles below design humidity. Confirm any lower RH limit.`]]
             : []),
           ...(includeWinter ? [['Winter Load', `${n0(m.designHeatingLoad)} BTU/h`]] : []),
           ...(includeWinter && Number((room as any)?._calcTfaWinterHeatingBTUH) > 0
