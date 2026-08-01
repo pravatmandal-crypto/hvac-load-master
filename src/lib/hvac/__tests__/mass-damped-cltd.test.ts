@@ -32,6 +32,9 @@ import { describe, it, expect } from 'vitest';
 import { getCLTD, calculateSingleElementGain } from '../envelope';
 import type { EnvelopeElement, DesignConditions } from '../constants';
 import { calcThermalDynamics } from '../../ubuilder/calculations';
+import {
+  backfillElements, backfillElementsByRoom, toDynamicsMap, type BackfillableElement,
+} from '../../ubuilder/assemblyDynamics';
 import type { AssemblyLayer } from '../../../data/ubuilder-seed';
 
 const layer = (materialId: string, thickness: number, lambda: number): AssemblyLayer => ({
@@ -128,6 +131,65 @@ describe('getCLTD mass damping', () => {
     const at = (f: number) => getCLTD('H', 'Roof', DT, ALT, { ...OPTS, color: 'Dark', decrementFactor: f });
     const series = [0, 0.15, 0.45, 0.8, 1].map(at);
     for (let i = 1; i < series.length; i++) expect(series[i]).toBeGreaterThan(series[i - 1]);
+  });
+
+  // Shipped R3 wrong. The picker denormalises decrementFactor onto the element when you
+  // choose an assembly, so a room assigned its assembly BEFORE that field existed keeps only
+  // wallTypeId. The first fix backfilled inside the room-detail component — which fixed the
+  // READ-OUT while the report, Excel, snapshot and Recompute-All kept reading raw Firestore
+  // elements and computing the undamped CLTD. Screen said 18.47, PDF said 36.98, and the
+  // screen looking right is what made it seem verified. Resolution now happens at the source.
+  describe('resolving assembly dynamics onto persisted elements', () => {
+    const dynamics = toDynamicsMap([
+      { id: 'sr3', data: { layers: EARTH_ROOF } },              // legacy doc: no stored fields
+      { id: 'sr9', data: { decrementFactor: 0.5, arealMass: 400 } },
+    ]);
+
+    it('recomputes from layers for assemblies saved before the fields existed', () => {
+      expect(dynamics.get('sr3')?.decrementFactor).toBeCloseTo(0.152, 2);
+      expect(dynamics.get('sr3')?.arealMass).toBeCloseTo(885, 0);
+    });
+
+    it('fills in an element that has the assembly but not the factor', () => {
+      const [el] = backfillElements<BackfillableElement>([{ wallTypeId: 'sr3' }], dynamics);
+      expect(el.decrementFactor).toBeCloseTo(0.152, 2);
+    });
+
+    it('does not override a factor the element already carries', () => {
+      const [el] = backfillElements([{ wallTypeId: 'sr3', decrementFactor: 0.9 }], dynamics);
+      expect(el.decrementFactor).toBe(0.9);
+    });
+
+    it('leaves an element cleared back to a catalog type undamped', () => {
+      // null is what the picker writes on switch-away; it must not be treated as "unset".
+      const [el] = backfillElements([{ wallTypeId: 'r1', decrementFactor: null }], dynamics);
+      expect(el.decrementFactor).toBeNull();
+    });
+
+    it('preserves reference identity when nothing needs filling', () => {
+      const els = [{ wallTypeId: 'r1' }];
+      expect(backfillElements(els, dynamics)).toBe(els);
+      const byRoom = { 'room-1': els };
+      expect(backfillElementsByRoom(byRoom, dynamics)).toBe(byRoom);
+    });
+
+    it('resolves across every room the Load Calculator holds', () => {
+      const out = backfillElementsByRoom<BackfillableElement>(
+        { 'co-room': [{ wallTypeId: 'sr3' }], avionics: [{ wallTypeId: 'sr3' }] },
+        dynamics,
+      );
+      for (const els of Object.values(out)) expect(els[0].decrementFactor).toBeCloseTo(0.152, 2);
+    });
+
+    it('an element resolved this way actually damps the gain', () => {
+      // The end-to-end point: resolution is worthless unless it reaches the load.
+      const [el] = backfillElements([{ wallTypeId: 'sr3' }], dynamics);
+      const design = { indoorTemp: 75, outdoorTemp: 94, dailyRange: 20, designMonth: 7, altitude: ALT } as unknown as DesignConditions;
+      const base = { id: 'r', type: 'Roof', orientation: 'H', area: 269, uValue: 0.2463, solarFactor: 0, isOverride: false, color: 'Dark' } as const;
+      const undamped = calculateSingleElementGain({ ...base } as EnvelopeElement, design).total;
+      const damped = calculateSingleElementGain({ ...base, ...el } as EnvelopeElement, design).total;
+      expect(damped).toBeLessThan(undamped * 0.6);
+    });
   });
 
   it('leaves Glass alone — it is massless and driven by transmitted solar', () => {

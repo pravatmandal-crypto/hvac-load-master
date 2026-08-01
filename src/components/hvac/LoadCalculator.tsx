@@ -50,6 +50,8 @@ import {
   type RoomDetails,
 } from '../../lib/hvac';
 import { EnvelopeElement, ACTIVITY_TYPES, ACTIVITY_ACH_RECOMMENDATIONS } from '../../lib/hvac/constants';
+import { backfillElementsByRoom } from '../../lib/ubuilder/assemblyDynamics';
+import { useAssemblyDynamics } from '../../lib/ubuilder/useAssemblyDynamics';
 
 
 interface Room {
@@ -215,7 +217,17 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
   const [zones, setZones] = useState<Zone[]>([]);
   const [equipSystems, setEquipSystems] = useState<any[]>([]);
   const [rooms, setRooms] = useState<Record<string, Room[]>>({});
-  const [envelopeElements, setEnvelopeElements] = useState<Record<string, EnvelopeElement[]>>({});
+  // RAW Firestore elements. Never read this directly — read `envelopeElements` below, which
+  // resolves each element's assembly dynamic response first. Elements assigned an assembly
+  // before `decrementFactor` existed carry only wallTypeId, and every consumer here (report,
+  // Excel, analysis snapshot, Recompute All) would otherwise silently compute the
+  // light-construction CLTD while the room detail on screen showed the damped one.
+  const [rawEnvelopeElements, setEnvelopeElements] = useState<Record<string, EnvelopeElement[]>>({});
+  const assemblyDynamics = useAssemblyDynamics();
+  const envelopeElements = useMemo(
+    () => backfillElementsByRoom(rawEnvelopeElements, assemblyDynamics),
+    [rawEnvelopeElements, assemblyDynamics],
+  );
   const [expandedZone, setExpandedZone] = useState<string | null>(null);
   const [expandedRoom, setExpandedRoom] = useState<string | null>(null);
   const [expandedSystem, setExpandedSystem] = useState<string | null>(null);

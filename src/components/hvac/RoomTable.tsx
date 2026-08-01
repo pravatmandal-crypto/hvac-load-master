@@ -41,6 +41,7 @@ import {
   type EnvelopeElement,
 } from '../../lib/hvac';
 import { calcThermalDynamics } from '../../lib/ubuilder/calculations';
+import { backfillElements } from '../../lib/ubuilder/assemblyDynamics';
 import PsychrometricChart from './PsychrometricChart';
 
 type ElementType = 'Wall' | 'Glass' | 'Roof' | 'Floor' | 'Partition';
@@ -805,18 +806,10 @@ function RoomDetail({
     return m;
   }, [customWallTypes, customRoofTypes, customFloorTypes]);
 
-  const withAssemblyDynamics = useCallback((els: EnvelopeElement[]): EnvelopeElement[] => {
-    if (assemblyDynamics.size === 0) return els;
-    let changed = false;
-    const out = els.map(el => {
-      if (el.decrementFactor != null || !el.wallTypeId) return el;
-      const d = assemblyDynamics.get(el.wallTypeId);
-      if (!d) return el;
-      changed = true;
-      return { ...el, ...d };
-    });
-    return changed ? out : els; // keep referential identity when nothing was backfilled
-  }, [assemblyDynamics]);
+  const withAssemblyDynamics = useCallback(
+    (els: EnvelopeElement[]): EnvelopeElement[] => backfillElements(els, assemblyDynamics) as EnvelopeElement[],
+    [assemblyDynamics],
+  );
 
   const liveElements: EnvelopeElement[] = useMemo(
     () => withAssemblyDynamics((envelopeDraft ?? elements) as EnvelopeElement[]),
