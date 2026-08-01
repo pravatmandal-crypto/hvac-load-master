@@ -153,14 +153,35 @@ export default function Methodology({ userRole }: { userRole?: string | null }) 
                 code={'Dark   = 0°F  (baseline — absorbs most solar)\nMedium = −3°F\nLight  = −6°F  (reflects most solar)'} />
               <FBlock label="Latitude / Month (LM) correction — ASHRAE Table 26.4" color="text-orange-600"
                 code={'Jul baseline (40°N). Example values:\nN: Jul=+2  Jan=−2  |  S: Jul=−2  Jan=+3\nE: Jul=+3  Jan=−3  |  W: Jul=−3  Jan=+2\nH: Jul=+2  Jan=−3'} />
+              <FBlock label="Light-construction CLTD" color="text-orange-600"
+                code={'CLTD_light = CLTD_base + corr_T + corr_color + LM\n\nGlass (conduction only, no solar):\nQ = U × A × ΔT  (plain ΔT, no CLTD)\n\nPartition:  Q = U × A × ΔT × 0.6\nFloor:      Q = U × A × ΔT × 0.5  (ground damping)'} />
+              <FBlock label="Mass damping — assembly decrement factor f" color="text-orange-600"
+                code={'d  = √(2α / ω)      α = λ / (ρ·c),  ω = 2π/86400\nf_wave = exp(−Σ tᵢ/dᵢ)      lag = Σ(tᵢ/dᵢ) × 24/2π  [h]\nf_mass = exp(−M / 470)      M = Σ(tᵢ × ρᵢ)  [kg/m²]\nf      = max(f_wave, f_mass)      (0 = heavy, 1 = light)'} />
               <FBlock label="Final corrected CLTD" color="text-orange-600"
-                code={'CLTD_corr = CLTD_base + corr_T + corr_color + LM\n\nGlass (conduction only, no solar):\nQ = U × A × ΔT  (plain ΔT, no CLTD)\n\nPartition:  Q = U × A × ΔT × 0.6\nFloor:      Q = U × A × ΔT × 0.5  (ground damping)'} />
+                code={'CLTD_heavy = (ΔT − DR/2) + 0.26 × solar_peak + corr_T\nCLTD_corr  = CLTD_heavy + f × (CLTD_light − CLTD_heavy)\n\nf = 1 (no assembly assigned) → CLTD_corr = CLTD_light\nGlass / Partition / Floor: not damped (no solar term)'} />
             </div>
             <div className="p-3 bg-orange-50 rounded-lg border border-orange-100 text-[11px] text-orange-800">
               <strong>Engineering Guideline:</strong> CLTD tables were compiled for 40°N latitude, July, peak solar time.
               All four corrections (temperature, color, LM, altitude) are mandatory for accuracy in Indian
               conditions (lat 8–37°N, very high outdoor temps, tropical summer months).
               Omitting the temperature correction alone can underestimate wall load by 15–25%.
+            </div>
+            <div className="p-3 bg-orange-50 rounded-lg border border-orange-100 text-[11px] text-orange-800">
+              <strong>Why mass damping:</strong> the published CLTD tables are indexed <em>by roof and wall
+              weight</em> — a heavy assembly flattens the daily sol-air wave and delays what survives by
+              hours, so the room sees something close to the <em>daily mean</em> sol-air temperature rather
+              than its afternoon peak. CLTD_corr therefore interpolates between the light-construction value
+              and that mean-sol-air limit, using a decrement factor derived from the U&nbsp;Builder assembly's
+              own layers (thickness, conductivity, density). A 300&nbsp;mm earth-covered RCC roof
+              (885&nbsp;kg/m², f&nbsp;=&nbsp;0.15, 16&nbsp;h lag) computes CLTD&nbsp;≈&nbsp;17 where a bare
+              metal deck of the same U-value computes ≈&nbsp;37.
+              <br /><br />
+              Two limits are evaluated and the <em>less damped</em> one governs. Pure wave attenuation alone
+              over-states damping for low-density insulation — rigid foam has a thermal diffusivity close to
+              concrete's, yet stores almost nothing and cannot flatten a daily swing. The areal-mass term caps
+              it, so a lightweight insulated deck stays at its light-construction CLTD. Erring toward the
+              lesser damping keeps the error on the safe side: a slightly over-stated cooling load rather than
+              an under-sized coil. Rooms with no assembly assigned are unaffected (f&nbsp;=&nbsp;1).
             </div>
           </CollapseSection>
 
@@ -858,6 +879,7 @@ Q_vl × BF          ─┘
                 <p>T_mean = 95 − 18/2        = <strong>86°F</strong></p>
                 <p>corr_T = (78−75) + (86−85) = 3 + 1 = <strong>+4°F</strong></p>
                 <p>corr_color (Dark)         = <strong>0°F</strong></p>
+                <p>f (decrement)             = <strong>1.00</strong>  (no U Builder assembly assigned — light construction, no mass damping)</p>
               </div>
             </div>
 
@@ -1323,6 +1345,7 @@ Q_vl × BF          ─┘
                 <p>T_mean = 82 − 12/2          = <strong>76°F</strong></p>
                 <p>corr_T = (78−75) + (76−85)  = 3 − 9 = <strong>−6°F</strong></p>
                 <p>corr_color (Dark)           = <strong>0°F</strong></p>
+                <p>f (decrement)               = <strong>1.00</strong>  (no U Builder assembly assigned — light construction, no mass damping)</p>
               </div>
             </div>
 

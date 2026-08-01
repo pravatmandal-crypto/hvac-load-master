@@ -31,7 +31,13 @@
 // 16.14 / 4,503 — OA missing from the coil on FA-on-AHU rooms). Bumping the version makes
 // every stored `v1:` sig mismatch, so the LC staleness banner prompts a one-click recompute
 // on every project regardless of whether its scalar inputs changed.
-export const CALC_VERSION = 2;
+// v3 (2026-08-02): mass-damped CLTD. `getCLTD` now blends between the light-construction
+// value and the daily-mean sol-air limit using the assembly's decrement factor, so any room
+// with a heavy assembly assigned computes a lower envelope gain than its saved snapshot.
+// Without a bump the fingerprint still matches, no staleness banner appears, and Equipment
+// Selection / PDF / Excel keep serving the old undamped loads while the Envelope tab shows
+// the new CLTD — precisely the silent drift this file exists to catch.
+export const CALC_VERSION = 3;
 
 /** Short, stable djb2 hash → base36 string. Keeps the persisted fingerprint tiny. */
 function hashString(s: string): string {

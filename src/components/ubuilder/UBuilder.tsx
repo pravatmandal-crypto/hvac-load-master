@@ -18,7 +18,7 @@ import {
   WALL_CATEGORY_LABELS,
   type UAssembly, type AssemblyLayer, type GroundParams, type WallCategory,
 } from '../../data/ubuilder-seed';
-import { calculateUValue } from '../../lib/ubuilder/calculations';
+import { calculateUValue, calcThermalDynamics } from '../../lib/ubuilder/calculations';
 import { generateAssemblyPDF } from '../../services/ubuilderPDFService';
 
 interface Props {
@@ -248,6 +248,9 @@ function AssemblyBuilderDialog({
     const validLayers = layers.filter(l => l.lambda > 0 && l.thickness > 0);
     if (validLayers.length === 0) { toast.error('Add at least one valid layer'); return; }
     if (!result) { toast.error('Cannot calculate U-value — check layer data'); return; }
+    // Derive the dynamic response alongside U so the load calculator can damp the CLTD
+    // for heavy assemblies instead of charging every roof the full sol-air peak.
+    const dyn = calcThermalDynamics(validLayers);
     const saveData: Parameters<typeof onSave>[0] = {
       name: name.trim(),
       wallCategory,
@@ -255,6 +258,9 @@ function AssemblyBuilderDialog({
       uValue: result.uValue,
       method: result.method,
       layers: validLayers,
+      arealMass: dyn.arealMass,
+      decrementFactor: dyn.decrementFactor,
+      timeLagHours: dyn.timeLagHours,
     };
     if (wallCategory === 'below_ground') saveData.groundParams = groundParams;
     onSave(saveData);

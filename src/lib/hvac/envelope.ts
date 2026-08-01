@@ -8,6 +8,14 @@ import { EnvelopeElement, EnvelopeBreakdown, SolarGainResult, DesignConditions, 
 import { calculateSolarGain } from './solar';
 
 /**
+ * Ratio of 24-hour-mean to peak incident solar radiation, used as the heavy-mass limit
+ * of the CLTD solar term. A fully damped assembly is driven by the DAILY MEAN sol-air
+ * temperature, so its solar contribution is the daily mean irradiance, not the noon peak.
+ * ≈ 79 / 301 BTU/h·ft² for a horizontal surface at low-to-mid latitude in midsummer.
+ */
+const SOLAR_MEAN_FRACTION = 0.26;
+
+/**
  * Calculate Cooling Load Temperature Difference (CLTD) with full ASHRAE corrections
  * ASHRAE Fundamentals 1997, Chapter 26 / 2017, Chapter 17
  *
@@ -17,6 +25,7 @@ import { calculateSolarGain } from './solar';
  *     (T_room=78°F, T_mean=85°F): CLTD += (78 - T_room) + (T_mean - 85)
  *  3. Color correction — Dark=0, Medium=−3, Light=−6 °F
  *  4. Latitude/Month (LM) correction — ASHRAE Table 26.4
+ *  5. Mass damping — decrement factor from the assembly's dynamic response
  *
  * @param orientation - Surface orientation
  * @param type - Surface type
@@ -36,6 +45,7 @@ export const getCLTD = (
     dailyRange?: number;       // outdoor daily temperature range (°F), default 20
     color?: WallColor;         // surface color, default 'Dark'
     designMonth?: number;      // 1=Jan … 12=Dec, default 7 (July)
+    decrementFactor?: number | null; // 0..1 assembly dynamic response; null/absent = light construction
   }
 ): number => {
   const dT = Math.max(0, deltaT);
@@ -74,6 +84,34 @@ export const getCLTD = (
   const lmCorr = lmRow ? lmRow[month - 1] : 0;
 
   cltd = cltd + tempCorr + colorCorr + lmCorr;
+
+  // 5. Mass damping (decrement factor)
+  //
+  // Everything above is the LIGHT-construction CLTD: it charges the surface the full
+  // sol-air peak. A heavy assembly flattens that wave — at the limit the room sees only
+  // the DAILY MEAN sol-air temperature, because the swing is absorbed and re-radiated
+  // hours later, out of phase with the cooling peak.
+  //
+  // So split the CLTD into the two limits and interpolate on the decrement factor f:
+  //
+  //   heavy limit : air term at the daily MEAN (deltaT − DR/2)
+  //                 + solar term at its 24-h mean (SOLAR_MEAN_FRACTION × peak)
+  //   light limit : the value computed above (f = 1 reproduces it exactly)
+  //
+  // Glass is excluded — it is thermally massless and driven by transmitted solar, which
+  // getSHGF handles separately. Partition and Floor already returned above; neither
+  // carries a solar term, so damping a swing they do not have would be meaningless.
+  // `typeof` guard, not `!= null` — switching an element back to a catalog type writes
+  // null here (Firestore rejects undefined), and `null >= 0` is true in JS, which would
+  // silently read as a fully damped assembly.
+  const f = options?.decrementFactor;
+  if (typeof f === 'number' && Number.isFinite(f) && f >= 0 && f < 1 && type !== 'Glass') {
+    // Solar-driven portion of the light CLTD: the +8 roof / orientation offset, plus the
+    // corrections that scale with absorbed radiation (color, latitude-month).
+    const solarPeak = cltd - dT - tempCorr;
+    const cltdHeavy = (dT - dr / 2) + SOLAR_MEAN_FRACTION * solarPeak + tempCorr;
+    cltd = cltdHeavy + f * (cltd - cltdHeavy);
+  }
 
   return Math.max(0, cltd);
 };
@@ -145,6 +183,10 @@ export const calculateSingleElementGain = (
       dailyRange:  design.dailyRange,
       color:       (element as any).color,
       designMonth: design.designMonth,
+      // Denormalised from the assigned U Builder assembly. Omitting it here silently
+      // reverted every heavy surface to the light-construction CLTD — the UI read-out
+      // damped correctly while the load behind it did not.
+      decrementFactor: element.decrementFactor,
     });
     const effectiveDeltaT = element.isOverride ? element.solarFactor : autoCLTD;
     const gain = element.uValue * element.area * effectiveDeltaT;

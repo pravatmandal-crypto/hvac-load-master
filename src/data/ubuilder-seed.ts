@@ -58,6 +58,12 @@ export interface UAssembly {
   description?: string;
   layers: AssemblyLayer[];
   groundParams?: GroundParams;
+  // Dynamic response — derived from the layers on save (see calcThermalDynamics).
+  // Optional so assemblies saved before this existed still load; consumers recompute
+  // from `layers` when absent.
+  arealMass?: number;       // kg/m²
+  decrementFactor?: number; // 0..1 — surviving amplitude of the daily sol-air swing
+  timeLagHours?: number;    // h
 }
 
 // ─── Surface Resistances (ISO 6946) ──────────────────────────────────────────
@@ -66,6 +72,29 @@ export const SURFACE_RESISTANCES = {
   roof:  { rsi: 0.10, rse: 0.04 }, // upward heat flow
   floor: { rsi: 0.17, rse: 0.04 }, // downward heat flow (ground floor)
 } as const;
+
+// Specific heat capacity by material category (J/kg·K) — ASHRAE HoF Ch.26 / EN ISO 10456.
+// Used with density and conductivity to derive thermal diffusivity α = λ/(ρ·c), which
+// sets how much of the daily sol-air swing survives an assembly (see calcThermalDynamics).
+// Category granularity is deliberate: c varies far less between building materials than
+// λ or ρ do, so per-material values would add bulk without changing the answer.
+export const DEFAULT_SPECIFIC_HEAT = 1000;
+
+export const SPECIFIC_HEAT_BY_CATEGORY: Record<string, number> = {
+  'Masonry': 840,
+  'Concrete': 880,
+  'Earth & Fill': 1200,
+  'Timber': 1600,
+  'Insulation — Rigid': 1400,
+  'Insulation — Batt': 1030,
+  'Gypsum Board': 1090,
+  'Plaster': 1000,
+  'Metal': 450,
+  'Roofing': 1000,
+  'Membrane': 1000,
+  'Flooring': 1200,
+  'Glazing': 750,
+};
 
 // ─── Materials Library ────────────────────────────────────────────────────────
 // Source: ASHRAE Handbook of Fundamentals 2021, Chapter 26

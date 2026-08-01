@@ -40,6 +40,7 @@ import {
   type RoomDetails,
   type EnvelopeElement,
 } from '../../lib/hvac';
+import { calcThermalDynamics } from '../../lib/ubuilder/calculations';
 import PsychrometricChart from './PsychrometricChart';
 
 type ElementType = 'Wall' | 'Glass' | 'Roof' | 'Floor' | 'Partition';
@@ -739,7 +740,7 @@ function BufferedNumberInput({
 
 // ─── Single room expanded detail ──────────────────────────────────────────────
 
-type CustomWallType = { id: string; displayId: string; name: string; uValue: number; wallCategory: string };
+type CustomWallType = { id: string; displayId: string; name: string; uValue: number; wallCategory: string; decrementFactor?: number; arealMass?: number };
 
 function RoomDetail({
   room, zoneId, systemId, elements, designConditions, project, equipSystems = [],
@@ -791,7 +792,36 @@ function RoomDetail({
     }
   }, [envelopeDraft, elements]);
   const isEnvelopeDirty = envelopeDraft !== null;
-  const liveElements: EnvelopeElement[] = (envelopeDraft ?? elements) as EnvelopeElement[];
+
+  // Elements assigned an assembly BEFORE decrementFactor existed carry only wallTypeId,
+  // so they would silently keep the light-construction CLTD until someone re-picked the
+  // assembly from the dropdown. Resolve it from wallTypeId instead of relying on the
+  // denormalised copy having been written.
+  const assemblyDynamics = useMemo(() => {
+    const m = new Map<string, { decrementFactor?: number; arealMass?: number }>();
+    for (const a of [...customWallTypes, ...customRoofTypes, ...customFloorTypes]) {
+      if (a.decrementFactor != null) m.set(a.id, { decrementFactor: a.decrementFactor, arealMass: a.arealMass });
+    }
+    return m;
+  }, [customWallTypes, customRoofTypes, customFloorTypes]);
+
+  const withAssemblyDynamics = useCallback((els: EnvelopeElement[]): EnvelopeElement[] => {
+    if (assemblyDynamics.size === 0) return els;
+    let changed = false;
+    const out = els.map(el => {
+      if (el.decrementFactor != null || !el.wallTypeId) return el;
+      const d = assemblyDynamics.get(el.wallTypeId);
+      if (!d) return el;
+      changed = true;
+      return { ...el, ...d };
+    });
+    return changed ? out : els; // keep referential identity when nothing was backfilled
+  }, [assemblyDynamics]);
+
+  const liveElements: EnvelopeElement[] = useMemo(
+    () => withAssemblyDynamics((envelopeDraft ?? elements) as EnvelopeElement[]),
+    [withAssemblyDynamics, envelopeDraft, elements],
+  );
 
   const monsoonDc = useMemo(() => getMonsoonDesignConditions(project, designConditions), [project, designConditions]);
   const hasMonsoon = !!(project?.includeMonsoon ?? project?.data?.includeMonsoon);
@@ -967,7 +997,9 @@ function RoomDetail({
 
   const handleDraftUpdate = (elId: string, data: Partial<EnvelopeElement>) => {
     setEnvelopeDraft(prev => {
-      const base = prev ?? (elements as EnvelopeElement[]);
+      // Seed from the backfilled set so a save persists the resolved decrementFactor
+      // rather than dropping it back to the bare Firestore element.
+      const base = prev ?? withAssemblyDynamics(elements as EnvelopeElement[]);
       return base.map(el => {
         if (el.id !== elId) return el;
         let merged = { ...el, ...data };
@@ -978,7 +1010,7 @@ function RoomDetail({
           if (merged.type === 'Glass') {
             merged = { ...merged, solarFactor: getSHGF(merged.orientation as any, altFt) };
           } else {
-            merged = { ...merged, solarFactor: getCLTD(merged.orientation as any, merged.type, dT, altFt, { indoorTemp: dc.indoorTemp ?? 75, outdoorMax: dc.outdoorTemp ?? 95, dailyRange: dc.dailyRange ?? 20, color: (merged.color ?? 'Dark') as WallColor, designMonth: dc.designMonth ?? 7 }) };
+            merged = { ...merged, solarFactor: getCLTD(merged.orientation as any, merged.type, dT, altFt, { indoorTemp: dc.indoorTemp ?? 75, outdoorMax: dc.outdoorTemp ?? 95, dailyRange: dc.dailyRange ?? 20, color: (merged.color ?? 'Dark') as WallColor, designMonth: dc.designMonth ?? 7, decrementFactor: (merged as any).decrementFactor }) };
           }
         }
         return merged;
@@ -1901,6 +1933,7 @@ function RoomDetail({
           dailyRange,
           color:       (el?.color ?? 'Dark') as WallColor,
           designMonth,
+          decrementFactor: el?.decrementFactor,
         });
         const wallEls      = liveElements.filter((el: any) => el.type === 'Wall' || el.type === 'Partition');
         const glassEls     = liveElements.filter((el: any) => el.type === 'Glass');
@@ -1932,7 +1965,14 @@ function RoomDetail({
                   value={el?.wallTypeId || 'w1'}
                   onValueChange={v => {
                     const w = WALL_TYPES.find(wt => wt.id === v) ?? customWallTypes.find(c => c.id === v);
-                    handleDraftUpdate(elId, { wallTypeId: v, ...(w ? { uValue: w.uValue } : {}) });
+                    // Denormalise the assembly's dynamic response onto the element. Catalog
+                    // types carry none, so this also clears a stale value on switch back.
+                    handleDraftUpdate(elId, {
+                      wallTypeId: v,
+                      ...(w ? { uValue: w.uValue } : {}),
+                      decrementFactor: (w as any)?.decrementFactor ?? null,
+                      arealMass: (w as any)?.arealMass ?? null,
+                    });
                   }}
                 >
                   <SelectTrigger className="h-7 text-xs min-w-max">
@@ -2194,7 +2234,12 @@ function RoomDetail({
                                     value={sid}
                                     onValueChange={v => {
                                       const t = stdTypes.find(x => x.id === v) ?? custTypes.find(x => x.id === v);
-                                      handleDraftUpdate(elId, { wallTypeId: v, ...(t ? { uValue: t.uValue } : {}) });
+                                      handleDraftUpdate(elId, {
+                                        wallTypeId: v,
+                                        ...(t ? { uValue: t.uValue } : {}),
+                                        decrementFactor: (t as any)?.decrementFactor ?? null,
+                                        arealMass: (t as any)?.arealMass ?? null,
+                                      });
                                     }}
                                   >
                                     <SelectTrigger className="h-7 text-xs min-w-max">
@@ -2888,7 +2933,7 @@ export default function RoomTable({
   }, []);
 
   // Custom wall assemblies from U Builder (Firestore: u_assemblies)
-  const [customAssemblies, setCustomAssemblies] = useState<Array<{ id: string; displayId: string; name: string; uValue: number; wallCategory: string }>>([]);
+  const [customAssemblies, setCustomAssemblies] = useState<Array<{ id: string; displayId: string; name: string; uValue: number; wallCategory: string; decrementFactor?: number; arealMass?: number }>>([]);
   useEffect(() => {
     if (!userId) return;
     const q = query(collection(db, 'u_assemblies'), where('userId', '==', userId));
@@ -2897,13 +2942,23 @@ export default function RoomTable({
         (a, b) => ((a.data().createdAt?.seconds ?? 0) - (b.data().createdAt?.seconds ?? 0)),
       );
       setCustomAssemblies(
-        sorted.map((d, i) => ({
-          id: d.id,
-          displayId: `sw${i + 1}`,
-          name: d.data().name as string,
-          uValue: (d.data().uValue as number) * SI_TO_IP,
-          wallCategory: d.data().wallCategory as string,
-        })),
+        sorted.map((d, i) => {
+          const a = d.data();
+          // Assemblies saved before the dynamic-response fields existed carry only
+          // `layers` — recompute rather than silently falling back to light construction.
+          const dyn = a.decrementFactor === undefined && Array.isArray(a.layers)
+            ? calcThermalDynamics(a.layers)
+            : { decrementFactor: a.decrementFactor as number | undefined, arealMass: a.arealMass as number | undefined };
+          return {
+            id: d.id,
+            displayId: `sw${i + 1}`,
+            name: a.name as string,
+            uValue: (a.uValue as number) * SI_TO_IP,
+            wallCategory: a.wallCategory as string,
+            decrementFactor: dyn.decrementFactor,
+            arealMass: dyn.arealMass,
+          };
+        }),
       );
     }, () => { /* ignore permission errors silently */ });
     return unsub;

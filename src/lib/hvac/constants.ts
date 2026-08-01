@@ -172,6 +172,11 @@ export interface EnvelopeElement {
   description?: string;
   isOverride?: boolean;
   color?: WallColor; // surface color for CLTD color correction
+  // Dynamic response of the assigned U Builder assembly, denormalised onto the element
+  // (like uValue) so the pure engine never needs a Firestore lookup. Absent = light
+  // construction, which is the historical CLTD behaviour. See getCLTD step 5.
+  decrementFactor?: number | null; // 0..1 — surviving amplitude of the daily sol-air swing
+  arealMass?: number | null;       // kg/m² — reporting only
 }
 
 export interface EnvelopeBreakdown {

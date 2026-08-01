@@ -2339,6 +2339,7 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
               dailyRange,
               color: elColor as any,
               designMonth,
+              decrementFactor: (data as any).decrementFactor ?? (currentEl as any).decrementFactor,
             }) };
           }
         }

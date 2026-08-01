@@ -3,7 +3,7 @@
 // Below-ground / earth-contact walls: ISO 13370 (depth-dependent, strip method for slopes)
 
 import type { AssemblyLayer, GroundParams, WallCategory } from '../../data/ubuilder-seed';
-import { SURFACE_RESISTANCES } from '../../data/ubuilder-seed';
+import { SURFACE_RESISTANCES, MATERIALS, SPECIFIC_HEAT_BY_CATEGORY, DEFAULT_SPECIFIC_HEAT } from '../../data/ubuilder-seed';
 
 export interface LayerResult {
   materialName: string;
@@ -30,6 +30,97 @@ export interface DepthStrip {
   stripHeight: number; // m
   uAtDepth: number; // W/m²K
   area: number; // m² (per unit width = 1m)
+}
+
+// ─── Dynamic thermal response (areal mass / decrement factor / time lag) ─────
+//
+// The CLTD method as tabulated assumes a roof or wall of light-to-medium mass: the
+// sol-air peak reaches the inside surface largely intact. A heavy assembly does not
+// behave that way. The daily temperature wave decays exponentially with depth and
+// arrives late, so what the room actually sees approaches the DAILY MEAN sol-air
+// temperature rather than its peak.
+//
+// For a sinusoidal daily cycle the amplitude surviving a layer of thickness t is
+// exp(−t/d), where d = sqrt(2α/ω) is the damping depth, α = λ/(ρ·c) the thermal
+// diffusivity and ω = 2π/86400 the diurnal angular frequency. Layers compound, so
+// the assembly decrement factor is exp(−Σ tᵢ/dᵢ) and the lag is Σ(tᵢ/dᵢ) in radians.
+//
+// This is what `getCLTD` needs to damp the solar term — without it a 885 kg/m²
+// earth-covered slab is charged the same CLTD as a bare metal deck. (Tezpur GURT:
+// roof CLTD 33.98 against a physically defensible ~15.)
+export interface ThermalDynamics {
+  arealMass: number;        // kg/m² — Σ(thickness × density)
+  decrementFactor: number;  // 0..1 — surviving amplitude of the daily sol-air swing (governing)
+  timeLagHours: number;     // h — delay of the peak at the inside face
+  waveDecrement: number;    // exp(−Σ tᵢ/dᵢ) alone, before the storage limit
+  massDecrement: number;    // storage limit alone
+}
+
+const OMEGA_DIURNAL = (2 * Math.PI) / 86400; // rad/s
+
+// Areal mass at which stored heat damps the daily swing to 1/e, kg/m². Calibrated so a
+// 150 mm dense concrete slab (375 kg/m²) returns ≈0.45, the ISO 13786 decrement factor
+// for that construction.
+const MASS_DAMPING_SCALE = 470;
+
+/** Density + specific heat for a layer, resolved from the material library. */
+const layerProps = (l: AssemblyLayer): { rho: number; c: number } => {
+  const m = MATERIALS.find((mat) => mat.id === l.materialId);
+  return {
+    rho: m?.density ?? 0,
+    c: (m && SPECIFIC_HEAT_BY_CATEGORY[m.category]) ?? DEFAULT_SPECIFIC_HEAT,
+  };
+};
+
+/**
+ * Diurnal dynamic response of a layered assembly.
+ *
+ * Layers with no density in the library (air gaps, membranes) contribute no mass and
+ * no damping — conservative, they are thermally thin anyway. An assembly with no
+ * usable data returns decrementFactor 1, i.e. the existing light-construction CLTD.
+ *
+ * TWO limits, and the LESS damped one governs:
+ *
+ *  • wave  — exp(−Σ tᵢ/dᵢ), the semi-infinite-solid attenuation above.
+ *  • mass  — exp(−arealMass/MASS_DAMPING_SCALE).
+ *
+ * The wave term alone over-damps low-density insulation. Rigid foam has a diffusivity
+ * close to concrete's (λ and ρc both fall together), so 100 mm of EPS scores f ≈ 0.59 —
+ * yet it stores almost nothing and cannot flatten a daily swing. Damping a wave requires
+ * somewhere to put the heat, so the storage term caps how far the wave term may go, and
+ * a metal-deck roof stays at its light-construction CLTD where it belongs.
+ *
+ * Erring toward the lesser damping keeps the error on the safe side: a slightly
+ * over-stated cooling load rather than an under-sized coil.
+ */
+export function calcThermalDynamics(layers: AssemblyLayer[]): ThermalDynamics {
+  let arealMass = 0;
+  let phase = 0; // Σ tᵢ/dᵢ  (radians)
+
+  for (const l of layers) {
+    const t = (l.thickness ?? 0) / 1000; // m
+    const { rho, c } = layerProps(l);
+    if (t <= 0 || rho <= 0 || !(l.lambda > 0)) continue;
+
+    arealMass += t * rho;
+    const alpha = l.lambda / (rho * c);              // m²/s
+    const d = Math.sqrt((2 * alpha) / OMEGA_DIURNAL); // m
+    if (d > 0) phase += t / d;
+  }
+
+  const waveDecrement = Math.exp(-phase);
+  const massDecrement = Math.exp(-arealMass / MASS_DAMPING_SCALE);
+  const governing = Math.max(waveDecrement, massDecrement);
+
+  return {
+    arealMass: parseFloat(arealMass.toFixed(1)),
+    decrementFactor: parseFloat(governing.toFixed(4)),
+    // Lag is reported from the wave term — it is a phase, not an amplitude, so the
+    // storage cap does not apply. Display only; the CLTD blend does not use it.
+    timeLagHours: parseFloat((phase * (24 / (2 * Math.PI))).toFixed(2)),
+    waveDecrement: parseFloat(waveDecrement.toFixed(4)),
+    massDecrement: parseFloat(massDecrement.toFixed(4)),
+  };
 }
 
 // ─── ISO 6946 — Above-Ground ─────────────────────────────────────────────────
