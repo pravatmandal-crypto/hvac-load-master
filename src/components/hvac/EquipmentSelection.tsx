@@ -6390,6 +6390,48 @@ export default function EquipmentSelection({
                                                   <span className="text-xs text-orange-400 dark:text-orange-500">rows</span>
                                                 </div>
                                               )}
+                                              {/* Heating duty. The coil-type dropdown only declares that a heating coil
+                                                  EXISTS; nothing stored a capacity, so the report's Heating Equipment
+                                                  Schedule had nothing to verify and every project read NOT SELECTED.
+                                                  Suggestion is the zone's own calculated winter duty (space + DOAS
+                                                  temper coil) from the persisted room fields — recompute the project
+                                                  first if it looks stale. */}
+                                              {!isDXCoil && ahuCfg.hasHeatingCoil && (() => {
+                                                const zoneWinterBTUH = (zone.roomIds ?? []).reduce((sum: number, id: string) => {
+                                                  const r: any = rooms.find((x: any) => x.id === id);
+                                                  return sum
+                                                    + (Number(r?._calcWinterHeatingBTUH) || 0)
+                                                    + (Number(r?._calcTfaWinterHeatingBTUH) || 0);
+                                                }, 0);
+                                                const suggestedKW = zoneWinterBTUH > 0 ? Math.ceil((zoneWinterBTUH / 3412) * 10) / 10 : 0;
+                                                const selectedKW = Number(ahuCfg.heatingCapacityKW) || 0;
+                                                const short = selectedKW > 0 && suggestedKW > 0 && selectedKW < suggestedKW;
+                                                return (
+                                                  <div className="flex items-center gap-2 flex-wrap">
+                                                    <span className="text-sm font-semibold uppercase tracking-wide text-orange-500 dark:text-orange-400 w-24 shrink-0">Heating Duty</span>
+                                                    <NumericInput min={0}
+                                                      value={ahuCfg.heatingCapacityKW ?? undefined}
+                                                      onChange={(n) => void updateAHUCfg({ heatingCapacityKW: n ?? undefined })}
+                                                      className="w-20 h-8 text-sm font-mono border border-slate-300 dark:border-slate-600 rounded px-1.5 bg-white dark:bg-slate-800 dark:text-slate-300 focus:outline-none focus:ring-1 focus:ring-orange-400"
+                                                      placeholder="kW" />
+                                                    <span className="text-xs text-orange-400 dark:text-orange-500">kW</span>
+                                                    {suggestedKW > 0 && (
+                                                      <button type="button"
+                                                        onClick={() => void updateAHUCfg({ heatingCapacityKW: suggestedKW })}
+                                                        title={`Zone winter duty ${Math.round(zoneWinterBTUH).toLocaleString()} BTU/h ÷ 3412`}
+                                                        className="text-xs px-2 py-1 rounded border border-orange-300 dark:border-orange-700 text-orange-600 dark:text-orange-400 hover:bg-orange-50 dark:hover:bg-orange-900/20 transition-colors">
+                                                        use required {suggestedKW} kW
+                                                      </button>
+                                                    )}
+                                                    {selectedKW === 0 && (
+                                                      <span className="text-xs text-red-500 dark:text-red-400 italic">not selected — schedule reports the gap</span>
+                                                    )}
+                                                    {short && (
+                                                      <span className="text-xs text-red-500 dark:text-red-400 italic">undersized vs {suggestedKW} kW required</span>
+                                                    )}
+                                                  </div>
+                                                );
+                                              })()}
                                             </div>
 
                                             {/* Row 5: Filtration */}

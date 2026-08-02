@@ -600,10 +600,10 @@ const resolveRoomDehumid = (
  * Heating provision for a zone/system entity: what the AHU is configured to carry, and any
  * capacity actually SELECTED for it.
  *
- * `hasHeatingCoil` is a configuration flag — it says a hot-water coil exists, not how big it
- * is, and nothing in the system document stores a HWC duty. Only an electric heater carries a
- * real number (`fahu.electricHeaterKW`). So `installedBtuh` is deliberately null for a bare
- * HWC: the schedule must read NOT SELECTED rather than infer a capacity that was never chosen.
+ * `hasHeatingCoil` is a configuration flag — it says a coil exists, not how big it is. The
+ * capacity comes from `ahuConfig.heatingCapacityKW` (the AHU Configuration "Heating Duty"
+ * field), or from `fahu.electricHeaterKW` on a VRF FAHU. When neither is set `installedBtuh`
+ * stays null and the schedule reads NOT SELECTED — never infer a duty that was never chosen.
  */
 const resolveHeatingPlant = (
   entityId: string,
@@ -617,12 +617,17 @@ const resolveHeatingPlant = (
     if (!zone && sys.id !== entityId) continue;
     const cfg: any  = { ...((sys as any).ahuConfig ?? {}), ...(zone?.ahuConfig ?? {}) };
     const fahu: any = zone?.fahu ?? (sys as any).fahu ?? {};
-    const kW = Number(fahu.electricHeaterKW) || 0;
-    const hasElec = !!fahu.hasElectricHeater && kW > 0;
+    const elecKW = Number(fahu.electricHeaterKW) || 0;
+    const hasElec = !!fahu.hasElectricHeater && elecKW > 0;
+    const coilKW = Number(cfg.heatingCapacityKW) || 0;
     const parts: string[] = [];
-    if (cfg.hasHeatingCoil) parts.push(`${cfg.heatingCoilRows ?? 2}-row HWC`);
-    if (hasElec) parts.push(`Electric ${kW} kW`);
-    return { coil: parts.length ? parts.join(' + ') : 'None', installedBtuh: hasElec ? kW * 3412 : null };
+    if (cfg.hasHeatingCoil) parts.push(`${cfg.heatingCoilRows ?? 2}-row HWC${coilKW > 0 ? ` ${coilKW} kW` : ''}`);
+    if (hasElec) parts.push(`Electric ${elecKW} kW`);
+    const totalKW = coilKW + (hasElec ? elecKW : 0);
+    return {
+      coil: parts.length ? parts.join(' + ') : 'None',
+      installedBtuh: totalKW > 0 ? totalKW * 3412 : null,
+    };
   }
   return { coil: 'None', installedBtuh: null };
 };

@@ -9,6 +9,13 @@ export interface AHUConfig {
   hasMixingBox: boolean;
   coolingCoilRows: 4 | 6 | 8;
   heatingCoilRows: 1 | 2;
+  /**
+   * Selected heating-coil duty in kW. `hasHeatingCoil` only says a coil EXISTS — it carries no
+   * capacity, so until this is set the Heating Equipment Schedule has nothing to verify against
+   * and reports NOT SELECTED. Left undefined rather than defaulted to 0 so "never chosen" stays
+   * distinguishable from "deliberately zero". (2026-08-02)
+   */
+  heatingCapacityKW?: number;
   filters: { pre: boolean; fine: boolean; hepa: boolean };
   preFilterGrade: string;
   fineFilterGrade: string;
