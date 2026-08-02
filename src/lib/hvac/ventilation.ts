@@ -75,9 +75,23 @@ export const calculateHeatingLoad = (
   const deltaT = Math.max(0, heatingIndoorTemp - heatingOutdoorTemp);
 
   // 1. Transmission Losses through envelope (simple steady-state U × A × ΔT — no CLTD for heating)
+  //
+  // Partitions and floors face a NEIGHBOURING space, not outdoors, and cooling already says so:
+  // getCLTD charges a partition 0.6 × ΔT and a floor 0.5 × ΔT, i.e. the far side sits partway
+  // between indoors and outdoors. Heating used the full ΔT for them, which asserts the opposite
+  // — that the same neighbouring space is at outdoor temperature. Both cannot be true, and the
+  // full-ΔT version silently inflates the winter load: on TEZPUR GURT's CO Room the partition
+  // and floor were 51 % of a 6,734 BTU/h transmission loss, and applying the cooling factors
+  // consistently drops that transmission ~22 %.
+  //
+  // Kept as the SAME fractions the cooling side uses, so the two seasons state one physical
+  // assumption rather than two. Walls, roof and glass keep the full ΔT — they do face outdoors.
+  // (2026-08-02)
+  const HEATING_NEIGHBOUR_FRACTION: Record<string, number> = { Partition: 0.6, Floor: 0.5 };
   let transmissionLoss = 0;
   elements.forEach((el) => {
-    transmissionLoss += el.uValue * el.area * deltaT;
+    const fraction = HEATING_NEIGHBOUR_FRACTION[el.type as string] ?? 1;
+    transmissionLoss += el.uValue * el.area * deltaT * fraction;
   });
 
   // 2. Ventilation / Infiltration Heating Load.

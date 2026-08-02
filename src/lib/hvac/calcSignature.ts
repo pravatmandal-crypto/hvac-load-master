@@ -46,7 +46,12 @@
 // coil never incurs. Neither margin is part of the fingerprint (heatingSafetyPercent /
 // heatingPickupPercent are not in roomSigParts), so without this bump the corrected values
 // would never be written and ES would keep serving the understated heating duty.
-export const CALC_VERSION = 4;
+// v5 (2026-08-02): partitions and floors now use the SAME reduced ΔT in heating that cooling
+// has always applied (0.6 / 0.5) instead of the full outdoor ΔT. They face a neighbouring
+// space, and charging them as if it were outdoors inflated every winter transmission loss —
+// 51 % of GURT CO Room's 6,734 BTU/h, ~22 % of the room's transmission. Landing this in the
+// same bump as v4's margin correction, since that recompute round has not been run yet.
+export const CALC_VERSION = 5;
 
 /** Short, stable djb2 hash → base36 string. Keeps the persisted fingerprint tiny. */
 function hashString(s: string): string {

@@ -2463,11 +2463,16 @@ export const generatePDFReport = (
     // sits on its own dedicated unit. Non-TFA zones print nothing (no change).
     if (entityHasTfa) {
       const doasList = (effectiveEquipSystems ?? []).filter((s: any) => s?.type === 'DOAS');
-      const chillerFed = entity.rooms.some((room: any) =>
-        doasList.some((d: any) =>
-          ((d.tfaCoolingSource ?? 'own-unit') === 'chiller-plant') &&
-          (((d.doasLinkedSystemIds ?? []).includes(room.systemId)) ||
-           ((d.doasLinkedZoneIds ?? []).includes(room.zoneId)))));
+      // Which unit serves the room comes from the SHARED resolver (room.tfaMode-driven), not
+      // from doasLinkedSystemIds / doasLinkedZoneIds. Those are the legacy linkage arrays and
+      // are empty on any project that assigns TFA per room — GURT among them — so this test
+      // always failed and the caption said "dedicated TFA unit" while the executive summary,
+      // which reads tfaCoolingSource directly, said "on main chiller plant". Same document,
+      // two answers, on the question of which machine the client is buying. (2026-08-02)
+      const chillerFed = entity.rooms.some((room: any) => {
+        const doas: any = resolveRoomTfa(room, effectiveEquipSystems).doas;
+        return !!doas && (doas.tfaCoolingSource ?? 'own-unit') === 'chiller-plant';
+      });
       const totalDuty = totGovTR + totTfaTR;
       const cap = chillerFed
         ? `Plant duty (TFA coil on main chiller): space ${n2(totGovTR)} TR + TFA coil ${n2(totTfaTR)} TR = ${n2(totalDuty)} TR`
@@ -2542,8 +2547,17 @@ export const generatePDFReport = (
               // Show both, and say which one governs. (2026-08-01)
               m.isTfaOnly ? `Fresh-air only  /  ${n0(m.tfaCfm || m.faCfm)} CFM`
                 : resolveRoomSupplyBasis(room.supplyCfmBasis, project?.supplyBasis) === 'ach'
-                ? `${n1(m.totalAch)} ACH = ${n0(m.totalSupplyCfm)} CFM floor  ·  design ${n0(m.designCfm)} CFM`
-                  + ` (${m.designCfm > m.totalSupplyCfm + 1 ? 'thermal governs' : 'air-change governs'})`
+                ? (() => {
+                    // The floor that applies to the SPACE unit is the air-change quantity LESS
+                    // the DOAS air, because the DOAS already delivers that share — which is what
+                    // resolveSupplyCfm actually compares against. Testing the full air-change
+                    // figure instead made Missile Testing print "air-change governs" beside a
+                    // design CFM of 4,881 against a stated 7,667 floor: a floor that governs
+                    // cannot be undercut, so the label contradicted its own number. (2026-08-02)
+                    const spaceFloor = m.totalSupplyCfm - (m.isTFA ? m.tfaCfm : 0);
+                    return `${n1(m.totalAch)} ACH = ${n0(spaceFloor)} CFM floor  ·  design ${n0(m.designCfm)} CFM`
+                      + ` (${m.designCfm > spaceFloor + 1 ? 'thermal governs' : 'air-change governs'})`;
+                  })()
                 : `Dehumidified (DSCFM)  /  ${n0(m.designCfm)} CFM`],
             // Latent shortfall row — only when the actual design supply air can't carry the latent
             // load at the selected ADP (latentShortfallCFM is sensible-based and false-alarms once
