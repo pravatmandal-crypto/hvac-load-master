@@ -243,28 +243,6 @@ function calcSuggestedHumidifier(zoneRooms: any[], project: any): HumidifierSizi
   };
 }
 
-/**
- * Winter humidification duty in BTU/h, matching reportService.computeDetailed's `humEnergyBTU`
- * exactly: 4.5 × OA CFM × ΔW × 1.10 × 1061.
- *
- * Deliberately uses the engine's fixed 1.10 margin, NOT the project's
- * `humidifierSafetyPercent` that calcSuggestedHumidifier applies to the kg/hr read-out —
- * those two numbers answer different questions, and this one has to reconcile with the
- * Heating Equipment Schedule to the BTU or the "use required N kW" button hands you a
- * capacity the schedule then calls Undersized.
- *
- * Returns 0 for rooms with no humidifier selected, mirroring the engine's
- * `includeHumidifier && humNeeded` gate.
- */
-function calcHumidifierEnergyBTUH(zoneRooms: any[], project: any): number {
-  const withHumidifier = (zoneRooms ?? []).filter((r: any) => Boolean(r?.includeHumidifier));
-  if (withHumidifier.length === 0) return 0;
-  const s = calcSuggestedHumidifier(withHumidifier, project);
-  if (!(s.oaCFM > 0) || !(s.deltaW_gPerKg > 0)) return 0;
-  const deltaWLb = s.deltaW_gPerKg / 1000;
-  return 4.5 * s.oaCFM * deltaWLb * 1.10 * 1061;
-}
-
 // Backwards-compatible wrapper returning just the kg/hr number
 function calcSuggestedHumidifierKgHr(zoneRooms: any[], project: any): number {
   return calcSuggestedHumidifier(zoneRooms, project).kgHr;
@@ -6489,10 +6467,11 @@ export default function EquipmentSelection({
                                                 const zoneRoomsForHeat = (zone.roomIds ?? [])
                                                   .map((id: string) => rooms.find((x: any) => x.id === id))
                                                   .filter(Boolean) as any[];
-                                                const zoneIsTfaServed = zoneRoomsForHeat.some((r: any) => (Number(r?._calcTfaWinterHeatingBTUH) || 0) > 0);
-                                                const zoneSpaceBTUH = zoneRoomsForHeat.reduce((sum: number, r: any) => sum + (Number(r?._calcWinterHeatingBTUH) || 0), 0);
-                                                const zoneHumBTUH = zoneIsTfaServed ? 0 : calcHumidifierEnergyBTUH(zoneRoomsForHeat, project);
-                                                const zoneWinterBTUH = zoneSpaceBTUH + zoneHumBTUH;
+                                                // Humidification is excluded, matching 3B's Required — it is a separate
+                                                // optional device, not part of the coil's duty. (If an adiabatic unit
+                                                // is selected its penalty does land on the coil; the schedule says so
+                                                // in a note rather than silently inflating this number.)
+                                                const zoneWinterBTUH = zoneRoomsForHeat.reduce((sum: number, r: any) => sum + (Number(r?._calcWinterHeatingBTUH) || 0), 0);
                                                 const suggestedKW = zoneWinterBTUH > 0 ? Math.ceil((zoneWinterBTUH / 3412) * 10) / 10 : 0;
                                                 const selectedKW = Number(ahuCfg.heatingCapacityKW) || 0;
                                                 const short = selectedKW > 0 && suggestedKW > 0 && selectedKW < suggestedKW;

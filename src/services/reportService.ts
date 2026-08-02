@@ -1582,6 +1582,40 @@ export const generatePDFReport = (
     : '—  (no equipment selected)';
   const totalPlantStr = computeTotalInstalledPlant(activeEquipSystems);
 
+  // ── Installed TFA/DOAS unit + the winter heating actually selected ────────────────────
+  // The summary quoted the REQUIRED TFA coil TR and nothing about heating, so a project
+  // could show a selected 50 TR / 4,000 CFM unit with a 21 kW coil and none of it appeared.
+  // These read the selections only — the required-vs-installed verdict is section 3B's job,
+  // and duplicating it here is how the two would drift apart.
+  const doasSystems = (effectiveEquipSystems ?? []).filter((s: any) => s?.type === 'DOAS');
+  const doasUnitStr = (() => {
+    const parts: string[] = [];
+    for (const s of doasSystems as any[]) {
+      const u = s.unitSelection;
+      if (!u) continue;
+      const bits = [`${n2(Number(u.trCapacity) || 0)} TR`];
+      if (Number(u.cfmRated) > 0) bits.push(`${n0(Number(u.cfmRated))} CFM`);
+      const kW = Number(s.heatingCapacityKW ?? u.heatingCapacityKW) || 0;
+      if (kW > 0) bits.push(`heating coil ${kW} kW`);
+      parts.push(`${u.brand ?? ''} ${u.modelSeries ?? ''}`.trim() + (bits.length ? `  ·  ${bits.join('  ·  ')}` : ''));
+    }
+    return parts.join('   |   ');
+  })();
+  const heatingProvisionStr = (() => {
+    const bits: string[] = [];
+    let totalKW = 0;
+    for (const s of (effectiveEquipSystems ?? []) as any[]) {
+      for (const z of (s.zones ?? []) as any[]) {
+        const kW = Number(z?.ahuConfig?.heatingCapacityKW) || 0;
+        if (kW > 0) { bits.push(`${z.name}: ${kW} kW`); totalKW += kW; }
+      }
+      const dKW = Number(s.heatingCapacityKW) || 0;
+      if (s.type === 'DOAS' && dKW > 0) { bits.push(`${s.name}: ${dKW} kW`); totalKW += dKW; }
+    }
+    if (totalKW <= 0) return '';
+    return `${bits.join('  ·  ')}  =  ${totalKW.toFixed(1)} kW  (${n0(totalKW * 3412)} BTU/h) — see 3B for fit`;
+  })();
+
   // Per-room governing TR, split so DIVERSITY applies to the INDOOR (space) load only.
   // The fresh-air / outdoor-air load is continuous — non-coincident-peak diversity does
   // not apply to it — so it is added back UN-diversified, together with any chiller-fed
@@ -1665,6 +1699,8 @@ export const generatePDFReport = (
           : `${n2(submissionBasisTR)} TR  and  ${n0(submissionCFMRounded)} CFM`],
       ...(hasTfa ? [['TFA / DOAS Coil Capacity', `${n2(projectTfaCoilTR)} TR  (outdoor-air coil, governing season)${chillerFedTfa ? ' — on main chiller plant' : ' — dedicated TFA unit'}`]] as [string,string][] : []),
       ...(hasTfa && projectTfaReheatBTUH > 0 ? [['TFA / DOAS Reheat Coil', `${n0(projectTfaReheatBTUH)} BTU/h  (${n2(projectTfaReheatBTUH / 12000)} TR · cool-to-ADP then reheat to supply temp)`]] as [string,string][] : []),
+      ...(doasUnitStr ? [['TFA / DOAS Unit Selected', doasUnitStr]] as [string,string][] : []),
+      ...(heatingProvisionStr ? [['Winter Heating Provision', heatingProvisionStr]] as [string,string][] : []),
       ['Total Installed IDU / FCU Capacity', totalIDUStr],
       ['Total Installed Plant / ODU Capacity', totalPlantStr],
       // Diversity line is the installed IDU / Plant ratio (Pravat 2026-06-11). Falls back
@@ -2080,7 +2116,14 @@ export const generatePDFReport = (
       }
       const plant = resolveHeatingPlant(entity.id, entity.rooms.map((r: any) => r.id), effectiveEquipSystems);
       const tfa = 0; // scheduled against the DOAS below, never against the recirc AHU
-      const required = space + hum;
+      // Humidification is EXCLUDED from Required. It is a separate, optional device with its
+      // own selection (kg/hr and type), the report's own design basis for this project is 'no
+      // humidifier — space settles at ~47% RH', and a steam unit is a separate electrical load
+      // that never touches the coil. Folding it in failed a correctly-sized coil: the TFA at
+      // 21 kW covers its 71,116 BTU/h temper duty exactly and was reported Undersized against
+      // 80,537. Shown as a column so the duty is still visible, with the adiabatic caveat in
+      // the note below.
+      const required = space;
       const status = plant.installedBtuh == null
         ? 'NOT SELECTED'
         : plant.installedBtuh >= required * FIT_TOL ? 'OK' : 'Undersized';
@@ -2126,7 +2169,7 @@ export const generatePDFReport = (
         const installed = kW > 0 ? kW * 3412 : null;
         // Fresh-air humidification is this unit's duty too — it conditions the OA.
         const dHum = agg.hum;
-        const dReq = duty + dHum;
+        const dReq = duty;
         const status = installed == null ? 'NOT SELECTED' : installed >= dReq * FIT_TOL ? 'OK' : 'Undersized';
         if (status !== 'OK') anyMissing = true;
         // A DOAS heats OUTDOOR air, so its supply starts from the winter outdoor design temp —
@@ -2150,7 +2193,7 @@ export const generatePDFReport = (
     }
 
     if (hBody.length > 0) {
-      const pReq = pSpace + pTfa + pHum;
+      const pReq = pSpace + pTfa;
       hBody.push([
         { content: 'PROJECT TOTAL', styles: { fontStyle: 'bold' as const } },
         { content: n0(pSpace), styles: { fontStyle: 'bold' as const, halign: 'right' as const } },
@@ -2170,7 +2213,7 @@ export const generatePDFReport = (
       doc.setFontSize(7);
       doc.setTextColor(120, 120, 120);
       doc.text(
-        'Space + humidification are the recirculating AHU’s duty; the fresh-air temper coil belongs to the DOAS and is scheduled on its own row. Supply °F is what that duty implies on that coil’s own airflow — AHU from the room setpoint, DOAS from outdoor design; above ~110 °F means the duty is on the wrong machine or the airflow is too small. Installed is shown only where a capacity has actually been selected.',
+        'Space heating is the recirculating AHU’s duty; the fresh-air temper coil belongs to the DOAS and is scheduled on its own row. Supply °F is what that duty implies on that coil’s own airflow — AHU from the room setpoint, DOAS from outdoor design; above ~110 °F means the duty is on the wrong machine or the airflow is too small. Humidification is shown for information and is NOT included in Required: it is a separate optional device — but if an adiabatic (evaporative / ultrasonic) humidifier is selected, add its figure to that machine’s coil, since the coil must offset the evaporative cooling. Steam / isothermal units are a separate electrical load. Installed is shown only where a capacity has actually been selected.',
         PAGE.left, y,
       );
       doc.setFont('helvetica', 'normal');
