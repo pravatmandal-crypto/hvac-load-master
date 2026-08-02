@@ -81,6 +81,13 @@ export interface SingleUnitSelection {
   staticPressurePa?: number;
   quantity?: number;
   isCustom?: boolean;
+  /**
+   * Winter heating-coil duty selected with this unit, kW. DOAS units only — a DOAS is sized
+   * on cooling TR but also carries the fresh-air temper coil, and selecting one on cooling
+   * alone left the Heating Equipment Schedule reporting NOT SELECTED. Promoted onto the
+   * system document by selectUnit, which is where the schedule reads it.
+   */
+  heatingCapacityKW?: number;
 }
 
 export interface EquipmentZone {

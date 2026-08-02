@@ -1073,12 +1073,16 @@ function generateEquipmentSpecs(
 
 function UnitPickerDialog({
   open, onClose, systemType, packageSubType, requiredTR, designCFM, customItems = [],
-  systemName, onSaveToLibrary, onSelect,
+  systemName, onSaveToLibrary, onSelect, requiredHeatingBTUH = 0,
 }: {
   open: boolean; onClose: () => void;
   systemType: 'Package' | 'DuctableSplit' | 'AHU' | 'Chiller' | 'Split' | 'DOAS';
   packageSubType?: string;
   requiredTR: number; designCFM: number;
+  /** Winter heating duty this unit must also carry (BTU/h) — for a DOAS, the fresh-air
+   *  temper coil. Shown alongside TR/CFM and pre-filled into the generated spec, so a unit
+   *  is never selected against its cooling duty alone. */
+  requiredHeatingBTUH?: number;
   customItems?: EquipmentModel[];
   systemName?: string;
   onSelect: (sel: SingleUnitSelection) => void;
@@ -1153,6 +1157,9 @@ function UnitPickerDialog({
               <span className="text-violet-700 dark:text-violet-300">Required: <strong>{requiredTR.toFixed(2)} TR</strong></span>
               {!isChiller && designCFM > 0 && <span className="text-violet-700 dark:text-violet-300">Design CFM: <strong>{Math.round(designCFM).toLocaleString()}</strong></span>}
               {isChiller && <span className="text-slate-400 dark:text-slate-500 italic">Select chiller ≥ {requiredTR.toFixed(2)} TR</span>}
+              {requiredHeatingBTUH > 0 && (
+                <span className="text-sky-700 dark:text-sky-300">Heating: <strong>{Math.round(requiredHeatingBTUH).toLocaleString()} BTU/h</strong> ({(requiredHeatingBTUH / 3412).toFixed(1)} kW)</span>
+              )}
             </div>
           )}
           <div className="mt-2 flex gap-2">
@@ -1180,7 +1187,7 @@ function UnitPickerDialog({
               <p className="text-xs text-amber-800 dark:text-amber-300">No {isDOAS ? 'TFA/DOAS' : systemType} unit in catalog meets <strong>{requiredTR.toFixed(1)} TR</strong> requirement.</p>
             </div>
             <Button size="sm" className="h-8 text-sm shrink-0 bg-amber-600 hover:bg-amber-700 gap-1"
-              onClick={() => { setGenSpec(generateEquipmentSpecs(systemType, requiredTR, designCFM, systemName)); setShowGenerate(true); }}>
+              onClick={() => { setGenSpec({ ...generateEquipmentSpecs(systemType, requiredTR, designCFM, systemName), ...(requiredHeatingBTUH > 0 ? { heatingCapacityKW: Math.ceil((requiredHeatingBTUH / 3412) * 10) / 10 } : {}) } as any); setShowGenerate(true); }}>
               <Plus className="w-3 h-3" /> Generate Equipment
             </Button>
           </div>
@@ -1237,6 +1244,17 @@ function UnitPickerDialog({
                 <label className="text-xs text-slate-500 dark:text-slate-400">Power (kW)</label>
                 <NumericInput className="h-8 text-sm" min={0} value={genSpec.powerInputKW ?? undefined} onChange={(n) => setGenSpec(s => ({ ...s, powerInputKW: n }))} />
               </div>
+              {/* Heating coil — a DOAS is sized on cooling TR, but it also carries the winter
+                  fresh-air temper duty. Pre-filled from the calculated requirement so the unit
+                  is never generated against its cooling load alone. */}
+              {requiredHeatingBTUH > 0 && (
+                <div className="flex flex-col gap-0.5">
+                  <label className="text-xs text-sky-600 dark:text-sky-400">Heating Coil (kW)</label>
+                  <NumericInput className="h-8 text-sm" min={0}
+                    value={(genSpec as any).heatingCapacityKW ?? undefined}
+                    onChange={(n) => setGenSpec(s => ({ ...s, heatingCapacityKW: n } as any))} />
+                </div>
+              )}
             </div>
 
             <div className="flex gap-2 pt-1">
@@ -1252,6 +1270,7 @@ function UnitPickerDialog({
                         trCapacity: Number(genSpec.capacityTR) || 0, cfmRated: Number(genSpec.ratedAirflowCFM) || 0,
                         ...(genSpec.subType ? { subType: genSpec.subType } : {}),
                         ...((genSpec as any).staticPressurePa ? { staticPressurePa: (genSpec as any).staticPressurePa } : {}),
+...((genSpec as any).heatingCapacityKW ? { heatingCapacityKW: Number((genSpec as any).heatingCapacityKW) } : {}),
                       };
                       onSelect(sel); onClose();
                     } finally { setGenSaving(false); }
@@ -1267,6 +1286,7 @@ function UnitPickerDialog({
                     trCapacity: Number(genSpec.capacityTR) || 0, cfmRated: Number(genSpec.ratedAirflowCFM) || 0,
                     ...(genSpec.subType ? { subType: genSpec.subType } : {}),
                     ...((genSpec as any).staticPressurePa ? { staticPressurePa: (genSpec as any).staticPressurePa } : {}),
+...((genSpec as any).heatingCapacityKW ? { heatingCapacityKW: Number((genSpec as any).heatingCapacityKW) } : {}),
                   };
                   onSelect(sel); onClose();
                 }}>
@@ -3593,7 +3613,13 @@ export default function EquipmentSelection({
 
   const selectUnit = async (systemId: string, sel: SingleUnitSelection) => {
     const stored: SingleUnitSelection = unitQuantity > 1 ? { ...sel, quantity: unitQuantity } : sel;
-    await updateSystemField(systemId, { unitSelection: stored });
+    // A heating coil chosen with the unit is a property of the SYSTEM, not of the model
+    // record — that is where the Heating Equipment Schedule reads it from. Promote it so
+    // picking a unit with a coil doesn't leave the schedule still saying NOT SELECTED.
+    await updateSystemField(systemId, {
+      unitSelection: stored,
+      ...(Number(sel.heatingCapacityKW) > 0 ? { heatingCapacityKW: Number(sel.heatingCapacityKW) } : {}),
+    });
     const sys = equipSystems.find(s => s.id === systemId);
     void saveEquipmentEntry(`${systemId}-unit`, {
       systemId, systemName: sys?.name ?? '',
@@ -8398,6 +8424,9 @@ export default function EquipmentSelection({
               : (unitQuantity > 1 ? totalRequiredTR / unitQuantity : totalRequiredTR)
           }
           designCFM={selectedSystem.type === 'DOAS' ? doasOACFM : (unitQuantity > 1 ? totalDesignCFM / unitQuantity : totalDesignCFM)}
+          // Only a DOAS carries a fresh-air temper coil; an AHU/chiller picked here is a
+          // cooling machine and its heating coil is configured on the zone instead.
+          requiredHeatingBTUH={selectedSystem.type === 'DOAS' ? doasTfaWinterHeatingBTUH : 0}
           customItems={customEquipment}
           systemName={selectedSystem.name}
           onSaveToLibrary={async (item) => { await saveCustomEquipment_item(item); }}
