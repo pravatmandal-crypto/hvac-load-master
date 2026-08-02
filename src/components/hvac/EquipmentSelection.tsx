@@ -5490,6 +5490,22 @@ export default function EquipmentSelection({
                                 }}
                                 className="mt-1 w-full text-sm border border-slate-200 dark:border-slate-600 rounded-md px-2 py-1.5 bg-white dark:bg-slate-800 dark:text-slate-200 font-mono focus:outline-none focus:ring-1 focus:ring-teal-400"
                               />
+                              {doasTfaWinterHeatingBTUH > 0 && (() => {
+                                const reqKW = Math.ceil((doasTfaWinterHeatingBTUH / 3412) * 10) / 10;
+                                const sel = Number((selectedSystem as any).heatingCapacityKW) || 0;
+                                return (
+                                  <span className="mt-1 flex items-center gap-2 flex-wrap">
+                                    <button type="button"
+                                      onClick={() => void updateSystemField(selectedSystem.id, { heatingCapacityKW: reqKW })}
+                                      title={`Fresh-air temper duty ${Math.round(doasTfaWinterHeatingBTUH).toLocaleString()} BTU/h ÷ 3412`}
+                                      className="text-xs px-2 py-0.5 rounded border border-teal-300 dark:border-teal-700 text-teal-600 dark:text-teal-400 hover:bg-teal-50 dark:hover:bg-teal-900/20 transition-colors">
+                                      use required {reqKW} kW
+                                    </button>
+                                    {sel === 0 && <span className="text-xs text-red-500 dark:text-red-400 italic">not selected</span>}
+                                    {sel > 0 && sel < reqKW && <span className="text-xs text-red-500 dark:text-red-400 italic">undersized</span>}
+                                  </span>
+                                );
+                              })()}
                             </label>
                             <label className="block">
                               <span className="text-xs font-medium text-slate-500 dark:text-slate-400 inline-flex items-center gap-1">
@@ -6434,11 +6450,14 @@ export default function EquipmentSelection({
                                                   temper coil) from the persisted room fields — recompute the project
                                                   first if it looks stale. */}
                                               {!isDXCoil && ahuCfg.hasHeatingCoil && (() => {
+                                                // SPACE heating only — transmission + infiltration, which is all a
+                                                // recirculating AHU is responsible for. The fresh-air temper duty
+                                                // (_calcTfaWinterHeatingBTUH) belongs to the DOAS and has its own
+                                                // field on that unit; including it here suggested 60 kW for GURT
+                                                // Complex A against the 39 kW its AHU actually carries.
                                                 const zoneWinterBTUH = (zone.roomIds ?? []).reduce((sum: number, id: string) => {
                                                   const r: any = rooms.find((x: any) => x.id === id);
-                                                  return sum
-                                                    + (Number(r?._calcWinterHeatingBTUH) || 0)
-                                                    + (Number(r?._calcTfaWinterHeatingBTUH) || 0);
+                                                  return sum + (Number(r?._calcWinterHeatingBTUH) || 0);
                                                 }, 0);
                                                 const suggestedKW = zoneWinterBTUH > 0 ? Math.ceil((zoneWinterBTUH / 3412) * 10) / 10 : 0;
                                                 const selectedKW = Number(ahuCfg.heatingCapacityKW) || 0;
