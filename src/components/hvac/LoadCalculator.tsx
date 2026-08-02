@@ -47,6 +47,8 @@ import {
   TFA_SUPPLY_DEFAULTS,
   computeRoomInputSig,
   computeRoomLoad,
+  designHeatingLoadFrom,
+  tfaWinterHeatingFrom,
   type RoomDetails,
 } from '../../lib/hvac';
 import { EnvelopeElement, ACTIVITY_TYPES, ACTIVITY_ACH_RECOMMENDATIONS } from '../../lib/hvac/constants';
@@ -640,11 +642,7 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
     // field while the report recomputes live, so the two disagreed on GURT by 38,352 BTU/h
     // (168,093 vs 206,445). Must stay identical to reportService.computeDetailed's
     // `designHeatingLoad`. (2026-08-02)
-    const heatingSafetyPct = Number(roomSource?.heatingSafetyPercent ?? 10);
-    const heatingPickupPct = Number(roomSource?.heatingPickupPercent ?? 15);
-    const winterHeatingBTUH = parseFloat(
-      ((heating.totalHeatingLoad || 0) * (1 + heatingSafetyPct / 100) * (1 + heatingPickupPct / 100)).toFixed(0),
-    );
+    const winterHeatingBTUH = parseFloat(designHeatingLoadFrom(heating.totalHeatingLoad, roomSource).toFixed(0));
     // Phase D: tfa-only rooms contribute zero to the primary coil; the room sensible is
     // carried by the TFA supply air's reserve (1.08 × CFM × ΔT). Engine warns when the
     // carrying capacity is short of ersh — designer bumps CFM or supply temp.
@@ -834,7 +832,7 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
       // on the space side. Was `overallSafetyPct` (the COOLING margin), which was simply the
       // wrong factor, exactly as on _calcWinterHeatingBTUH above.
       _calcTfaWinterHeatingBTUH: isTFA && tfa
-        ? parseFloat(((tfa.winterCoilSensible || 0) * (1 + heatingSafetyPct / 100)).toFixed(0))
+        ? parseFloat(tfaWinterHeatingFrom(tfa.winterCoilSensible || 0, roomSource).toFixed(0))
         : deleteField(),
       // TFA/DOAS summer reheat coil — cools OA to its apparatus dew point (to dry it
       // to supply W) then sensibly reheats to the supply temp. Season-independent
@@ -869,7 +867,7 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
               _calcTfaOnly: !!isTfaOnly,
               _calcTfaCoilBTUH: isTFA && tfa ? parseFloat((tfa.coilSensible + tfa.coilLatent).toFixed(0)) : undefined,
               _calcMonsoonTfaCoilBTUH: isTFA && monsoonTfa ? parseFloat((monsoonTfa.coilSensible + monsoonTfa.coilLatent).toFixed(0)) : undefined,
-              _calcTfaWinterHeatingBTUH: isTFA && tfa ? parseFloat(((tfa.winterCoilSensible || 0) * (1 + overallSafetyPct / 100)).toFixed(0)) : undefined,
+              _calcTfaWinterHeatingBTUH: isTFA && tfa ? parseFloat(tfaWinterHeatingFrom(tfa.winterCoilSensible || 0, roomSource).toFixed(0)) : undefined,
               totalLoadBTUH: grandTotal,
               totalLoadTR: grandTotalTR,
               dehumidifiedCFM: coil.dehumidifiedCFM,
@@ -1039,8 +1037,8 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
           summerSanityCfm += summerSnapshot.minAdpSensibleCFM;
         }
         {
-          const heatingSF = Number(room.overallSafetyPercent ?? room.grandTotalSafetyFactor ?? 3);
-          totalHeating += heatingSnapshot.heating.totalHeatingLoad * (1 + heatingSF / 100);
+          // Heating margin comes from the shared helper — the summary card, the zone strips,
+          totalHeating += designHeatingLoadFrom(heatingSnapshot.heating.totalHeatingLoad, room);
         }
         totalArea += summerSnapshot.area;
         // Phase D — split TFA-side numbers out.

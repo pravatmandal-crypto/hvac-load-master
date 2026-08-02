@@ -4,22 +4,14 @@ import { useDroppable } from '@dnd-kit/core';
 import RoomTable from './RoomTable';
 import { toast } from 'sonner';
 import {
-  calculateRoomVolume,
+  computeRoomLoad,
+  designHeatingLoadFrom,
+  tfaWinterHeatingFrom,
   calculateEnvelopeGain,
   calculateInternalGains,
   calculateVentilationLoad,
-  calculateTFALoad,
-  resolveRoomTfa,
-  calculateCoilParameters,
-  effectiveRoomLoadsForAdp,
   calculateParasiticGains,
-  calculateHeatingLoad,
   calculateReheat,
-  getRecommendedAch,
-  resolveSupplyCfm,
-  resolveRoomSupplyBasis,
-  resolveTotalSupplyACH,
-  getMinAdp,
   type DesignConditions,
   type RoomDetails,
   type EnvelopeElement,
@@ -80,135 +72,46 @@ function computeZoneTotals(
 
   for (const room of zoneRooms) {
     try {
-      const rd: RoomDetails = {
-        id: room.id,
-        name: room.name ?? '',
-        floor: room.floor ?? 'Ground',
-        length: Number(room.length) || 0,
-        width: Number(room.width) || 0,
-        height: Number(room.height) || 0,
-        hasFalseCeiling: room.hasFalseCeiling ?? false,
-        falseCeilingHeight: Number(room.falseCeilingHeight) || 8,
-        facph: Number(room.facph) || 0,
-        peopleCount: Number(room.peopleCount) || 0,
-        activityType: room.activityType ?? 'office',
-        lightsWattsPerSqft: Number(room.lightsWattsPerSqft) || 0,
-        equipmentKW: Number(room.equipmentKW) || 0,
-        othersKW: Number(room.othersKW) || 0,
-      };
-
       const elements = (envelopeElements[room.id] || []) as EnvelopeElement[];
+      // Delegate to the SHARED engine. This block used to re-implement computeRoomLoad
+      // verbatim — envelope → internal → vent → TFA credit → coil → design CFM — and so it
+      // silently missed every physics fix landed there. Most recently the DOAS-over-dried ADP
+      // float: the duplicate solved the coil at dc.indoorHumidity (design RH), so the zone
+      // strip printed GURT Zone A at 8,247 CFM while the project-summary card on the SAME
+      // SCREEN showed a total consistent with 5,970. Change the physics in computeRoomLoad,
+      // never here. (2026-08-02)
+      const s = computeRoomLoad(room, elements, dc, {
+        equipSystems,
+        project: {
+          systemType: isChiller ? 'chiller' : 'vrf',
+          adpBasis,
+          supplyBasis: projectSupplyBasis,
+        },
+      });
 
-      // TFA-aware design conditions — when this room is DOAS-served, the OA goes to
-      // the TFA unit (zeroed on the primary) and the cold-DOAS supply credits the
-      // space coil. Mirrors the persist path + LC project summary exactly.
-      const { doas, mode: effectiveMode } = resolveRoomTfa(room, equipSystems);
-      const isTFA = !!doas;
-      const isTfaOnly = effectiveMode === 'tfa-only';
-      const dcEff: any = isTFA
-        ? {
-            ...dc,
-            ventilationStrategy: 'tfa-cold',
-            tfaSupplyTemp: doas.tfaSupplyTemp,
-            tfaSupplyHumidity: doas.tfaSupplyHumidity,
-            ervSensibleEffectiveness: doas.ervSensibleEffectiveness,
-            ervLatentEffectiveness: doas.ervLatentEffectiveness,
-            tfaWinterSupplyTemp: doas.tfaWinterSupplyTemp,
-          }
-        : dc;
-
-      const envelope = calculateEnvelopeGain(elements, dcEff);
-      const internal = calculateInternalGains(rd);
-      const vent = calculateVentilationLoad(rd, dcEff);
-      const heating = calculateHeatingLoad(rd, elements, dcEff);
-      const tfa = isTFA ? calculateTFALoad(rd, dcEff) : null;
-
-      const erVentSen = isTFA ? 0 : vent.sensible * BF;
-      const erVentLat = isTFA ? 0 : vent.latent * BF;
-      const erSensible = envelope.sensible + internal.sensible + erVentSen;
-      const erLatent = internal.latent + erVentLat;
-      const ductPct = Number(room.ductGainPct) || 2;
-      const fanPct = Number(room.fanGainPct) || 3;
-      const sensibleSafetyPct = Number(room.sensibleSafetyPercent ?? room.sensibleSafetyFactor ?? 10);
-      const latentSafetyPct = Number(room.latentSafetyPercent ?? room.latentSafetyFactor ?? 5);
-      const overallSafetyPct = Number(room.overallSafetyPercent ?? room.grandTotalSafetyFactor ?? 3);
-      const parasitic = calculateParasiticGains(erSensible, erSensible, ductPct, fanPct);
-
-      const ersh = (erSensible + parasitic.ductGain + parasitic.fanGain) * (1 + sensibleSafetyPct / 100);
-      const erlh = erLatent * (1 + latentSafetyPct / 100);
-      // Reheat: same room-SHF basis as the room-detail box (calculateReheat(ersh, erlh)).
-      // tfa-only rooms have no own space coil to reheat, so they don't contribute.
-      if (!isTfaOnly) {
-        const reheat = calculateReheat(ersh, erlh);
+      if (isFinite(s.grandTotal)) totalCooling += s.grandTotal;
+      totalTfaCoil += s.tfaCoilSensible + s.tfaCoilLatent;
+      totalTfaWinterHeating += tfaWinterHeatingFrom(s.tfa?.winterCoilSensible ?? 0, room);
+      const roomHeating = designHeatingLoadFrom(s.heating.totalHeatingLoad, room);
+      if (isFinite(roomHeating)) totalHeating += roomHeating;
+      if (isFinite(s.coil.dehumidifiedCFM)) totalDehumCfm += s.coil.dehumidifiedCFM;
+      if (isFinite(s.vent.cfm)) totalOaCfm += s.vent.cfm;
+      if (isFinite(s.totalSupplyCfm)) totalSupplyCfm += s.totalSupplyCfm;
+      // Space design airflow + the sanity ratio EXCLUDE TFA-only rooms: no space coil
+      // (0 TR), fed entirely by the DOAS — their air-change CFM isn't space-AHU airflow.
+      if (!s.isTfaOnly && isFinite(s.designCfm)) totalDesignCfm += s.designCfm;
+      if (!s.isTfaOnly && isFinite(s.coil.minAdpSensibleCFM)) totalMinAdpCfm += s.coil.minAdpSensibleCFM;
+      // Reheat: same room-SHF basis as the room-detail box. tfa-only rooms have no own
+      // space coil to reheat, so they don't contribute.
+      if (!s.isTfaOnly) {
+        const reheat = calculateReheat(s.ersh, s.erlh);
         if (reheat.needed && isFinite(reheat.reheatBTU) && reheat.reheatBTU > 0) {
           totalReheatBTU += reheat.reheatBTU;
           reheatRoomCount++;
         }
       }
-      const oaSensible = isTFA ? 0 : vent.sensible * (1 - BF);
-      const oaLatent = isTFA ? 0 : vent.latent * (1 - BF);
-      const tfaOffSen = tfa ? tfa.spaceSensibleOffset : 0;
-      const tfaOffLat = tfa ? tfa.spaceLatentOffset : 0;
-      const coilSensible = isTfaOnly ? 0 : (isTFA ? Math.max(0, ersh - tfaOffSen) : ersh + oaSensible);
-      const coilLatent = isTfaOnly ? 0 : (isTFA ? Math.max(0, erlh - tfaOffLat) : erlh + oaLatent);
-      if (tfa) totalTfaCoil += tfa.coilSensible + tfa.coilLatent;
-      if (tfa) totalTfaWinterHeating += (tfa.winterCoilSensible || 0) * (1 + overallSafetyPct / 100);
-      // Pass derived system type to centralized helper. Preserves the previous
-      // 44/42 split for chiller vs VRF; non-chiller types now use the canonical
-      // 42°F per getMinAdp (matches old isChiller=false behavior).
-      const minAdp = getMinAdp(isChiller ? 'chiller' : 'vrf', adpBasis);
-      // ADP from effective ROOM loads, not the coil totals (see effectiveRoomLoadsForAdp).
-      const adpLoads = effectiveRoomLoadsForAdp(ersh, erlh, { isTFA, isTfaOnly, tfaOffSen, tfaOffLat });
-      const coil = calculateCoilParameters(
-        adpLoads.adpSensible,
-        adpLoads.adpLatent,
-        dc.indoorTemp,
-        dc.indoorHumidity,
-        dc.altitude || 0,
-        BF,
-        35,
-        65,
-        minAdp,
-      );
-      const grandTotal = coilSensible + coilLatent;
-
-      const presetTotalACH = getRecommendedAch(room.achProfile ?? room.activityType);
-      const effectiveTotalACH = resolveTotalSupplyACH(presetTotalACH, rd.facph, Number(room.recircPct) || 0);
-      const totalSupplyCFM = (calculateRoomVolume(rd) * effectiveTotalACH) / 60;
-      const freshAirCFM = (calculateRoomVolume(rd) * rd.facph) / 60;
-      // Supply-air basis: 'dscfm' (DEFAULT, dehumidified-air) vs 'ach' (legacy ACH-preset).
-      // DSCFM is the default — only an explicit 'ach' opts out. The DOAS is independent — it
-      // always sizes off the OA FACPH. See lib/hvac/supplyCfm.
-      const designCFM = resolveSupplyCfm({
-        basis: resolveRoomSupplyBasis(room.supplyCfmBasis, projectSupplyBasis),
-        isTFA, isTfaOnly,
-        dehumidifiedCFM: coil.dehumidifiedCFM,
-        minAdpSensibleCFM: coil.minAdpSensibleCFM,
-        totalSupplyCFM, freshAirCFM,
-        tfaCfm: tfa?.cfm ?? 0,
-      }).designSupplyCFM;
-
-      // Per-room required TR: load TR × (1 + overall safety %). Plant TR is LOAD-ONLY
-      // (2026-05-20 decision, confirmed) — CFM/TR is a sanity ratio, never a governor.
-      // Same formula as EquipmentSelection.computeRoomReqs so LC zone-strip and SD agree.
-      const roomLoadTR = grandTotal / 12000;
-      const roomRequiredTR = roomLoadTR * (1 + overallSafetyPct / 100);
-
-      if (isFinite(grandTotal)) totalCooling += grandTotal;
-      // Apply overall safety to heating — mirrors the per-room persisted
-      // _calcWinterHeatingBTUH and the LC project-summary card, so the zone /
-      // system strips reconcile with the project Heating Load total.
-      const roomHeating = heating.totalHeatingLoad * (1 + overallSafetyPct / 100);
-      if (isFinite(roomHeating)) totalHeating += roomHeating;
-      if (isFinite(coil.dehumidifiedCFM)) totalDehumCfm += coil.dehumidifiedCFM;
-      if (isFinite(vent.cfm)) totalOaCfm += vent.cfm;
-      if (isFinite(totalSupplyCFM)) totalSupplyCfm += totalSupplyCFM;
-      // Space design airflow + the sanity ratio EXCLUDE TFA-only rooms: no space coil
-      // (0 TR), fed entirely by the DOAS — their air-change CFM isn't space-AHU airflow.
-      if (!isTfaOnly && isFinite(designCFM)) totalDesignCfm += designCFM;
-      if (!isTfaOnly && isFinite(coil.minAdpSensibleCFM)) totalMinAdpCfm += coil.minAdpSensibleCFM;
-      if (isFinite(roomRequiredTR)) totalRequiredTR += roomRequiredTR;
-      totalArea += rd.length * rd.width;
+      if (isFinite(s.requiredTr)) totalRequiredTR += s.requiredTr;
+      totalArea += s.area;
     } catch {
       // skip room if calculation fails — don't crash the whole component
     }

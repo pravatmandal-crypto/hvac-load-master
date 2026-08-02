@@ -33,6 +33,30 @@ const asNum = (v: any, fb: number) => { const n = Number(v); return Number.isFin
 /** Bypass factor used across the whole engine (Carrier coil BF). */
 export const ROOM_LOAD_BF = 0.15;
 
+/**
+ * Winter design heating load from the raw total: heating safety margin, then the warm-up /
+ * pickup allowance on the subtotal.
+ *
+ * Centralised because it had drifted into four different formulas across the app — the PDF on
+ * 1.10 × 1.15 = 1.265 while the persisted field, the zone strip and the project-summary card
+ * all used `overallSafetyPct` (the COOLING margin, 1.03). Every non-PDF surface was therefore
+ * 18.6 % low and they disagreed with the report and each other. Heating has its own factor
+ * stack; never reach for the cooling margin here. (2026-08-02)
+ */
+export const designHeatingLoadFrom = (rawTotal: number, room: any): number =>
+  (Number(rawTotal) || 0)
+  * (1 + Number(room?.heatingSafetyPercent ?? 10) / 100)
+  * (1 + Number(room?.heatingPickupPercent ?? 15) / 100);
+
+/**
+ * TFA/DOAS fresh-air winter heating coil: heating SAFETY only, no warm-up allowance.
+ * Pickup brings a cold BUILDING up after setback; a DOAS coil tempering outdoor air runs
+ * continuously and never has cold structure to recover, so charging it the space allowance
+ * would inflate a duty that cannot occur.
+ */
+export const tfaWinterHeatingFrom = (rawTotal: number, room: any): number =>
+  (Number(rawTotal) || 0) * (1 + Number(room?.heatingSafetyPercent ?? 10) / 100);
+
 /** Relative humidity (%) from dry-bulb + humidity ratio — inverse of calculatePsychrometrics. */
 const rhFromHumidityRatio = (tempF: number, W: number, altitude: number): number => {
   const P = 14.696 * Math.pow(1 - 6.8754e-6 * altitude, 5.2559);
