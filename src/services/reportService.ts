@@ -1512,9 +1512,13 @@ export const generatePDFReport = (
   y += 2;
 
   // Compute project totals per season
+  // entityId -> governing TR in each COOLING season, banked while the season totals are being
+  // computed so the per-zone peak below costs no extra passes over the rooms.
+  const entitySeasonTr = new Map<string, number[]>();
   const projectSeasonTotals = seasons.map((season) => {
     let cooling = 0; let reqTr = 0; let cfm = 0; let heating = 0; let tfaCoil = 0;
     entities.forEach((entity) => {
+      let entityTr = 0;
       const dc = resolveEntityDC(entity, season, project);
       entity.rooms.forEach((room) => {
         const m = computeDetailed(room, envelopeElements[room.id] || [], dc, project);
@@ -1526,7 +1530,13 @@ export const generatePDFReport = (
         if (!m.isTfaOnly) cfm += m.designCfm;
         heating  += m.designHeatingLoad;
         tfaCoil  += m.tfaCoilSensible + m.tfaCoilLatent; // TFA/DOAS coil duty
+        entityTr += m.requiredTr;
       });
+      if (season.key !== 'winter') {
+        const arr = entitySeasonTr.get(entity.id) ?? [];
+        arr.push(entityTr);
+        entitySeasonTr.set(entity.id, arr);
+      }
     });
     const loadTr = cooling / 12000;
     const cfmTr  = cfm / 400;
@@ -1554,14 +1564,29 @@ export const generatePDFReport = (
 
   const coolingSeasonsOnly = projectSeasonTotals.filter(s => s.key !== 'winter');
   const peakSeason = coolingSeasonsOnly.reduce((a, b) => b.governingTr > a.governingTr ? b : a);
+
+  // ── The two totals the report has to keep straight ────────────────────────────────────
+  // They answer different questions and R2 printed both, unlabelled, in adjacent sections —
+  // 24.28 in the executive summary against 25.59 in Equipment Fit, on the same project.
+  //
+  //   BLOCK LOAD   peakSeason.governingTr — every zone at the SAME moment. Lower whenever
+  //                zones peak in different seasons, and correct for a shared plant.
+  //   ZONE PEAKS   Σ over zones of that zone's OWN worst season. What each zone's equipment
+  //                must actually cover, and what the Equipment Fit table verifies against.
+  //
+  // Plant sizing quotes ZONE PEAKS: an AHU that only meets the block load is undersized for
+  // its own zone in the season that zone peaks. The block load is still printed, labelled,
+  // because the gap between them IS the inter-zone diversity and is worth stating.
+  const entityPeakSumTR = [...entitySeasonTr.values()]
+    .reduce((sum, perSeason) => sum + (perSeason.length ? Math.max(...perSeason) : 0), 0);
+  const blockLoadTR = peakSeason.governingTr;
+  const seasonalDiversityTR = entityPeakSumTR - blockLoadTR;
   const recTR  = peakSeason.governingTr;
   // Plant duty = SIMULTANEOUS peak of (space + chiller-fed TFA) in the same season —
   // not the sum of peaks from different seasons. When TFA is on its own unit, the
   // plant is the space coil only and the TFA is reported separately.
-  const plantSeasonPeak = coolingSeasonsOnly.reduce((a, b) =>
-    ((b.loadTr + (chillerFedTfa ? b.tfaCoilTr : 0)) > (a.loadTr + (chillerFedTfa ? a.tfaCoilTr : 0))) ? b : a);
-  // CFM must come from the same peak cooling season — winter CFM is inflated by heating ventilation loads
-  const recCFM = peakSeason.cfm;
+  // (The old simultaneous-peak `plantSeasonPeak` is gone — the summary now states the block
+  //  load and the sum of zone peaks explicitly, so a third derived figure served no purpose.)
   // Submission airflow = PEAK design CFM across cooling seasons (summer + monsoon).
   // Design airflow can peak in a different season than plant TR (e.g. summer airflow
   // exceeds monsoon airflow even when monsoon governs TR), so ductwork / AHU must be
@@ -1664,14 +1689,19 @@ export const generatePDFReport = (
   const plantDiversityStr = formatPlantDiversityCheck(activeEquipSystems, flatRoomDocs, roomChillerTfaTR);
   // Single diversity-applied plant-required figure used by BOTH the submission basis
   // and the diversity line, so they always agree (indoor×df + OA/fresh air).
-  const plantRequiredTR = computePlantRequiredTR(activeEquipSystems, flatRoomDocs, roomIndoorTR, roomNonDiverseTR, roomChillerTfaTR);
+  // computePlantRequiredTR is no longer called here — the summary quotes the sum of zone
+  // peaks instead. It stays exported for the regression net, which asserts it directly.
   // Submission basis reflects what's actually being INSTALLED: working plant TR (144,
   // not the 135.54 load figure) and the design airflow rounded up to a clean hundred for
   // submission (41,958 -> 42,000). Falls back to the load figure if no plant is selected.
   const installedWorkingPlantTR = computeInstalledWorkingPlantTR(activeEquipSystems);
+  // Falls back to the LOAD figure when no plant is selected — and that fallback is now the
+  // sum of zone peaks, the same basis the Plant Sizing row and Equipment Fit quote, rather
+  // than the block load. A submission basis that only meets the block load leaves each zone
+  // short in the season it actually peaks.
   const submissionBasisTR = installedWorkingPlantTR > 0
     ? installedWorkingPlantTR
-    : (plantRequiredTR > 0 ? plantRequiredTR : recTR);
+    : (entityPeakSumTR > 0 ? entityPeakSumTR : recTR);
   const submissionCFMRounded = Math.ceil(submissionCFM / 100) * 100;
   // CFM basis: the space/recirc AHU design airflow plus the separate DOAS fresh-air branch,
   // totalled so the client sees the full supply air (space + TFA = total), not just the
@@ -1692,9 +1722,23 @@ export const generatePDFReport = (
       // double-count here.
       ['Total Zones',                      n0(entities.length)],
       ['Total Rooms',                      n0(allRooms.length)],
-      ['Peak Governing Season',            chillerFedTfa
-        ? `${plantSeasonPeak.season}  (${n2(plantRequiredTR)} TR plant, diversity applied  ·  ${n0(totalSupplyCFM)} CFM total)`
-        : `${peakSeason.season}  (${n2(peakSeason.loadTr)} TR space  ·  ${n0(recCFM)} CFM)`],
+      // Plant sizing quotes the sum of each zone's OWN worst season — the figure the
+      // Equipment Fit table verifies against. Previously this line read "N TR plant,
+      // diversity applied" where N was built from INSTALLED IDU capacity plus the TFA coil:
+      // a selection figure wearing a load figure's label, and a third number again.
+      ['Plant Sizing Basis (space coils)',
+        `${n2(entityPeakSumTR)} TR  —  sum of each zone at its own worst season`
+        + (chillerFedTfa && projectTfaCoilTR > 0
+            ? `  ·  + TFA coil ${n2(projectTfaCoilTR)} TR on the same plant = ${n2(entityPeakSumTR + projectTfaCoilTR)} TR`
+            : '')],
+      // The block load is the honest smaller number — every zone at the SAME moment. Printed
+      // alongside, explicitly labelled, because the gap between the two IS the inter-zone
+      // diversity, and burying it is what made the two figures look like a contradiction.
+      ['Block Load (all zones, same moment)',
+        `${n2(blockLoadTR)} TR  in ${peakSeason.season}`
+        + (seasonalDiversityTR > 0.01
+            ? `  ·  ${n2(seasonalDiversityTR)} TR below the sum of zone peaks — zones peak in different seasons. Size a SHARED plant on this; size each zone's own equipment on its own peak.`
+            : '  ·  all zones peak in the same season, so this equals the sum of zone peaks')],
       ['Recommended Submission Basis',     chillerFedTfa
         ? `Space + TFA coil on one plant:  ${n2(submissionBasisTR)} TR (installed)  ·  ${submissionCFMStr}`
         : hasTfa
@@ -2462,7 +2506,6 @@ export const generatePDFReport = (
     // main chiller plant, the two add into one plant duty; otherwise the TFA coil
     // sits on its own dedicated unit. Non-TFA zones print nothing (no change).
     if (entityHasTfa) {
-      const doasList = (effectiveEquipSystems ?? []).filter((s: any) => s?.type === 'DOAS');
       // Which unit serves the room comes from the SHARED resolver (room.tfaMode-driven), not
       // from doasLinkedSystemIds / doasLinkedZoneIds. Those are the legacy linkage arrays and
       // are empty on any project that assigns TFA per room — GURT among them — so this test
