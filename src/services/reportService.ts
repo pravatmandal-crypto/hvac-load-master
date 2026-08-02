@@ -2800,20 +2800,18 @@ export const generatePDFReport = (
           // ACH airflow — misleading next to "0.00 TR". The actual DOAS supply is the TFA Airflow
           // row below, so drop this row for them.
           ...(m.isTfaOnly ? [] : [['Design CFM', `${n0(m.designCfm)} CFM`]]),
-          // CFM/TR sanity ratio — carried into the PDF because it is the check that catches a
-          // mis-sized airflow at a glance (R0 shipped at 266 CFM/TR, well below the band, and
-          // nothing in the document said so). Meaningful only on a mixed-air coil: a DOAS-served
-          // room runs near-sensible (RSHF ~0.99) where the band does not apply. (2026-08-01)
+          // CFM/TR sanity ratio — the FIGURE only, no verdict.
+          //
+          // The band commentary ("above typical 350–450 — check supply air temperature") was
+          // written as an internal check and does not belong in a client submission: it reads
+          // as the engine flagging its own output, invites a query on a number that is correct,
+          // and the band does not even apply to a DOAS-served room. The ratio itself is worth
+          // printing — it is what catches a mis-sized airflow at a glance (R0 shipped at 266
+          // CFM/TR and nothing said so) — so the number stays and the reader draws their own
+          // conclusion. The band check still runs in the app, where the engineer sees it and
+          // the client does not. (Pravat, 2026-08-02)
           ...(!m.isTfaOnly && m.requiredTr > 0
-            ? [(() => {
-                const ratio = m.designCfm / m.requiredTr;
-                const verdict = m.isTFA
-                  ? 'DOAS-served — 350–450 band does not apply'
-                  : ratio < 350 ? 'below typical 350–450 — check supply air temperature'
-                  : ratio > 450 ? 'above typical 350–450 — check supply air temperature'
-                  : 'within typical 350–450';
-                return ['CFM / TR', `${n0(ratio)} CFM/TR  (${verdict})`];
-              })()]
+            ? [['CFM / TR', `${n0(m.designCfm / m.requiredTr)} CFM/TR`]]
             : []),
           ['Governing TR',  `${n2(m.requiredTr)} TR`],
           // TFA-only rooms are fed only FACFM, so they float off design — show the ACTUAL
