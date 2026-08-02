@@ -71,6 +71,8 @@ interface Project {
   reportRev?: number;
   /** Engineer-controlled report date as 'YYYY-MM-DD'; falls back to today when unset. */
   reportDate?: string;
+  /** Free-text client rules / agreed deviations, printed in the report executive summary. */
+  specialConditions?: string;
   includeMonsoon: boolean;
   includeWinter: boolean;
   // Outside
@@ -198,6 +200,10 @@ function mapProjectDoc(d: any): Project {
     reportId: p.reportId ?? data.reportId,
     reportRev: p.reportRev ?? data.reportRev,
     reportDate: p.reportDate ?? data.reportDate,
+    // mapProjectDoc is an explicit allow-list — a field missing here is silently dropped
+    // between Firestore and the app, which reads to the user as "it did not save" even
+    // though the write succeeded. Add new project fields HERE as well as to the writer.
+    specialConditions: p.specialConditions ?? data.specialConditions,
     includeMonsoon: p.includeMonsoon ?? false,
     includeWinter: p.includeWinter ?? true,
     summerDesignTemp: data.summerDesignTemp ?? 95,
