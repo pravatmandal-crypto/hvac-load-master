@@ -2036,7 +2036,8 @@ export const generatePDFReport = (
     let anyMissing = false;
     // roomId → BTU/h of DOAS fresh-air temper duty, banked while walking the zones and
     // re-grouped by serving DOAS unit below.
-    const tfaHeatByRoom = new Map<string, { room: any; duty: number }>();
+    const tfaHeatByRoom = new Map<string, { room: any; duty: number; cfm: number }>();
+    const winterOutdoorForSupply = winter ? asNum((winter as any).outdoorTemp, 40) : null;
 
     for (const entity of entities) {
       if (entity.rooms.length === 0) continue;
@@ -2045,13 +2046,27 @@ export const generatePDFReport = (
       const winDc = winter ? resolveEntityDC(entity, winter, effProject) : null;
       if (!winDc) continue;
 
-      let space = 0, hum = 0;
+      // Governing (worst-season) design airflow — the constant-volume air the AHU moves in
+      // winter too. Needed to turn the duty into a supply temperature.
+      const sumDcE = resolveEntityDC(entity, summer, effProject);
+      const monDcE = monsoon ? resolveEntityDC(entity, monsoon, effProject) : null;
+
+      let space = 0, hum = 0, govCfm = 0;
       for (const room of entity.rooms) {
-        const wm = computeDetailed(room, envelopeElements[room.id] || [], winDc, effProject);
+        const els = envelopeElements[room.id] || [];
+        const wm = computeDetailed(room, els, winDc, effProject);
         space += wm.designHeatingLoad;
         hum   += wm.hHumLoad;
+        const sm = computeDetailed(room, els, sumDcE, effProject);
+        // tfa-only rooms have no space AHU — their air is all DOAS, so they contribute no
+        // recirc airflow to heat.
+        if (!sm.isTfaOnly) {
+          govCfm += monDcE
+            ? Math.max(sm.designCfm, computeDetailed(room, els, monDcE, effProject).designCfm)
+            : sm.designCfm;
+        }
         const t = Number((room as any)._calcTfaWinterHeatingBTUH) || 0;
-        if (t > 0) tfaHeatByRoom.set(room.id, { room, duty: t });
+        if (t > 0) tfaHeatByRoom.set(room.id, { room, duty: t, cfm: sm.tfaCfm });
       }
       const plant = resolveHeatingPlant(entity.id, entity.rooms.map((r: any) => r.id), effectiveEquipSystems);
       const tfa = 0; // scheduled against the DOAS below, never against the recirc AHU
@@ -2061,12 +2076,19 @@ export const generatePDFReport = (
         : plant.installedBtuh >= required ? 'OK' : 'Undersized';
       if (status !== 'OK') anyMissing = true;
 
+      // Supply temperature the duty implies on this coil's OWN airflow. A recirc AHU heats
+      // ROOM air, so it starts at the winter indoor setpoint. This is what catches a bad
+      // split: 204,607 BTU/h forced onto Complex A's 3,991 CFM DOAS reads 119 °F here, where
+      // the BTU/h figure alone looks unremarkable.
+      const supplyF = govCfm > 0 ? winDc.indoorTemp + required / (1.08 * govCfm) : null;
+
       hBody.push([
         entity.name,
         n0(space),
         tfa > 0 ? n0(tfa) : '—',
         hum > 0 ? n0(hum) : '—',
         n0(required),
+        supplyF == null ? '—' : supplyF.toFixed(0),
         plant.coil,
         plant.installedBtuh == null ? '—' : n0(plant.installedBtuh),
         status,
@@ -2079,25 +2101,32 @@ export const generatePDFReport = (
     // more than one DOAS gets one row each rather than a single lumped figure.
     if (tfaHeatByRoom.size > 0) {
       const doasList = (effectiveEquipSystems ?? []).filter((s: any) => s?.type === 'DOAS');
-      const byDoas = new Map<string, number>();
-      for (const { room, duty } of tfaHeatByRoom.values()) {
+      const byDoas = new Map<string, { duty: number; cfm: number }>();
+      for (const { room, duty, cfm } of tfaHeatByRoom.values()) {
         const doas = resolveRoomTfa(room, effectiveEquipSystems).doas;
         const key = doas?.id ?? '__unassigned__';
-        byDoas.set(key, (byDoas.get(key) ?? 0) + duty);
+        const prev = byDoas.get(key) ?? { duty: 0, cfm: 0 };
+        byDoas.set(key, { duty: prev.duty + duty, cfm: prev.cfm + (Number(cfm) || 0) });
       }
-      for (const [doasId, duty] of byDoas) {
+      for (const [doasId, agg] of byDoas) {
+        const duty = agg.duty;
         const sys: any = doasList.find((s: any) => s.id === doasId);
         // A DOAS carries its heating duty on its own document, not on any zone's ahuConfig.
         const kW = Number(sys?.ahuConfig?.heatingCapacityKW ?? sys?.heatingCapacityKW) || 0;
         const installed = kW > 0 ? kW * 3412 : null;
         const status = installed == null ? 'NOT SELECTED' : installed >= duty ? 'OK' : 'Undersized';
         if (status !== 'OK') anyMissing = true;
+        // A DOAS heats OUTDOOR air, so its supply starts from the winter outdoor design temp —
+        // not the room setpoint the recirc AHU starts from.
+        const winOut = winterOutdoorForSupply;
+        const doasSupplyF = agg.cfm > 0 && winOut != null ? winOut + duty / (1.08 * agg.cfm) : null;
         hBody.push([
           `${sys?.name ?? 'DOAS / TFA unit'}  (fresh-air coil)`,
           '—',
           n0(duty),
           '—',
           n0(duty),
+          doasSupplyF == null ? '—' : doasSupplyF.toFixed(0),
           kW > 0 ? `Fresh-air heating coil ${kW} kW` : 'Fresh-air heating coil',
           installed == null ? '—' : n0(installed),
           status,
@@ -2114,6 +2143,7 @@ export const generatePDFReport = (
         { content: pTfa > 0 ? n0(pTfa) : '—', styles: { fontStyle: 'bold' as const, halign: 'right' as const } },
         { content: pHum > 0 ? n0(pHum) : '—', styles: { fontStyle: 'bold' as const, halign: 'right' as const } },
         { content: n0(pReq), styles: { fontStyle: 'bold' as const, halign: 'right' as const } },
+        { content: '', styles: { fontStyle: 'bold' as const } },  // supply °F — per-coil only, never a total
         { content: '', styles: { fontStyle: 'bold' as const } },
         { content: pInst > 0 ? n0(pInst) : '—', styles: { fontStyle: 'bold' as const, halign: 'right' as const } },
         { content: '', styles: { fontStyle: 'bold' as const } },
@@ -2126,7 +2156,7 @@ export const generatePDFReport = (
       doc.setFontSize(7);
       doc.setTextColor(120, 120, 120);
       doc.text(
-        'Required = space heating + DOAS fresh-air temper coil + humidification, at winter design. Installed is shown only where a capacity has actually been selected.',
+        'Space + humidification are the recirculating AHU’s duty; the fresh-air temper coil belongs to the DOAS and is scheduled on its own row. Supply °F is what that duty implies on that coil’s own airflow — AHU from the room setpoint, DOAS from outdoor design; above ~110 °F means the duty is on the wrong machine or the airflow is too small. Installed is shown only where a capacity has actually been selected.',
         PAGE.left, y,
       );
       doc.setFont('helvetica', 'normal');
@@ -2134,23 +2164,32 @@ export const generatePDFReport = (
 
       autoTable(doc, {
         startY: y,
-        head: [['Entity / Zone', 'Space BTU/h', 'TFA BTU/h', 'Humid. BTU/h', 'Required BTU/h', 'Heating Provision', 'Installed BTU/h', 'Status']],
+        head: [['Entity / Zone', 'Space BTU/h', 'TFA BTU/h', 'Humid. BTU/h', 'Required BTU/h', 'Supply °F', 'Heating Provision', 'Installed BTU/h', 'Status']],
         body: hBody,
         theme: 'grid',
         styles: { fontSize: 7, cellPadding: 1.5, textColor: C.ink },
         headStyles: { fillColor: C.accent, textColor: C.headFg, fontStyle: 'bold' },
+        // Rebudgeted to the 186 mm usable width (210 A4 − 2 × 12 margin). The 8-column
+        // version summed to 192 and autoTable was quietly squeezing it.
         columnStyles: {
-          0: { cellWidth: 34 },
-          1: { halign: 'right' as const, cellWidth: 21 },
-          2: { halign: 'right' as const, cellWidth: 19 },
-          3: { halign: 'right' as const, cellWidth: 21 },
-          4: { halign: 'right' as const, cellWidth: 24 },
-          5: { cellWidth: 28 },
-          6: { halign: 'right' as const, cellWidth: 23 },
-          7: { halign: 'center' as const, cellWidth: 22 },
+          0: { cellWidth: 36 },
+          1: { halign: 'right' as const, cellWidth: 19 },
+          2: { halign: 'right' as const, cellWidth: 17 },
+          3: { halign: 'right' as const, cellWidth: 17 },
+          4: { halign: 'right' as const, cellWidth: 21 },
+          5: { halign: 'right' as const, cellWidth: 16 },
+          6: { cellWidth: 24 },
+          7: { halign: 'right' as const, cellWidth: 19 },
+          8: { halign: 'center' as const, cellWidth: 17 },
         },
         didParseCell: (data: any) => {
-          if (data.section === 'body' && data.column.index === 7) {
+          if (data.section === 'body' && data.column.index === 5) {
+            // A coil asked to deliver much above ~110 °F is a design smell, not a rounding
+            // issue — it means the duty is on the wrong machine or the airflow is too small.
+            const v = Number(String(data.cell.raw ?? '').replace(/[^0-9.]/g, ''));
+            if (Number.isFinite(v) && v > 110) data.cell.styles.textColor = [180, 50, 50] as [number,number,number];
+          }
+          if (data.section === 'body' && data.column.index === 8) {
             const s = String(data.cell.raw ?? '');
             if (s === 'OK')                data.cell.styles.textColor = [20, 130, 70]  as [number,number,number];
             else if (s === 'NOT SELECTED') data.cell.styles.textColor = [180, 50, 50]  as [number,number,number];
