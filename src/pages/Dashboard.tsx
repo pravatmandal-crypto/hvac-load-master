@@ -102,13 +102,12 @@ export default function Dashboard({ currentUser, onProjectOpen, onPageChange, on
   };
 
   useEffect(() => {
+    // No orderBy — Firestore drops documents missing the ordered field, which hid projects
+    // written without an updatedAt from the list entirely. Sorted in memory below instead.
+    // (Same fix as LoadCalculatorPage, 2026-08-02.)
     const q = userRole === 'Super'
-      ? query(collection(db, 'projects'), orderBy('updatedAt', 'desc'))
-      : query(
-          collection(db, 'projects'),
-          where('userId', '==', currentUser.uid),
-          orderBy('updatedAt', 'desc'),
-        );
+      ? query(collection(db, 'projects'))
+      : query(collection(db, 'projects'), where('userId', '==', currentUser.uid));
     const unsub = onSnapshot(q, (snap) => {
       setProjects(
         snap.docs.map((d) => {
@@ -126,7 +125,7 @@ export default function Dashboard({ currentUser, onProjectOpen, onPageChange, on
             winterDesignHumidity: data.winterDesignHumidity,
             updatedAt: p.updatedAt?.toDate ? p.updatedAt.toDate() : new Date(),
           };
-        }),
+        }).sort((a, b) => (b.updatedAt?.getTime?.() ?? 0) - (a.updatedAt?.getTime?.() ?? 0)),
       );
     }, (err) => {
       console.error('[Dashboard] load error:', err);

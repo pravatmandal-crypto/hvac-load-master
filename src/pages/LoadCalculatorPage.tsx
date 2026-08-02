@@ -318,10 +318,16 @@ export default function LoadCalculatorPage({ currentUser, initialProjectId, user
       [...list].sort((a, b) => (b.updatedAt?.getTime?.() ?? 0) - (a.updatedAt?.getTime?.() ?? 0));
 
     // Super sees every project.
+    //
+    // No orderBy. Firestore silently DROPS documents that lack the ordered field, so a project
+    // written without an updatedAt became invisible in the app while still sitting in the
+    // database — three of them were, and they could not be opened or deleted because nothing
+    // ever listed them. The list said 12, the collection held 15. Sorting in memory also
+    // matches the repo guidance on avoiding composite indexes. (2026-08-02)
     if (userRole === 'Super') {
       const unsub = onSnapshot(
-        query(collection(db, 'projects'), orderBy('updatedAt', 'desc')),
-        (snap) => setProjects(snap.docs.map(mapProjectDoc)),
+        collection(db, 'projects'),
+        (snap) => setProjects(sortByUpdated(snap.docs.map(mapProjectDoc))),
         onErr,
       );
       return () => unsub();
@@ -337,7 +343,8 @@ export default function LoadCalculatorPage({ currentUser, initialProjectId, user
       setProjects(sortByUpdated([...byId.values()]));
     };
     const unsubOwn = onSnapshot(
-      query(collection(db, 'projects'), where('userId', '==', uid), orderBy('updatedAt', 'desc')),
+      // Same reasoning as the Super listener — no orderBy; merge() sorts.
+      query(collection(db, 'projects'), where('userId', '==', uid)),
       (snap) => { own = snap.docs.map(mapProjectDoc); merge(); },
       onErr,
     );
