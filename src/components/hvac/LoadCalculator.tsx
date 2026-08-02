@@ -50,7 +50,7 @@ import {
   type RoomDetails,
 } from '../../lib/hvac';
 import { EnvelopeElement, ACTIVITY_TYPES, ACTIVITY_ACH_RECOMMENDATIONS } from '../../lib/hvac/constants';
-import { backfillElementsByRoom } from '../../lib/ubuilder/assemblyDynamics';
+import { backfillElements, backfillElementsByRoom } from '../../lib/ubuilder/assemblyDynamics';
 import { useAssemblyDynamics } from '../../lib/ubuilder/useAssemblyDynamics';
 
 
@@ -575,7 +575,42 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
       ...(Number(roomSource.slabFFactor) > 0 ? { slabFFactor: Number(roomSource.slabFFactor) } : {}),
     };
 
-    const elements = (elementsOverride ?? envelopeElements[roomId] ?? []) as EnvelopeElement[];
+    // ── Never persist a zero envelope just because the elements have not arrived ──
+    //
+    // Envelope subcollections are fetched in the BACKGROUND after the room list renders
+    // (see the loader below: "the structure UI doesn't need envelope data to render").
+    // Every caller of this function passes `envelopeElements[roomId] ?? []`, so a recompute
+    // that fires while those fetches are still in flight — Recompute-and-save-all, the
+    // auto-recompute on a design-condition change, the stale-signature sweep — computes the
+    // room with NO envelope and writes that to Firestore. Equipment Selection, PDF and Excel
+    // read the persisted values, so the room silently loses its entire wall/roof/glass gain.
+    //
+    // It is invisible after the fact: `computeRoomInputSig` deliberately excludes elements,
+    // so the damaged snapshot still matches its fingerprint and no staleness banner appears.
+    // Observed live on 2026-08-02 — GURT saved at 03:25 with envelope.sensible = 0 across all
+    // nine rooms, then correctly at 03:34 once the fetches had landed; 84 of 210 rooms
+    // app-wide were sitting in the zeroed state.
+    //
+    // An empty list is therefore treated as UNPROVEN, not as "no envelope": re-read the
+    // subcollection and only accept empty if Firestore agrees. Costs one extra read on a
+    // genuinely element-free room; every mutation path awaits its write before calling here,
+    // so the re-read reflects the change that triggered it.
+    let elements = (elementsOverride ?? envelopeElements[roomId] ?? []) as EnvelopeElement[];
+    if (elements.length === 0) {
+      try {
+        const elSnap = await getDocs(collection(db, 'projects', project.id, 'rooms', roomId, 'envelopeElements'));
+        if (!elSnap.empty) {
+          const fetched = elSnap.docs.map(d => ({ id: d.id, ...d.data() })) as EnvelopeElement[];
+          // Resolve assembly dynamics the same way the page-level memo does, or the
+          // recovered elements would compute an undamped CLTD.
+          elements = backfillElements(fetched, assemblyDynamics) as EnvelopeElement[];
+          envelopeCache.set(project.id, roomId, fetched);
+          setEnvelopeElements(prev => (prev[roomId]?.length ? prev : { ...prev, [roomId]: fetched }));
+        }
+      } catch (err) {
+        console.error(`[LoadCalculator] envelope re-read failed for room ${roomId}:`, err);
+      }
+    }
     // ── Single shared engine (Step-2 consolidation 2026-07-08) ──────────────────
     // Per-room cooling/coil/CFM physics lives in lib/hvac/computeRoomLoad; this handler
     // only layers on the persistence extras (moisture, reheat, the tfa-only carrying
@@ -595,6 +630,21 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
     const governingTR = s.governingTr, requiredTR = s.requiredTr;
     const ductPct = s.ductPct, fanPct = s.fanPct;
     const sensibleSafetyPct = s.sSafetyPct, latentSafetyPct = s.lSafetyPct, overallSafetyPct = s.oSafetyPct;
+    // Winter design heating load — ONE derivation, used by every write below.
+    //
+    // Heating carries its OWN factor stack: a heating safety margin and then a warm-up /
+    // pickup allowance on the subtotal. This field used to apply `overallSafetyPct` instead
+    // ("to mirror the cooling-side margin"), which is the wrong margin and silently dropped
+    // the pickup allowance altogether — 1.03 against the 1.10 × 1.15 = 1.265 the PDF prints
+    // and defends, i.e. every persisted value was 18.6 % low. Equipment Selection reads this
+    // field while the report recomputes live, so the two disagreed on GURT by 38,352 BTU/h
+    // (168,093 vs 206,445). Must stay identical to reportService.computeDetailed's
+    // `designHeatingLoad`. (2026-08-02)
+    const heatingSafetyPct = Number(roomSource?.heatingSafetyPercent ?? 10);
+    const heatingPickupPct = Number(roomSource?.heatingPickupPercent ?? 15);
+    const winterHeatingBTUH = parseFloat(
+      ((heating.totalHeatingLoad || 0) * (1 + heatingSafetyPct / 100) * (1 + heatingPickupPct / 100)).toFixed(0),
+    );
     // Phase D: tfa-only rooms contribute zero to the primary coil; the room sensible is
     // carried by the TFA supply air's reserve (1.08 × CFM × ΔT). Engine warns when the
     // carrying capacity is short of ersh — designer bumps CFM or supply temp.
@@ -753,8 +803,8 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
       // Winter heating BTU/h — flat field so ES, LC row badges, and PDF can read it
       // without parsing the nested analysis.heating object. Always written (even when winter
       // isn't enabled in project settings) so toggling the season doesn't require a re-save.
-      // Safety factor (overallSafetyPct) is applied to mirror the cooling-side margin.
-      _calcWinterHeatingBTUH: parseFloat(((heating.totalHeatingLoad || 0) * (1 + overallSafetyPct / 100)).toFixed(0)),
+      // Carries the HEATING factor stack (safety + warm-up pickup) — see its derivation above.
+      _calcWinterHeatingBTUH: winterHeatingBTUH,
       // TFA / DOAS flat fields — populated only when this room's primary is DOAS-served.
       // Mirrors what loadCalculationService writes so SD's getRoomReqs stored-fallback
       // path can read them after LC persists. Use deleteField so toggling DOAS off
@@ -774,9 +824,17 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
         : deleteField(),
       // TFA/DOAS winter heating coil — tempers cold OA up to the (neutral) winter
       // supply setpoint. Season-independent (uses winter design temps), so summer
-      // `tfa` carries it. Overall safety applied to mirror _calcWinterHeatingBTUH.
+      // `tfa` carries it.
+      //
+      // Margin (settled 2026-08-02): heating SAFETY only — no warm-up/pickup allowance.
+      // Pickup exists to bring a cold BUILDING up to temperature after setback; a DOAS coil
+      // tempering outdoor air runs continuously and never has a mass of cold structure to
+      // recover, so charging it the space allowance would inflate a duty that cannot occur.
+      // The safety margin does apply — it is a design margin on the calculated duty, same as
+      // on the space side. Was `overallSafetyPct` (the COOLING margin), which was simply the
+      // wrong factor, exactly as on _calcWinterHeatingBTUH above.
       _calcTfaWinterHeatingBTUH: isTFA && tfa
-        ? parseFloat(((tfa.winterCoilSensible || 0) * (1 + overallSafetyPct / 100)).toFixed(0))
+        ? parseFloat(((tfa.winterCoilSensible || 0) * (1 + heatingSafetyPct / 100)).toFixed(0))
         : deleteField(),
       // TFA/DOAS summer reheat coil — cools OA to its apparatus dew point (to dry it
       // to supply W) then sensibly reheats to the supply temp. Season-independent
@@ -832,7 +890,7 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
               _calcOverallGoverningTR: parseFloat(overallGoverningTR.toFixed(3)),
               _calcOverallRequiredTR: parseFloat(overallRequiredTR.toFixed(3)),
               _calcOverallDesignCFM: parseFloat(overallDesignCFM.toFixed(0)),
-              _calcWinterHeatingBTUH: parseFloat(((heating.totalHeatingLoad || 0) * (1 + overallSafetyPct / 100)).toFixed(0)),
+              _calcWinterHeatingBTUH: winterHeatingBTUH,
             }
           : r
       ),

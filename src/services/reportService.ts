@@ -596,6 +596,37 @@ const resolveRoomDehumid = (
   return null;
 };
 
+/**
+ * Heating provision for a zone/system entity: what the AHU is configured to carry, and any
+ * capacity actually SELECTED for it.
+ *
+ * `hasHeatingCoil` is a configuration flag — it says a hot-water coil exists, not how big it
+ * is, and nothing in the system document stores a HWC duty. Only an electric heater carries a
+ * real number (`fahu.electricHeaterKW`). So `installedBtuh` is deliberately null for a bare
+ * HWC: the schedule must read NOT SELECTED rather than infer a capacity that was never chosen.
+ */
+const resolveHeatingPlant = (
+  entityId: string,
+  roomIds: string[],
+  systems: any[],
+): { coil: string; installedBtuh: number | null } => {
+  for (const sys of systems) {
+    const zone = ((sys.zones ?? []) as any[]).find(
+      (z: any) => z.id === entityId || (z.roomIds ?? []).some((id: string) => roomIds.includes(id)),
+    );
+    if (!zone && sys.id !== entityId) continue;
+    const cfg: any  = { ...((sys as any).ahuConfig ?? {}), ...(zone?.ahuConfig ?? {}) };
+    const fahu: any = zone?.fahu ?? (sys as any).fahu ?? {};
+    const kW = Number(fahu.electricHeaterKW) || 0;
+    const hasElec = !!fahu.hasElectricHeater && kW > 0;
+    const parts: string[] = [];
+    if (cfg.hasHeatingCoil) parts.push(`${cfg.heatingCoilRows ?? 2}-row HWC`);
+    if (hasElec) parts.push(`Electric ${kW} kW`);
+    return { coil: parts.length ? parts.join(' + ') : 'None', installedBtuh: hasElec ? kW * 3412 : null };
+  }
+  return { coil: 'None', installedBtuh: null };
+};
+
 const formatDiversitySummary = (
   systems: any[],
   flatRooms: any[],
@@ -1977,6 +2008,128 @@ export const generatePDFReport = (
     }
   }
 
+  // ── Heating Equipment Schedule ───────────────────────────────────────────
+  // The report sized every winter duty — space transmission, the DOAS fresh-air temper coil,
+  // humidification — and then scheduled nothing to meet any of it. A project could ship with
+  // 200,000+ BTU/h of calculated heating and no heat source, and no table asked the question.
+  // (TEZPUR GURT: 206,445 space + 66,589 TFA, with `hasHeatingCoil: true` on both AHUs and not
+  // one capacity stored anywhere.)
+  //
+  // Required is calculated here from the same winter call the Zone Summary uses, so the two
+  // cannot drift. Installed comes ONLY from a real selection — a hot-water coil carries no
+  // stored duty, so it reads NOT SELECTED rather than being silently counted as adequate.
+  if (includeWinter) {
+    const hBody: any[][] = [];
+    let pSpace = 0, pTfa = 0, pHum = 0, pInst = 0;
+    let anyMissing = false;
+
+    for (const entity of entities) {
+      if (entity.rooms.length === 0) continue;
+      const sysType = (entity as any).systemType;
+      const effProject = sysType ? { ...project, systemType: sysType } : project;
+      const winDc = winter ? resolveEntityDC(entity, winter, effProject) : null;
+      if (!winDc) continue;
+
+      let space = 0, tfa = 0, hum = 0;
+      for (const room of entity.rooms) {
+        const wm = computeDetailed(room, envelopeElements[room.id] || [], winDc, effProject);
+        space += wm.designHeatingLoad;
+        hum   += wm.hHumLoad;
+        tfa   += Number((room as any)._calcTfaWinterHeatingBTUH) || 0;
+      }
+      const plant = resolveHeatingPlant(entity.id, entity.rooms.map((r: any) => r.id), effectiveEquipSystems);
+      const required = space + tfa + hum;
+      const status = plant.installedBtuh == null
+        ? 'NOT SELECTED'
+        : plant.installedBtuh >= required ? 'OK' : 'Undersized';
+      if (status !== 'OK') anyMissing = true;
+
+      hBody.push([
+        entity.name,
+        n0(space),
+        tfa > 0 ? n0(tfa) : '—',
+        hum > 0 ? n0(hum) : '—',
+        n0(required),
+        plant.coil,
+        plant.installedBtuh == null ? '—' : n0(plant.installedBtuh),
+        status,
+      ]);
+      pSpace += space; pTfa += tfa; pHum += hum; pInst += plant.installedBtuh ?? 0;
+    }
+
+    if (hBody.length > 0) {
+      const pReq = pSpace + pTfa + pHum;
+      hBody.push([
+        { content: 'PROJECT TOTAL', styles: { fontStyle: 'bold' as const } },
+        { content: n0(pSpace), styles: { fontStyle: 'bold' as const, halign: 'right' as const } },
+        { content: pTfa > 0 ? n0(pTfa) : '—', styles: { fontStyle: 'bold' as const, halign: 'right' as const } },
+        { content: pHum > 0 ? n0(pHum) : '—', styles: { fontStyle: 'bold' as const, halign: 'right' as const } },
+        { content: n0(pReq), styles: { fontStyle: 'bold' as const, halign: 'right' as const } },
+        { content: '', styles: { fontStyle: 'bold' as const } },
+        { content: pInst > 0 ? n0(pInst) : '—', styles: { fontStyle: 'bold' as const, halign: 'right' as const } },
+        { content: '', styles: { fontStyle: 'bold' as const } },
+      ]);
+
+      y = startBody(doc, project);
+      y = sectionBanner(doc, '3B.  HEATING EQUIPMENT SCHEDULE', y, C);
+      y += 2;
+      doc.setFont('helvetica', 'italic');
+      doc.setFontSize(7);
+      doc.setTextColor(120, 120, 120);
+      doc.text(
+        'Required = space heating + DOAS fresh-air temper coil + humidification, at winter design. Installed is shown only where a capacity has actually been selected.',
+        PAGE.left, y,
+      );
+      doc.setFont('helvetica', 'normal');
+      y += 5;
+
+      autoTable(doc, {
+        startY: y,
+        head: [['Entity / Zone', 'Space BTU/h', 'TFA BTU/h', 'Humid. BTU/h', 'Required BTU/h', 'Heating Provision', 'Installed BTU/h', 'Status']],
+        body: hBody,
+        theme: 'grid',
+        styles: { fontSize: 7, cellPadding: 1.5, textColor: C.ink },
+        headStyles: { fillColor: C.accent, textColor: C.headFg, fontStyle: 'bold' },
+        columnStyles: {
+          0: { cellWidth: 34 },
+          1: { halign: 'right' as const, cellWidth: 21 },
+          2: { halign: 'right' as const, cellWidth: 19 },
+          3: { halign: 'right' as const, cellWidth: 21 },
+          4: { halign: 'right' as const, cellWidth: 24 },
+          5: { cellWidth: 28 },
+          6: { halign: 'right' as const, cellWidth: 23 },
+          7: { halign: 'center' as const, cellWidth: 22 },
+        },
+        didParseCell: (data: any) => {
+          if (data.section === 'body' && data.column.index === 7) {
+            const s = String(data.cell.raw ?? '');
+            if (s === 'OK')                data.cell.styles.textColor = [20, 130, 70]  as [number,number,number];
+            else if (s === 'NOT SELECTED') data.cell.styles.textColor = [180, 50, 50]  as [number,number,number];
+            else if (s === 'Undersized')   data.cell.styles.textColor = [180, 50, 50]  as [number,number,number];
+          }
+        },
+        margin: { left: PAGE.left, right: PAGE.right },
+      });
+      y = (doc as any).lastAutoTable.finalY + 4;
+
+      if (anyMissing) {
+        const kW = (pReq - pInst) / 3412;
+        doc.setFont('helvetica', 'bold');
+        doc.setFontSize(7.5);
+        doc.setTextColor(180, 50, 50);
+        const lines = doc.splitTextToSize(
+          `ACTION REQUIRED — ${n0(pReq - pInst)} BTU/h (${kW.toFixed(1)} kW) of the calculated winter duty has no selected heat source. ` +
+          'A hot-water coil shown under Heating Provision is a configuration only; its capacity, the hot-water flow and the ' +
+          'boiler / heat-pump serving it are still to be selected and scheduled.',
+          pageW - PAGE.left - PAGE.right,
+        );
+        doc.text(lines, PAGE.left, y);
+        doc.setFont('helvetica', 'normal');
+        doc.setTextColor(...C.ink);
+      }
+    }
+  }
+
   // ═══ SECTIONS 4+: ENTITY DETAIL ═══════════════════════════════════════════
 
   for (const entity of entities) {
@@ -2179,8 +2332,25 @@ export const generatePDFReport = (
         const m = computeDetailed(room, envelopeElements[room.id] || [], dc, project);
         const elems = envelopeElements[room.id] || [];
         const outdoorPsycho = calculatePsychrometrics(dc.outdoorTemp, dc.outdoorHumidity, dc.altitude);
-        const indoorPsycho  = calculatePsychrometrics(dc.indoorTemp,  dc.indoorHumidity,  dc.altitude);
         const isWinter = (dc.outdoorTemp < dc.indoorTemp);
+        // ── The room point must be the state the room ACTUALLY holds ──────────────────
+        // Everything downstream hangs off this: the RA marker on the psychrometric chart,
+        // the Indoor humidity-ratio / enthalpy cells, the supply-air state, and the dW-coil
+        // and condensate figures derived from it.
+        //
+        // A DOAS-over-dried room already prints "Maintained Indoor RH … actual, not design"
+        // a few rows above, and (since 2026-08-02) its ADP is solved at that floated state.
+        // Leaving this table anchored at the design setpoint made the page contradict itself
+        // — TEZPUR GURT Missile Testing drew an RA point at 60 % RH beside an ADP of 53 °F,
+        // which reads as a coil doing latent work when its coil latent is exactly zero.
+        // Anchor on the same condition the "Maintained Indoor" row is gated on, so the prose
+        // and the construction cannot disagree.
+        //
+        // Winter is excluded: there is no coil construction on that table, and the winter
+        // humidification analysis carries its own indoor target.
+        const roomTempEff = (!isWinter && m.floatIndoorTemp != null) ? m.floatIndoorTemp : dc.indoorTemp;
+        const roomRhEff   = (!isWinter && m.floatIndoorRH   != null) ? m.floatIndoorRH   : dc.indoorHumidity;
+        const indoorPsycho  = calculatePsychrometrics(roomTempEff, roomRhEff, dc.altitude);
 
         // ── Room header bar ──
         y = ensureSpace(doc, y, 120, project);
@@ -2548,7 +2718,7 @@ export const generatePDFReport = (
         const LHV_PDF  = 1061; // ASHRAE hfg at coil conditions (matches 0.68 constant derivation)
         const BF_PDF   = 0.15;
         const adpPs    = calculatePsychrometrics(m.selectedAdp, 100, dc.altitude);
-        const tSup     = m.selectedAdp + BF_PDF * (dc.indoorTemp  - m.selectedAdp);
+        const tSup     = m.selectedAdp + BF_PDF * (roomTempEff  - m.selectedAdp);
         const wSup     = adpPs.humidityRatio + BF_PDF * (indoorPsycho.humidityRatio - adpPs.humidityRatio);
         const hSup     = 0.240 * tSup + wSup * (1061 + 0.444 * tSup);
         const dwCoil   = Math.max(0, (indoorPsycho.humidityRatio - wSup) * 7000);
@@ -2571,11 +2741,11 @@ export const generatePDFReport = (
           startY: y,
           head: [['Parameter', 'Outdoor', 'Indoor', 'Supply Air', 'Coil / Notes']],
           body: isWinter ? [
-            ['Dry Bulb Temp (°F / °C)',  dualT1(dc.outdoorTemp),                  dualT1(dc.indoorTemp),                  '—', '—'],
+            ['Dry Bulb Temp (°F / °C)',  dualT1(dc.outdoorTemp),                  dualT1(roomTempEff),                '—', '—'],
             ['Humidity Ratio (gr/lb)',   n1(outdoorPsycho.humidityRatio * 7000), n1(indoorPsycho.humidityRatio * 7000), '—', 'Winter — no coil dehumidification'],
             ['Enthalpy h (BTU/lb)',      n2(outdoorPsycho.enthalpy),             n2(indoorPsycho.enthalpy),              '—', '—'],
           ] : [
-            ['Dry Bulb Temp (°F / °C)',  dualT1(dc.outdoorTemp),                  dualT1(dc.indoorTemp),                  dualT1(tSup),       `ADP ${dualTu(m.selectedAdp)}  (Ind. ${dualTu(m.indicatedAdp)})`],
+            ['Dry Bulb Temp (°F / °C)',  dualT1(dc.outdoorTemp),                  dualT1(roomTempEff),                dualT1(tSup),       `ADP ${dualTu(m.selectedAdp)}  (Ind. ${dualTu(m.indicatedAdp)})`],
             ['Humidity Ratio (gr/lb)',   n1(outdoorPsycho.humidityRatio * 7000), n1(indoorPsycho.humidityRatio * 7000), n1(wSup * 7000),    `dW coil = ${n1(dwCoil)} gr/lb`],
             // RSHF (room) drives reheat sizing; GSHF (coil incl. OA + parasitic)
             // drives ADP. Show both since they answer different questions.
@@ -2867,7 +3037,7 @@ export const generatePDFReport = (
           doc.setFontSize(6.5);
           doc.setTextColor(...C.ink);
           doc.text(`Outdoor:  ${n0(dc.outdoorTemp)}°F (${fToC(dc.outdoorTemp).toFixed(1)}°C) / ${n0(dc.outdoorHumidity)}% RH`,   pieX + 6, chartY + chartRowH / 2 + 16);
-          doc.text(`Indoor:   ${n0(dc.indoorTemp)}°F (${fToC(dc.indoorTemp).toFixed(1)}°C) / ${n0(dc.indoorHumidity)}% RH`,     pieX + 6, chartY + chartRowH / 2 + 22);
+          doc.text(`Indoor:   ${n0(roomTempEff)}°F (${fToC(roomTempEff).toFixed(1)}°C) / ${n0(roomRhEff)}% RH`,     pieX + 6, chartY + chartRowH / 2 + 22);
         }
 
         y = chartY + chartRowH + 6;

@@ -269,7 +269,23 @@ export const computeRoomLoad = (
   // TFA-served rooms: ersh is already net of the cold-DOAS credit, which is correct —
   // the space coil only has to carry the residual.
   const { adpSensible, adpLatent } = effectiveRoomLoadsForAdp(ersh, erlh, { isTFA, isTfaOnly, tfaOffSen, tfaOffLat });
-  const coil = calculateCoilParameters(adpSensible, adpLatent, dcEff.indoorTemp, dcEff.indoorHumidity, dcEff.altitude, BF, 35, 65, getMinAdp(project?.systemType, project?.adpBasis));
+  // The ESHF line is drawn FROM THE ROOM STATE, so it must be anchored at the state the room
+  // ACTUALLY holds — not the design setpoint it cannot reach. Where the humidity floats (above),
+  // that floated state IS the room state.
+  //
+  // Until now the float was computed, persisted and printed but never fed back here, so a
+  // DOAS-over-dried room was reported at its true humidity in prose while its ADP was still
+  // solved at design RH. On a space coil carrying zero latent (RSHF = 1) the ADP lands on the
+  // room DEWPOINT, so anchoring at the wrong humidity moves it degree-for-degree:
+  // TEZPUR GURT Missile Testing settles at 45 % RH (dewpoint 52.6 °F) against a 60 % RH design
+  // (dewpoint 60.2 °F) — ADP 60 → 53 °F, and the airflow that rides it 7,159 → 4,881 CFM.
+  // The coil never had to reach 60.2 °F; the room was already drier than that.
+  //
+  // TR is unaffected — coilSensible/coilLatent are set above and do not depend on the ADP.
+  // Rooms that do not float (every non-TFA room) pass design conditions exactly as before.
+  const adpRoomTemp = floatIndoorTemp ?? dcEff.indoorTemp;
+  const adpRoomRH   = floatIndoorRH   ?? dcEff.indoorHumidity;
+  const coil = calculateCoilParameters(adpSensible, adpLatent, adpRoomTemp, adpRoomRH, dcEff.altitude, BF, 35, 65, getMinAdp(project?.systemType, project?.adpBasis));
   // Grand SHF — display + reheat reporting only, never the ADP (see RoomLoadResult.gshf).
   const gshf = grandTotal > 0 ? coilSensible / grandTotal : 1;
 

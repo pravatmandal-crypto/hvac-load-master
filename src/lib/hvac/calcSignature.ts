@@ -37,7 +37,16 @@
 // Without a bump the fingerprint still matches, no staleness banner appears, and Equipment
 // Selection / PDF / Excel keep serving the old undamped loads while the Envelope tab shows
 // the new CLTD — precisely the silent drift this file exists to catch.
-export const CALC_VERSION = 3;
+// v4 (2026-08-02): winter heating margins corrected. `_calcWinterHeatingBTUH` applied
+// `overallSafetyPct` — the COOLING margin — so every persisted winter value was 1.03 × raw
+// against the 1.10 × 1.15 = 1.265 the PDF prints and defends: 18.6 % low. Equipment Selection
+// reads the persisted field while the report recomputes live, so the two disagreed (GURT:
+// 168,093 vs 206,445 BTU/h). `_calcTfaWinterHeatingBTUH` moved to the heating SAFETY margin
+// only — no warm-up allowance, which is a space concept a continuously-running DOAS temper
+// coil never incurs. Neither margin is part of the fingerprint (heatingSafetyPercent /
+// heatingPickupPercent are not in roomSigParts), so without this bump the corrected values
+// would never be written and ES would keep serving the understated heating duty.
+export const CALC_VERSION = 4;
 
 /** Short, stable djb2 hash → base36 string. Keeps the persisted fingerprint tiny. */
 function hashString(s: string): string {
