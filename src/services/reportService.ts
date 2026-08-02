@@ -2036,8 +2036,12 @@ export const generatePDFReport = (
     let anyMissing = false;
     // roomId → BTU/h of DOAS fresh-air temper duty, banked while walking the zones and
     // re-grouped by serving DOAS unit below.
-    const tfaHeatByRoom = new Map<string, { room: any; duty: number; cfm: number }>();
+    const tfaHeatByRoom = new Map<string, { room: any; duty: number; cfm: number; hum: number }>();
     const winterOutdoorForSupply = winter ? asNum((winter as any).outdoorTemp, 40) : null;
+    // Coils are bought in whole kW, so a selection rounded to a sellable size can land a few
+    // BTU/h under the calculated duty — 22 kW = 75,064 against a 75,072 requirement is 0.01 %
+    // short. Reporting that as Undersized is noise that trains people to ignore the column.
+    const FIT_TOL = 0.995;
 
     for (const entity of entities) {
       if (entity.rooms.length === 0) continue;
@@ -2056,7 +2060,11 @@ export const generatePDFReport = (
         const els = envelopeElements[room.id] || [];
         const wm = computeDetailed(room, els, winDc, effProject);
         space += wm.designHeatingLoad;
-        hum   += wm.hHumLoad;
+        // Humidification conditions the FRESH air, so it follows whichever machine handles
+        // the OA — the DOAS on a TFA-served room, the AHU itself when fresh air is on the
+        // unit. Charging it to the recirc AHU regardless made Complex A's AHU row ask for
+        // 9,421 BTU/h its own coil never sees. (Same principle as the temper coil.)
+        if (!wm.isTFA) hum += wm.hHumLoad;
         const sm = computeDetailed(room, els, sumDcE, effProject);
         // tfa-only rooms have no space AHU — their air is all DOAS, so they contribute no
         // recirc airflow to heat.
@@ -2066,14 +2074,16 @@ export const generatePDFReport = (
             : sm.designCfm;
         }
         const t = Number((room as any)._calcTfaWinterHeatingBTUH) || 0;
-        if (t > 0) tfaHeatByRoom.set(room.id, { room, duty: t, cfm: sm.tfaCfm });
+        if (t > 0 || (wm.isTFA && wm.hHumLoad > 0)) {
+          tfaHeatByRoom.set(room.id, { room, duty: t, cfm: sm.tfaCfm, hum: wm.isTFA ? wm.hHumLoad : 0 });
+        }
       }
       const plant = resolveHeatingPlant(entity.id, entity.rooms.map((r: any) => r.id), effectiveEquipSystems);
       const tfa = 0; // scheduled against the DOAS below, never against the recirc AHU
       const required = space + hum;
       const status = plant.installedBtuh == null
         ? 'NOT SELECTED'
-        : plant.installedBtuh >= required ? 'OK' : 'Undersized';
+        : plant.installedBtuh >= required * FIT_TOL ? 'OK' : 'Undersized';
       if (status !== 'OK') anyMissing = true;
 
       // Supply temperature the duty implies on this coil's OWN airflow. A recirc AHU heats
@@ -2101,12 +2111,12 @@ export const generatePDFReport = (
     // more than one DOAS gets one row each rather than a single lumped figure.
     if (tfaHeatByRoom.size > 0) {
       const doasList = (effectiveEquipSystems ?? []).filter((s: any) => s?.type === 'DOAS');
-      const byDoas = new Map<string, { duty: number; cfm: number }>();
-      for (const { room, duty, cfm } of tfaHeatByRoom.values()) {
+      const byDoas = new Map<string, { duty: number; cfm: number; hum: number }>();
+      for (const { room, duty, cfm, hum } of tfaHeatByRoom.values()) {
         const doas = resolveRoomTfa(room, effectiveEquipSystems).doas;
         const key = doas?.id ?? '__unassigned__';
-        const prev = byDoas.get(key) ?? { duty: 0, cfm: 0 };
-        byDoas.set(key, { duty: prev.duty + duty, cfm: prev.cfm + (Number(cfm) || 0) });
+        const prev = byDoas.get(key) ?? { duty: 0, cfm: 0, hum: 0 };
+        byDoas.set(key, { duty: prev.duty + duty, cfm: prev.cfm + (Number(cfm) || 0), hum: prev.hum + (Number(hum) || 0) });
       }
       for (const [doasId, agg] of byDoas) {
         const duty = agg.duty;
@@ -2114,24 +2124,28 @@ export const generatePDFReport = (
         // A DOAS carries its heating duty on its own document, not on any zone's ahuConfig.
         const kW = Number(sys?.ahuConfig?.heatingCapacityKW ?? sys?.heatingCapacityKW) || 0;
         const installed = kW > 0 ? kW * 3412 : null;
-        const status = installed == null ? 'NOT SELECTED' : installed >= duty ? 'OK' : 'Undersized';
+        // Fresh-air humidification is this unit's duty too — it conditions the OA.
+        const dHum = agg.hum;
+        const dReq = duty + dHum;
+        const status = installed == null ? 'NOT SELECTED' : installed >= dReq * FIT_TOL ? 'OK' : 'Undersized';
         if (status !== 'OK') anyMissing = true;
         // A DOAS heats OUTDOOR air, so its supply starts from the winter outdoor design temp —
-        // not the room setpoint the recirc AHU starts from.
+        // not the room setpoint the recirc AHU starts from. Sensible temper duty only:
+        // humidification adds moisture, not dry-bulb.
         const winOut = winterOutdoorForSupply;
         const doasSupplyF = agg.cfm > 0 && winOut != null ? winOut + duty / (1.08 * agg.cfm) : null;
         hBody.push([
           `${sys?.name ?? 'DOAS / TFA unit'}  (fresh-air coil)`,
           '—',
           n0(duty),
-          '—',
-          n0(duty),
+          dHum > 0 ? n0(dHum) : '—',
+          n0(dReq),
           doasSupplyF == null ? '—' : doasSupplyF.toFixed(0),
           kW > 0 ? `Fresh-air heating coil ${kW} kW` : 'Fresh-air heating coil',
           installed == null ? '—' : n0(installed),
           status,
         ]);
-        pTfa += duty; pInst += installed ?? 0;
+        pTfa += duty; pHum += dHum; pInst += installed ?? 0;
       }
     }
 
