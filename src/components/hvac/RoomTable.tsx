@@ -1,6 +1,6 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useDraggable } from '@dnd-kit/core';
-import { collection, onSnapshot, query, where } from 'firebase/firestore';
+import { collection, onSnapshot } from 'firebase/firestore';
 import { db } from '../../lib/firebase';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '../ui/table';
 import { Input } from '../ui/input';
@@ -2925,12 +2925,18 @@ export default function RoomTable({
     });
   }, []);
 
-  // Custom wall assemblies from U Builder (Firestore: u_assemblies)
+  // Custom wall assemblies from U Builder (Firestore: u_assemblies).
+  //
+  // Deliberately NOT filtered by `userId`. Elements reference an assembly by document id and
+  // projects are shared across the team, so an ownership filter means the assembly assigned to
+  // a roof simply vanishes for anyone but its author: the picker renders the raw doc id and the
+  // CLTD silently reverts to light construction, because `decrementFactor` can no longer be
+  // resolved. See ../../lib/ubuilder/useAssemblyDynamics for the same reasoning on the calc
+  // side. `firestore.rules` already allows any authenticated user to read `u_assemblies`.
   const [customAssemblies, setCustomAssemblies] = useState<Array<{ id: string; displayId: string; name: string; uValue: number; wallCategory: string; decrementFactor?: number; arealMass?: number }>>([]);
   useEffect(() => {
     if (!userId) return;
-    const q = query(collection(db, 'u_assemblies'), where('userId', '==', userId));
-    const unsub = onSnapshot(q, snap => {
+    const unsub = onSnapshot(collection(db, 'u_assemblies'), snap => {
       const sorted = [...snap.docs].sort(
         (a, b) => ((a.data().createdAt?.seconds ?? 0) - (b.data().createdAt?.seconds ?? 0)),
       );
