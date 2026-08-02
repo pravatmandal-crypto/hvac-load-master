@@ -1587,6 +1587,9 @@ export const generatePDFReport = (
   // could show a selected 50 TR / 4,000 CFM unit with a 21 kW coil and none of it appeared.
   // These read the selections only — the required-vs-installed verdict is section 3B's job,
   // and duplicating it here is how the two would drift apart.
+  const specialConditionsStr = sanitizeForPDF(
+    String((project as any)?.specialConditions ?? (project as any)?.data?.specialConditions ?? '').trim(),
+  );
   const doasSystems = (effectiveEquipSystems ?? []).filter((s: any) => s?.type === 'DOAS');
   const doasUnitStr = (() => {
     const parts: string[] = [];
@@ -1701,6 +1704,11 @@ export const generatePDFReport = (
       ...(hasTfa && projectTfaReheatBTUH > 0 ? [['TFA / DOAS Reheat Coil', `${n0(projectTfaReheatBTUH)} BTU/h  (${n2(projectTfaReheatBTUH / 12000)} TR · cool-to-ADP then reheat to supply temp)`]] as [string,string][] : []),
       ...(doasUnitStr ? [['TFA / DOAS Unit Selected', doasUnitStr]] as [string,string][] : []),
       ...(heatingProvisionStr ? [['Winter Heating Provision', heatingProvisionStr]] as [string,string][] : []),
+      // Client rules and agreed deviations the calculation cannot express as a number —
+      // "FA fixed at 2 ACPH, recirculation >= 50%" and the like. Reproduced verbatim so the
+      // basis travels with the submission; sanitised because it is free text a user typed and
+      // an unencodable glyph both garbles the line AND breaks autoTable's wrapping.
+      ...(specialConditionsStr ? [['Special Design Conditions', specialConditionsStr]] as [string,string][] : []),
       ['Total Installed IDU / FCU Capacity', totalIDUStr],
       ['Total Installed Plant / ODU Capacity', totalPlantStr],
       // Diversity line is the installed IDU / Plant ratio (Pravat 2026-06-11). Falls back

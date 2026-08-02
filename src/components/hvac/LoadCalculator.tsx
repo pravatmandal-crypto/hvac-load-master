@@ -267,6 +267,10 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
     insideMonsoonHumidity: '',
     insideWinterTemp: '',
     insideWinterHumidity: '',
+    // Free-text design-basis note (client rules the calc cannot express as a number —
+    // "FA fixed at 2 ACPH, recirculation >= 50%", agreed deviations, etc.). Recorded on
+    // the project and printed in the report so the basis travels with the submission.
+    specialConditions: '',
   });
   const [editLoading, setEditLoading] = useState(false);
   const [dataLoading, setDataLoading] = useState(true);
@@ -2962,6 +2966,8 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
       const resolvedInsideMonsoonRH = editData.insideMonsoonHumidity === '' ? currentInsideMonsoonRH : Number(editData.insideMonsoonHumidity);
       const resolvedInsideWinterTemp = editData.insideWinterTemp === '' ? currentInsideWinterTemp : Number(editData.insideWinterTemp);
       const resolvedInsideWinterRH = editData.insideWinterHumidity === '' ? currentInsideWinterRH : Number(editData.insideWinterHumidity);
+      // Trimmed, and written even when blank so clearing it actually clears it.
+      const resolvedSpecialConditions = (editData.specialConditions ?? '').trim();
 
       // Did any load-affecting design condition change? If so, arm the auto-recompute so all
       // rooms' persisted snapshots refresh once this update propagates (see conditionsSig effect).
@@ -2994,6 +3000,7 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
         insideMonsoonHumidity: resolvedInsideMonsoonRH,
         insideWinterTemp: resolvedInsideWinterTemp,
         insideWinterHumidity: resolvedInsideWinterRH,
+        specialConditions: resolvedSpecialConditions,
         data: {
           ...(project.data || {}),
           longitude: resolvedLongitude,
@@ -3037,6 +3044,7 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
         insideMonsoonHumidity: '',
         insideWinterTemp: '',
         insideWinterHumidity: '',
+        specialConditions: '',
       });
       setEditModalOpen(false);
     } catch (error: any) {
@@ -3188,6 +3196,7 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
                 insideMonsoonHumidity:String(p.insideMonsoonHumidity ?? pd.insideMonsoonHumidity ?? 55),
                 insideWinterTemp:     String(p.insideWinterTemp    ?? pd.insideWinterTemp    ?? 72),
                 insideWinterHumidity: String(p.insideWinterHumidity ?? pd.insideWinterHumidity ?? 40),
+                specialConditions: String(p.specialConditions ?? pd.specialConditions ?? ''),
               });
               setEditModalOpen(true);
             }} className="gap-1 text-blue-600 dark:text-blue-400 border-blue-200 dark:border-blue-800 hover:bg-blue-50 dark:hover:bg-blue-950/20 shadow-sm">
@@ -4332,6 +4341,30 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
                 <p className="text-[11px] text-slate-400 dark:text-slate-500">
                   Enthalpy and humidity ratio are calculated automatically on save.
                 </p>
+
+                {/* Special design conditions — free text, printed in the report's executive
+                    summary. For client rules the calculation cannot express as a number:
+                    "FA fixed at 2 ACPH, recirculation ≥ 50%", agreed deviations from the
+                    standard basis, and anything a reviewer needs in order to read the
+                    numbers the way they were intended. */}
+                <div className="space-y-1.5 pt-1">
+                  <label className="block text-xs font-semibold uppercase tracking-wide text-slate-600 dark:text-slate-300">
+                    Special Design Conditions
+                    <span className="ml-1.5 font-normal normal-case text-slate-400 dark:text-slate-500">
+                      — printed in the report&rsquo;s executive summary
+                    </span>
+                  </label>
+                  <textarea
+                    rows={3}
+                    value={editData.specialConditions}
+                    onChange={(e) => setEditData(prev => ({ ...prev, specialConditions: e.target.value }))}
+                    placeholder="e.g. Fresh air fixed at 2 ACPH of room volume; recirculation ≥ 50% (client requirement). Thermal load governs total supply."
+                    className="w-full rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-800 px-3 py-2 text-sm text-slate-800 dark:text-slate-200 placeholder:text-slate-400 dark:placeholder:text-slate-500 focus:outline-none focus:ring-2 focus:ring-blue-400 resize-y"
+                  />
+                  <p className="text-[11px] text-slate-400 dark:text-slate-500">
+                    Recorded on the project and reproduced verbatim in the report. Leave blank to omit the row.
+                  </p>
+                </div>
               </div>
             </div>
 
@@ -4348,7 +4381,7 @@ const LoadCalculator = forwardRef<LoadCalculatorHandle, { project: any; userProf
                     winterDesignTemp: '', winterDesignHumidity: '',
                     insideSummerTemp: '', insideSummerHumidity: '',
                     insideMonsoonTemp: '', insideMonsoonHumidity: '',
-                    insideWinterTemp: '', insideWinterHumidity: '',
+                    insideWinterTemp: '', insideWinterHumidity: '', specialConditions: String((project as any).specialConditions ?? ''),
                   });
                   setEditModalOpen(false);
                 }}
