@@ -2721,10 +2721,19 @@ export const generatePDFReport = (
                 // a coil duty (the two rows above). They sum to the full quantity. Stating
                 // it explicitly stops a reviewer adding the full OA on top of an ERSH that
                 // already contains the bypassed part, which double-counts it. (2026-08-01)
+                // Two rows, and ASCII only. As one long line containing "→" it ran off the
+                // right edge of the frame and the latent half — the very figure the client
+                // queried — was clipped. U+2192 is not in jsPDF's WinAnsi helvetica: it
+                // rendered as "!'" AND broke autoTable's width measurement, so the cell never
+                // wrapped. Same failure sanitizeForPDF was written for. (2026-08-02)
                 [{
-                  content: `  Total fresh air = bypassed (in ERSH/ERLH) + unbypassed  ·  ${n0(m.faCfm)} CFM`
-                    + `  →  sensible ${n0(m.ventSensibleBF)} + ${n0(m.oaSensible)} = ${n0(m.ventSensibleBF + m.oaSensible)}`
-                    + `  ·  latent ${n0(m.ventLatentBF)} + ${n0(m.oaLatent)} = ${n0(m.ventLatentBF + m.oaLatent)} BTU/h`,
+                  content: `  Total fresh air = bypassed (in ERSH/ERLH) + unbypassed  ·  ${n0(m.faCfm)} CFM`,
+                  colSpan: 3,
+                  styles: { fontStyle: 'italic', fontSize: 6.6, fillColor: C.accentBg, textColor: C.ink },
+                }],
+                [{
+                  content: `      sensible ${n0(m.ventSensibleBF)} + ${n0(m.oaSensible)} = ${n0(m.ventSensibleBF + m.oaSensible)} BTU/h`
+                    + `      latent ${n0(m.ventLatentBF)} + ${n0(m.oaLatent)} = ${n0(m.ventLatentBF + m.oaLatent)} BTU/h`,
                   colSpan: 3,
                   styles: { fontStyle: 'italic', fontSize: 6.6, fillColor: C.accentBg, textColor: C.ink },
                 }],
