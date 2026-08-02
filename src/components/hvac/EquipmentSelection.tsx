@@ -5335,13 +5335,45 @@ export default function EquipmentSelection({
                               <p className="text-xs text-amber-500 dark:text-amber-400">BTU/h · ADP {doasTFAAggregate.coilADP.toFixed(0)}°F → supply</p>
                             </div>
                           )}
-                          {doasTfaWinterHeatingBTUH > 0 && (
+                          {doasTfaWinterHeatingBTUH > 0 && (() => {
+                            // The SELECTION lives beside the required figure, in the main panel —
+                            // not behind "Advanced TFA settings". A capacity the Heating Equipment
+                            // Schedule reports as ACTION REQUIRED is not a tuning control.
+                            const reqKW = Math.ceil((doasTfaWinterHeatingBTUH / 3412) * 10) / 10;
+                            const selKW = Number((selectedSystem as any).heatingCapacityKW) || 0;
+                            return (
                             <div className="rounded-lg border border-sky-200 dark:border-sky-800 bg-sky-50/60 dark:bg-sky-950/20 px-4 py-3">
                               <p className="text-xs font-bold uppercase tracking-wide text-sky-600 dark:text-sky-400">TFA Heating Coil</p>
                               <p className="mt-1 font-mono text-xl font-bold text-sky-900 dark:text-sky-200">{Math.round(doasTfaWinterHeatingBTUH).toLocaleString()}</p>
-                              <p className="text-xs text-sky-500 dark:text-sky-400">BTU/h · winter OA temper</p>
+                              <p className="text-xs text-sky-500 dark:text-sky-400">BTU/h · winter OA temper · {reqKW} kW</p>
+                              <div className="mt-2 flex items-center gap-1.5 flex-wrap">
+                                <input
+                                  type="number" min={0} step={0.1}
+                                  key={`doasHeatKW-${selectedSystem.id}-${(selectedSystem as any).heatingCapacityKW ?? ''}`}
+                                  defaultValue={(selectedSystem as any).heatingCapacityKW ?? ''}
+                                  placeholder="kW"
+                                  title="Selected fresh-air heating coil capacity on this DOAS unit"
+                                  onBlur={e => {
+                                    const raw = e.target.value.trim();
+                                    const v = parseFloat(raw);
+                                    if (raw === '') void updateSystemField(selectedSystem.id, { heatingCapacityKW: deleteField() });
+                                    else if (Number.isFinite(v) && v >= 0) void updateSystemField(selectedSystem.id, { heatingCapacityKW: v });
+                                    else e.target.value = String((selectedSystem as any).heatingCapacityKW ?? '');
+                                  }}
+                                  className="w-16 h-7 text-xs font-mono border border-sky-300 dark:border-sky-700 rounded px-1.5 bg-white dark:bg-slate-800 dark:text-slate-200 focus:outline-none focus:ring-1 focus:ring-sky-400"
+                                />
+                                <span className="text-xs text-sky-500 dark:text-sky-400">kW</span>
+                                <button type="button"
+                                  onClick={() => void updateSystemField(selectedSystem.id, { heatingCapacityKW: reqKW })}
+                                  className="text-xs px-1.5 py-0.5 rounded border border-sky-300 dark:border-sky-700 text-sky-700 dark:text-sky-300 hover:bg-sky-100 dark:hover:bg-sky-900/30 transition-colors">
+                                  use {reqKW}
+                                </button>
+                              </div>
+                              {selKW === 0 && <p className="mt-1 text-xs text-red-500 dark:text-red-400 italic">not selected</p>}
+                              {selKW > 0 && selKW < reqKW && <p className="mt-1 text-xs text-red-500 dark:text-red-400 italic">undersized vs {reqKW} kW</p>}
                             </div>
-                          )}
+                            );
+                          })()}
                           <div className="rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 px-4 py-3">
                             <p className="text-xs font-bold uppercase tracking-wide text-slate-500 dark:text-slate-400">Rooms Served</p>
                             <p className="mt-1 font-mono text-xl font-bold text-slate-800 dark:text-slate-200">{doasServedRoomIds.length}</p>
@@ -5453,59 +5485,6 @@ export default function EquipmentSelection({
                                 }}
                                 className="mt-1 w-full text-sm border border-slate-200 dark:border-slate-600 rounded-md px-2 py-1.5 bg-white dark:bg-slate-800 dark:text-slate-200 font-mono focus:outline-none focus:ring-1 focus:ring-teal-400"
                               />
-                            </label>
-                            {/* Winter fresh-air heating coil. This duty belongs to the DOAS, NOT to the
-                                recirc AHU — the DOAS is what conditions the outdoor air, and the AHU only
-                                ever sees space transmission + infiltration. Section 3B of the load report
-                                schedules them as separate rows and verifies this figure against the
-                                calculated OA temper duty. */}
-                            <label className="block">
-                              <span className="text-xs font-medium text-slate-500 dark:text-slate-400 inline-flex items-center gap-1">
-                                Heating Coil (kW)
-                                <span className="inline-flex cursor-help" title={
-                                    "Winter fresh-air heating coil on THIS DOAS unit — tempers outdoor air up to the winter supply setpoint.\n\n" +
-                                    "Belongs here, not on the recirculating AHU: the AHU carries only space transmission and infiltration.\n\n" +
-                                    "Leave blank until selected — the Heating Equipment Schedule reports NOT SELECTED rather than assuming a capacity."
-                                  }>
-                                  <Info className="w-3 h-3 text-slate-400 dark:text-slate-500" />
-                                </span>
-                              </span>
-                              <input
-                                type="number"
-                                min={0}
-                                step={0.1}
-                                key={`tfaHeatKW-${selectedSystem.id}-${(selectedSystem as any).heatingCapacityKW ?? ''}`}
-                                defaultValue={(selectedSystem as any).heatingCapacityKW ?? ''}
-                                placeholder="not selected"
-                                onBlur={e => {
-                                  const raw = e.target.value.trim();
-                                  const v = parseFloat(raw);
-                                  if (raw === '') {
-                                    void updateSystemField(selectedSystem.id, { heatingCapacityKW: deleteField() });
-                                  } else if (Number.isFinite(v) && v >= 0) {
-                                    void updateSystemField(selectedSystem.id, { heatingCapacityKW: v });
-                                  } else {
-                                    e.target.value = String((selectedSystem as any).heatingCapacityKW ?? '');
-                                  }
-                                }}
-                                className="mt-1 w-full text-sm border border-slate-200 dark:border-slate-600 rounded-md px-2 py-1.5 bg-white dark:bg-slate-800 dark:text-slate-200 font-mono focus:outline-none focus:ring-1 focus:ring-teal-400"
-                              />
-                              {doasTfaWinterHeatingBTUH > 0 && (() => {
-                                const reqKW = Math.ceil((doasTfaWinterHeatingBTUH / 3412) * 10) / 10;
-                                const sel = Number((selectedSystem as any).heatingCapacityKW) || 0;
-                                return (
-                                  <span className="mt-1 flex items-center gap-2 flex-wrap">
-                                    <button type="button"
-                                      onClick={() => void updateSystemField(selectedSystem.id, { heatingCapacityKW: reqKW })}
-                                      title={`Fresh-air temper duty ${Math.round(doasTfaWinterHeatingBTUH).toLocaleString()} BTU/h ÷ 3412`}
-                                      className="text-xs px-2 py-0.5 rounded border border-teal-300 dark:border-teal-700 text-teal-600 dark:text-teal-400 hover:bg-teal-50 dark:hover:bg-teal-900/20 transition-colors">
-                                      use required {reqKW} kW
-                                    </button>
-                                    {sel === 0 && <span className="text-xs text-red-500 dark:text-red-400 italic">not selected</span>}
-                                    {sel > 0 && sel < reqKW && <span className="text-xs text-red-500 dark:text-red-400 italic">undersized</span>}
-                                  </span>
-                                );
-                              })()}
                             </label>
                             <label className="block">
                               <span className="text-xs font-medium text-slate-500 dark:text-slate-400 inline-flex items-center gap-1">
