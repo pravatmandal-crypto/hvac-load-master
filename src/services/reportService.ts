@@ -2023,10 +2023,20 @@ export const generatePDFReport = (
   // Required is calculated here from the same winter call the Zone Summary uses, so the two
   // cannot drift. Installed comes ONLY from a real selection — a hot-water coil carries no
   // stored duty, so it reads NOT SELECTED rather than being silently counted as adequate.
+  //
+  // THE TWO DUTIES SIT ON DIFFERENT MACHINES and are scheduled as separate rows. The
+  // fresh-air temper coil belongs to the DOAS that conditions the outdoor air; the recirc
+  // AHU only ever sees space transmission + infiltration. The first cut summed both into the
+  // zone row and judged the total against the AHU's coil — so Complex A read as needing
+  // 200,081 BTU/h from an AHU that is only responsible for 133,492, and the DOAS coil was
+  // never scheduled at all. (Corrected on Pravat's note, 2026-08-02.)
   if (includeWinter) {
     const hBody: any[][] = [];
     let pSpace = 0, pTfa = 0, pHum = 0, pInst = 0;
     let anyMissing = false;
+    // roomId → BTU/h of DOAS fresh-air temper duty, banked while walking the zones and
+    // re-grouped by serving DOAS unit below.
+    const tfaHeatByRoom = new Map<string, { room: any; duty: number }>();
 
     for (const entity of entities) {
       if (entity.rooms.length === 0) continue;
@@ -2035,15 +2045,17 @@ export const generatePDFReport = (
       const winDc = winter ? resolveEntityDC(entity, winter, effProject) : null;
       if (!winDc) continue;
 
-      let space = 0, tfa = 0, hum = 0;
+      let space = 0, hum = 0;
       for (const room of entity.rooms) {
         const wm = computeDetailed(room, envelopeElements[room.id] || [], winDc, effProject);
         space += wm.designHeatingLoad;
         hum   += wm.hHumLoad;
-        tfa   += Number((room as any)._calcTfaWinterHeatingBTUH) || 0;
+        const t = Number((room as any)._calcTfaWinterHeatingBTUH) || 0;
+        if (t > 0) tfaHeatByRoom.set(room.id, { room, duty: t });
       }
       const plant = resolveHeatingPlant(entity.id, entity.rooms.map((r: any) => r.id), effectiveEquipSystems);
-      const required = space + tfa + hum;
+      const tfa = 0; // scheduled against the DOAS below, never against the recirc AHU
+      const required = space + hum;
       const status = plant.installedBtuh == null
         ? 'NOT SELECTED'
         : plant.installedBtuh >= required ? 'OK' : 'Undersized';
@@ -2060,6 +2072,38 @@ export const generatePDFReport = (
         status,
       ]);
       pSpace += space; pTfa += tfa; pHum += hum; pInst += plant.installedBtuh ?? 0;
+    }
+
+    // ── DOAS / TFA units — the fresh-air temper coil lives HERE, not on the recirc AHU ──
+    // Grouped by the unit that actually serves each room (resolveRoomTfa), so a project with
+    // more than one DOAS gets one row each rather than a single lumped figure.
+    if (tfaHeatByRoom.size > 0) {
+      const doasList = (effectiveEquipSystems ?? []).filter((s: any) => s?.type === 'DOAS');
+      const byDoas = new Map<string, number>();
+      for (const { room, duty } of tfaHeatByRoom.values()) {
+        const doas = resolveRoomTfa(room, effectiveEquipSystems).doas;
+        const key = doas?.id ?? '__unassigned__';
+        byDoas.set(key, (byDoas.get(key) ?? 0) + duty);
+      }
+      for (const [doasId, duty] of byDoas) {
+        const sys: any = doasList.find((s: any) => s.id === doasId);
+        // A DOAS carries its heating duty on its own document, not on any zone's ahuConfig.
+        const kW = Number(sys?.ahuConfig?.heatingCapacityKW ?? sys?.heatingCapacityKW) || 0;
+        const installed = kW > 0 ? kW * 3412 : null;
+        const status = installed == null ? 'NOT SELECTED' : installed >= duty ? 'OK' : 'Undersized';
+        if (status !== 'OK') anyMissing = true;
+        hBody.push([
+          `${sys?.name ?? 'DOAS / TFA unit'}  (fresh-air coil)`,
+          '—',
+          n0(duty),
+          '—',
+          n0(duty),
+          kW > 0 ? `Fresh-air heating coil ${kW} kW` : 'Fresh-air heating coil',
+          installed == null ? '—' : n0(installed),
+          status,
+        ]);
+        pTfa += duty; pInst += installed ?? 0;
+      }
     }
 
     if (hBody.length > 0) {

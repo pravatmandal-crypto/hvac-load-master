@@ -5454,6 +5454,43 @@ export default function EquipmentSelection({
                                 className="mt-1 w-full text-sm border border-slate-200 dark:border-slate-600 rounded-md px-2 py-1.5 bg-white dark:bg-slate-800 dark:text-slate-200 font-mono focus:outline-none focus:ring-1 focus:ring-teal-400"
                               />
                             </label>
+                            {/* Winter fresh-air heating coil. This duty belongs to the DOAS, NOT to the
+                                recirc AHU — the DOAS is what conditions the outdoor air, and the AHU only
+                                ever sees space transmission + infiltration. Section 3B of the load report
+                                schedules them as separate rows and verifies this figure against the
+                                calculated OA temper duty. */}
+                            <label className="block">
+                              <span className="text-xs font-medium text-slate-500 dark:text-slate-400 inline-flex items-center gap-1">
+                                Heating Coil (kW)
+                                <span className="inline-flex cursor-help" title={
+                                    "Winter fresh-air heating coil on THIS DOAS unit — tempers outdoor air up to the winter supply setpoint.\n\n" +
+                                    "Belongs here, not on the recirculating AHU: the AHU carries only space transmission and infiltration.\n\n" +
+                                    "Leave blank until selected — the Heating Equipment Schedule reports NOT SELECTED rather than assuming a capacity."
+                                  }>
+                                  <Info className="w-3 h-3 text-slate-400 dark:text-slate-500" />
+                                </span>
+                              </span>
+                              <input
+                                type="number"
+                                min={0}
+                                step={0.1}
+                                key={`tfaHeatKW-${selectedSystem.id}-${(selectedSystem as any).heatingCapacityKW ?? ''}`}
+                                defaultValue={(selectedSystem as any).heatingCapacityKW ?? ''}
+                                placeholder="not selected"
+                                onBlur={e => {
+                                  const raw = e.target.value.trim();
+                                  const v = parseFloat(raw);
+                                  if (raw === '') {
+                                    void updateSystemField(selectedSystem.id, { heatingCapacityKW: deleteField() });
+                                  } else if (Number.isFinite(v) && v >= 0) {
+                                    void updateSystemField(selectedSystem.id, { heatingCapacityKW: v });
+                                  } else {
+                                    e.target.value = String((selectedSystem as any).heatingCapacityKW ?? '');
+                                  }
+                                }}
+                                className="mt-1 w-full text-sm border border-slate-200 dark:border-slate-600 rounded-md px-2 py-1.5 bg-white dark:bg-slate-800 dark:text-slate-200 font-mono focus:outline-none focus:ring-1 focus:ring-teal-400"
+                              />
+                            </label>
                             <label className="block">
                               <span className="text-xs font-medium text-slate-500 dark:text-slate-400 inline-flex items-center gap-1">
                                 Supply RH (%)
