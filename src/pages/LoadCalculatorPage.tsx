@@ -185,6 +185,15 @@ function mapProjectDoc(d: any): Project {
   const p: any = d.data();
   const data = p.data || {};
   return {
+    // Carry the raw document through FIRST, so a field nobody thought to list still
+    // round-trips. This used to be a pure allow-list: anything absent was silently dropped
+    // between Firestore and the app, and since the write itself succeeded it read as "it
+    // isn't saving" with nothing to debug. `specialConditions` was lost that way.
+    //
+    // Every explicit mapping below still overrides it, so defaults, the `data.*` reads and
+    // the Timestamp → Date conversions all keep winning. This only ADDS what would
+    // otherwise have been discarded — it changes no existing field.
+    ...p,
     id: d.id,
     name: p.name || '',
     location: p.location || '',
